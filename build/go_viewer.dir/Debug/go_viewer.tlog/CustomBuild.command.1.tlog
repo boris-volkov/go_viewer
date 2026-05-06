@@ -1,0 +1,10 @@
+^C:\USERS\BORIS\DOCUMENTS\GITHUB\CHESS_VIEWER\GO_VIEWER\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/boris/Documents/GitHub/chess_viewer/go_viewer -BC:/Users/boris/Documents/GitHub/chess_viewer/go_viewer/build --check-stamp-file C:/Users/boris/Documents/GitHub/chess_viewer/go_viewer/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

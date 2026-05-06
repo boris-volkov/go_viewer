@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\boris\Documents\GitHub\chess_viewer\go_viewer\build\CMakeFiles\8d2132c121578e6d0d03ae8b3ae9b2cc\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{2807788D-8CB7-359E-9716-4A5CF887CAD3}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
