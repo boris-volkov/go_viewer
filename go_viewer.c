@@ -19,6 +19,16 @@
 #include <SDL2/SDL.h>
 
 #define BOARD_SIZE 19
+
+// Logging function
+void log_message(const char *message) {
+    printf("%s\n", message);
+    FILE *log_fp = fopen("go_viewer.log", "a");
+    if (log_fp) {
+        fprintf(log_fp, "%s\n", message);
+        fclose(log_fp);
+    }
+}
 #define SCREEN_SIZE 800
 #define DEFAULT_GAMES_DIR "games/"
 #define MAX_MOVES 1000
@@ -154,7 +164,7 @@ int is_stone_in_selected_group(int r, int f);
 int adjust_move_delay(int delta_ms, Uint32 now);
 void board_to_screen(const BoardView *view, int board_r, int board_f, int *out_x, int *out_y);
 int parse_sgf_move(const char *move_str, int *out_r, int *out_f);
-int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves,
+int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves, int *colors,
                   char *black_name, size_t black_name_size,
                   char *white_name, size_t white_name_size,
                   char *result, size_t result_size);
@@ -196,7 +206,7 @@ void render_liberties(const BoardView *view) {
 }
 void draw_board();
 int animate_move(int r, int f, int is_black);
-int play_game(char moves[][MOVE_TEXT_LEN], int move_count, const char *result);
+int play_game(char moves[][MOVE_TEXT_LEN], int move_count, int *colors, const char *result);
 void render_speed_label(const BoardView *view);
 void render_help_overlay(const BoardView *view);
 void render_guess_score(const BoardView *view);
@@ -525,79 +535,135 @@ void remove_captured_stones(int skip_color, int skip_r, int skip_f, int placed_s
 }
 
 void get_group(int r, int f, int color, int visited[BOARD_SIZE][BOARD_SIZE], int *group_count, int group_r[], int group_f[]) {
+    // Iterative flood fill using a stack
+    int stack[BOARD_SIZE * BOARD_SIZE][2];
+    int stack_top = 0;
+
     if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE || visited[r][f] || board[r][f] != (color ? 1 : 2)) {
         return;
     }
 
-    visited[r][f] = 1;
-    group_r[*group_count] = r;
-    group_f[*group_count] = f;
-    (*group_count)++;
+    stack[stack_top][0] = r;
+    stack[stack_top][1] = f;
+    stack_top++;
 
-    // Check adjacent intersections
-    get_group(r - 1, f, color, visited, group_count, group_r, group_f);
-    get_group(r + 1, f, color, visited, group_count, group_r, group_f);
-    get_group(r, f - 1, color, visited, group_count, group_r, group_f);
-    get_group(r, f + 1, color, visited, group_count, group_r, group_f);
+    while (stack_top > 0) {
+        stack_top--;
+        int cr = stack[stack_top][0];
+        int cf = stack[stack_top][1];
+
+        if (visited[cr][cf]) continue;
+        visited[cr][cf] = 1;
+        group_r[*group_count] = cr;
+        group_f[*group_count] = cf;
+        (*group_count)++;
+
+        // Check adjacent intersections
+        int dirs[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+        for (int d = 0; d < 4; d++) {
+            int nr = cr + dirs[d][0];
+            int nf = cf + dirs[d][1];
+            if (nr >= 0 && nr < BOARD_SIZE && nf >= 0 && nf < BOARD_SIZE &&
+                !visited[nr][nf] && board[nr][nf] == (color ? 1 : 2)) {
+                stack[stack_top][0] = nr;
+                stack[stack_top][1] = nf;
+                stack_top++;
+            }
+        }
+    }
 }
 
 int has_liberties(int r, int f, int color, int visited[BOARD_SIZE][BOARD_SIZE]) {
-    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE || visited[r][f]) {
+    // Iterative flood fill to check for liberties
+    int stack[BOARD_SIZE * BOARD_SIZE][2];
+    int stack_top = 0;
+
+    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE || visited[r][f] || board[r][f] != (color ? 1 : 2)) {
         return 0;
     }
 
-    if (board[r][f] == 0) {
-        return 1; // Empty intersection = liberty
+    stack[stack_top][0] = r;
+    stack[stack_top][1] = f;
+    stack_top++;
+
+    while (stack_top > 0) {
+        stack_top--;
+        int cr = stack[stack_top][0];
+        int cf = stack[stack_top][1];
+
+        if (visited[cr][cf]) continue;
+        visited[cr][cf] = 1;
+
+        // Check adjacent intersections
+        int dirs[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+        for (int d = 0; d < 4; d++) {
+            int nr = cr + dirs[d][0];
+            int nf = cf + dirs[d][1];
+            if (nr >= 0 && nr < BOARD_SIZE && nf >= 0 && nf < BOARD_SIZE) {
+                if (board[nr][nf] == 0) {
+                    return 1; // Found liberty
+                }
+                if (board[nr][nf] == (color ? 1 : 2) && !visited[nr][nf]) {
+                    stack[stack_top][0] = nr;
+                    stack[stack_top][1] = nf;
+                    stack_top++;
+                }
+            }
+        }
     }
-
-    if (board[r][f] != (color ? 1 : 2)) {
-        return 0; // Opponent's stone
-    }
-
-    visited[r][f] = 1;
-
-    // Check adjacent intersections
-    if (has_liberties(r - 1, f, color, visited)) return 1;
-    if (has_liberties(r + 1, f, color, visited)) return 1;
-    if (has_liberties(r, f - 1, color, visited)) return 1;
-    if (has_liberties(r, f + 1, color, visited)) return 1;
 
     return 0;
 }
 
 void get_liberties(int r, int f, int color, int visited[BOARD_SIZE][BOARD_SIZE]) {
-    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE || visited[r][f]) {
+    // Iterative flood fill to find liberties
+    int stack[BOARD_SIZE * BOARD_SIZE][2];
+    int stack_top = 0;
+
+    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE || visited[r][f] || board[r][f] != (color ? 1 : 2)) {
         return;
     }
 
-    if (board[r][f] == 0) {
-        // Found a liberty - add it to the list if not already present
-        int already_present = 0;
-        for (int i = 0; i < liberty_count; i++) {
-            if (liberty_r[i] == r && liberty_f[i] == f) {
-                already_present = 1;
-                break;
+    stack[stack_top][0] = r;
+    stack[stack_top][1] = f;
+    stack_top++;
+
+    while (stack_top > 0) {
+        stack_top--;
+        int cr = stack[stack_top][0];
+        int cf = stack[stack_top][1];
+
+        if (visited[cr][cf]) continue;
+        visited[cr][cf] = 1;
+
+        // Check adjacent intersections
+        int dirs[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+        for (int d = 0; d < 4; d++) {
+            int nr = cr + dirs[d][0];
+            int nf = cf + dirs[d][1];
+            if (nr >= 0 && nr < BOARD_SIZE && nf >= 0 && nf < BOARD_SIZE) {
+                if (board[nr][nf] == 0) {
+                    // Found a liberty - add it to the list if not already present
+                    int already_present = 0;
+                    for (int i = 0; i < liberty_count; i++) {
+                        if (liberty_r[i] == nr && liberty_f[i] == nf) {
+                            already_present = 1;
+                            break;
+                        }
+                    }
+                    if (!already_present && liberty_count < BOARD_SIZE * BOARD_SIZE) {
+                        liberty_r[liberty_count] = nr;
+                        liberty_f[liberty_count] = nf;
+                        liberty_count++;
+                    }
+                } else if (board[nr][nf] == (color ? 1 : 2) && !visited[nr][nf]) {
+                    stack[stack_top][0] = nr;
+                    stack[stack_top][1] = nf;
+                    stack_top++;
+                }
             }
         }
-        if (!already_present && liberty_count < BOARD_SIZE * BOARD_SIZE) {
-            liberty_r[liberty_count] = r;
-            liberty_f[liberty_count] = f;
-            liberty_count++;
-        }
-        return;
     }
-
-    if (board[r][f] != (color ? 1 : 2)) {
-        return; // Opponent's stone
-    }
-
-    visited[r][f] = 1;
-
-    // Check adjacent intersections
-    get_liberties(r - 1, f, color, visited);
-    get_liberties(r + 1, f, color, visited);
-    get_liberties(r, f - 1, color, visited);
-    get_liberties(r, f + 1, color, visited);
 }
 
 static const Glyph font_glyphs[] = {
@@ -1661,8 +1727,23 @@ void draw_board() {
 }
 
 int animate_move(int r, int f, int is_black) {
+    char log_buf[256];
+    snprintf(log_buf, sizeof(log_buf), "animate_move: r=%d, f=%d, is_black=%d", r, f, is_black);
+    log_message(log_buf);
+
+    // Bounds checking
+    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE) {
+        log_message("animate_move: Invalid position - out of bounds");
+        return 1; // Invalid position
+    }
+    if (board[r][f] != 0) {
+        log_message("animate_move: Position already occupied");
+        return 1; // Position already occupied
+    }
+
     // Check for suicide before placing
     if (would_be_suicide(r, f, is_black)) {
+        log_message("animate_move: Suicide move not allowed");
         // Suicide not allowed - don't place the stone
         return 1; // Indicate error
     }
@@ -1673,6 +1754,7 @@ int animate_move(int r, int f, int is_black) {
     // Save the board state after the move
     save_board_state();
     draw_board();
+    log_message("animate_move: Move completed successfully");
     return 0;
 }
 
@@ -1686,7 +1768,7 @@ int parse_sgf_move(const char *move_str, int *out_r, int *out_f) {
     return 1;
 }
 
-int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves,
+int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves, int *colors,
                   char *black_name, size_t black_name_size,
                   char *white_name, size_t white_name_size,
                   char *result, size_t result_size) {
@@ -1713,6 +1795,7 @@ int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves,
                     if (len >= MOVE_TEXT_LEN) len = MOVE_TEXT_LEN - 1;
                     memcpy(moves[move_count], p, len);
                     moves[move_count][len] = '\0';
+                    colors[move_count] = 1; // Black
                     move_count++;
                 }
             } else if (*p == ';' && *(p + 1) == 'W' && *(p + 2) == '[') {
@@ -1723,6 +1806,7 @@ int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves,
                     if (len >= MOVE_TEXT_LEN) len = MOVE_TEXT_LEN - 1;
                     memcpy(moves[move_count], p, len);
                     moves[move_count][len] = '\0';
+                    colors[move_count] = 0; // White
                     move_count++;
                 }
             }
@@ -1793,7 +1877,7 @@ int load_sgf_game(const char *path, char moves[][MOVE_TEXT_LEN], int max_moves,
     return move_count;
 }
 
-int play_game(char moves[][MOVE_TEXT_LEN], int move_count, const char *result) {
+int play_game(char moves[][MOVE_TEXT_LEN], int move_count, int *colors, const char *result) {
     // Store the game result for display
     if (result && result[0]) {
         strncpy(result_message, result, sizeof(result_message) - 1);
@@ -1821,7 +1905,7 @@ int play_game(char moves[][MOVE_TEXT_LEN], int move_count, const char *result) {
     while (!quit) {
         Uint32 loop_now = SDL_GetTicks();
         update_cursor_auto_hide(loop_now);
-        turn_is_black = (index % 2 == 0);
+        turn_is_black = colors[index];
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             note_mouse_activity_event(&e);
@@ -1934,7 +2018,7 @@ int play_game(char moves[][MOVE_TEXT_LEN], int move_count, const char *result) {
                                 break;
                             }
                             index++;
-                            turn_is_black = (index % 2 == 0);
+                            turn_is_black = colors[index];
                         }
                     }
                 }
@@ -2103,7 +2187,7 @@ int play_game(char moves[][MOVE_TEXT_LEN], int move_count, const char *result) {
                     break;
                 }
                 index++;
-                turn_is_black = (index % 2 == 0);
+                            turn_is_black = colors[index];
                 last_move_tick = SDL_GetTicks();
             }
             guess_pending = 0;
@@ -2131,13 +2215,19 @@ int play_game(char moves[][MOVE_TEXT_LEN], int move_count, const char *result) {
                 int r, f;
                 if (parse_sgf_move(moves[index], &r, &f)) {
                     if (animate_move(r, f, turn_is_black)) {
-                        quit = 1;
-                        break;
+                        // Invalid move - skip it and continue
+                        printf("Invalid move skipped: %s\n", moves[index]);
+                        index++;
+                        turn_is_black = colors[index];
+                    } else {
+                        index++;
+                        turn_is_black = colors[index];
                     }
-                    index++;
-                    turn_is_black = (index % 2 == 0);
                 } else {
                     printf("Failed to parse move: %s\n", moves[index]);
+                    // Skip invalid move
+                    index++;
+                    turn_is_black = colors[index];
                 }
                 last_move_tick = now;
             }
@@ -2450,6 +2540,17 @@ int main(int argc, char *argv[]) {
     (void)argv;
     games_dir_root = DEFAULT_GAMES_DIR;
 
+    // For testing: load test.sgf if it exists
+    const char *test_path = "test.sgf";
+    FILE *test_fp = fopen(test_path, "r");
+    if (test_fp) {
+        fclose(test_fp);
+        forced_sgf_path = copy_string(test_path);
+        log_message("Found test.sgf, will load it");
+    } else {
+        log_message("test.sgf not found, loading random game");
+    }
+
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         printf("SDL init error: %s\n", SDL_GetError());
@@ -2521,8 +2622,9 @@ int main(int argc, char *argv[]) {
         }
 
         char moves[MAX_MOVES][MOVE_TEXT_LEN];
+        int colors[MAX_MOVES];
         char result[RESULT_LEN];
-        int move_count = load_sgf_game(path, moves, MAX_MOVES,
+        int move_count = load_sgf_game(path, moves, MAX_MOVES, colors,
                                        current_black_name, sizeof(current_black_name),
                                        current_white_name, sizeof(current_white_name),
                                        result, sizeof(result));
@@ -2534,7 +2636,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        int stop = play_game(moves, move_count, result);
+        int stop = play_game(moves, move_count, colors, result);
         if (stop && game_nav_request == GAME_NAV_NONE) {
             quit = 1;
             break;
@@ -2543,8 +2645,9 @@ int main(int argc, char *argv[]) {
             // Handle catalog selection - load the selected game
             if (forced_sgf_path) {
                 char moves[MAX_MOVES][MOVE_TEXT_LEN];
+                int colors[MAX_MOVES];
                 char result[RESULT_LEN];
-                int move_count = load_sgf_game(forced_sgf_path, moves, MAX_MOVES,
+                int move_count = load_sgf_game(forced_sgf_path, moves, MAX_MOVES, colors,
                                                current_black_name, sizeof(current_black_name),
                                                current_white_name, sizeof(current_white_name),
                                                result, sizeof(result));
@@ -2552,7 +2655,7 @@ int main(int argc, char *argv[]) {
                 forced_sgf_path = NULL;
 
                 if (move_count > 0) {
-                    int stop = play_game(moves, move_count, result);
+                    int stop = play_game(moves, move_count, colors, result);
                     if (stop && game_nav_request == GAME_NAV_NONE) {
                         quit = 1;
                         break;
