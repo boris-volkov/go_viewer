@@ -1,21 +1,21 @@
 # Go Viewer
 
-A minimal Go (Baduk) game viewer using SDL2, similar to the chess viewer but for Go games.
+A Go game viewer for studying professional games. (SDL2)
 
 ## Features
 
-- **19x19 Go board** with traditional grid lines and star points (hoshi)
-- **SGF file support** - loads games from Smart Game Format files
-- **Animated stone placement** with fade-in effects
-- **Game playback controls**:
+- SGF file support for loading games
+- Animated stone placement
+- Playback controls:
   - Space: Pause/Resume
-  - Left/Right arrows: Step through moves when paused
+  - Left/Right arrows: Step through moves
   - Up/Down arrows: Adjust playback speed
-- **Analysis mode** (A key): Manually place stones on the board
-- **Guess mode** (G key): Try to predict the next move
-- **Catalog browser** (C key): Browse and select SGF files
-- **Player names** and game results display
-- **Fullscreen display** optimized for viewing
+- Analysis mode (A key): Place stones manually
+- Guess mode (G key): Predict next moves
+- Chain analysis (U key): Show stone groups
+- Catalog browser (C key): Browse game files
+- Player names and game results
+- Fullscreen display
 
 ## Building
 
@@ -62,7 +62,6 @@ make
 - **R**: Restart current game
 - **C**: Open catalog to browse games
 - **ESC**: Toggle help overlay
-- **F**: (Reserved for future features)
 
 ### Playback
 - **Space**: Pause/Resume playback
@@ -72,11 +71,38 @@ make
 ### Special Modes
 - **A**: Toggle analysis mode (place stones manually)
 - **G**: Toggle guess mode (predict next moves)
+- **U**: Show chains/units
 
 ### Catalog Browser
 - **Up/Down**: Navigate through files
 - **Enter**: Select and load a game
 - **ESC**: Close catalog
+
+## Special Modes
+
+### Analysis Mode (A key)
+Analysis mode lets you explore variations by placing stones manually on the board.
+
+- Press **A** to enter analysis mode
+- **Left click** on empty intersections to place stones
+- **Right click** on stones to remove them
+- **Hold B** while clicking to force black stones
+- **Hold W** while clicking to force white stones
+- **Left click** on existing stones to show/hide their liberties (dots)
+- Press **A** again to exit analysis mode
+
+Analysis mode follows Go rules - you cannot place stones that would be suicide moves or on occupied positions.
+
+### Guess Mode (G key)
+Guess mode tests your skills by challenging you to predict the next move.
+
+- Press **G** to enter guess mode
+- The game pauses and shows the current position
+- **Left click** on an empty intersection to guess where the next stone goes
+- If correct: you get a point and the move plays
+- If wrong: you lose a point and the correct move plays
+- Your score is shown in the bottom-left corner
+- Press **G** again to exit guess mode
 
 ## File Format
 
@@ -98,22 +124,6 @@ The viewer reads Go games in SGF (Smart Game Format). Example:
 ;B[hk];W[rl];B[rc];W[jc];B[jd];W[kl];B[oi];W[pi])
 ```
 
-## Stone Rendering
-
-Stones are rendered as pixel-perfect circles directly in the viewer using the same resolution as the font. No external image files are required. The stones have a subtle fade-in animation when placed and can be enhanced with shading effects in future updates.
-
 ## Game Data
 
 Place your SGF files in the `games/` directory. The viewer will automatically discover and load them. You can organize games in subdirectories - the catalog browser will show them all.
-
-## Similarities to Chess Viewer
-
-This Go viewer is designed with the same interface philosophy as the chess viewer:
-- Minimal, distraction-free design
-- Smooth animations and transitions
-- Comprehensive keyboard controls
-- Analysis and guess modes for learning
-- Catalog system for game selection
-- Cross-platform compatibility
-
-Enjoy exploring Go games with the Go Viewer!
