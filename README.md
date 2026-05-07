@@ -2,6 +2,8 @@
 
 A Go game viewer for studying professional games. (SDL2)
 
+![Go Viewer Screenshot](screnshot.png)
+
 ## Features
 
 - SGF file support for loading games
