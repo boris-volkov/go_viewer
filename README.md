@@ -2,7 +2,7 @@
 
 A Go game viewer for studying professional games, written in C++ with SDL2.
 
-![Go Viewer Screenshot](screnshot.png)
+![Go Viewer Screenshot](screenshot.png)
 
 ## Building
 

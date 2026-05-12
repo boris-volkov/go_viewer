@@ -55,4 +55,16 @@ dkms.conf
 *.dwo
 
 # Log files
-go_viewer.log
+*.log
+
+# Claude Code worktrees
+.claude/
+
+# Build output
+build/
+build2/
+build_cpp/
+
+# Compiled executables (no extension = Linux/macOS binary)
+go_viewer
+go
