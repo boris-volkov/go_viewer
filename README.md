@@ -1,131 +1,110 @@
 # Go Viewer
 
-A Go game viewer for studying professional games. (SDL2)
+A Go game viewer for studying professional games, written in C++ with SDL2.
 
 ![Go Viewer Screenshot](screnshot.png)
 
-## Features
-
-- SGF file support for loading games
-- Animated stone placement
-- Playback controls:
-  - Space: Pause/Resume
-  - Left/Right arrows: Step through moves
-  - Up/Down arrows: Adjust playback speed
-- Analysis mode (A key): Place stones manually
-- Guess mode (G key): Predict next moves
-- Chain analysis (U key): Show stone groups
-- Catalog browser (C key): Browse game files
-- Player names and game results
-- Fullscreen display
-
 ## Building
 
-### Prerequisites
+### Linux (Arch / Debian / Fedora)
 
-- SDL2 development libraries
-- CMake (optional, for the provided CMakeLists.txt)
-
-### Windows (MinGW)
-
+**Arch Linux**
 ```bash
-gcc go_viewer.c -o go_viewer.exe -lmingw32 -lSDL2main -lSDL2
+sudo pacman -S sdl2 cmake base-devel
+cmake -B build && cmake --build build --target go_viewer
+./build/go_viewer
 ```
 
-### Linux/Mac
-
+**Debian / Ubuntu**
 ```bash
-gcc go_viewer.c -o go_viewer -lSDL2 -lm
+sudo apt install libsdl2-dev cmake build-essential
+cmake -B build && cmake --build build --target go_viewer
+./build/go_viewer
 ```
 
-### CMake (cross-platform)
+**Fedora**
+```bash
+sudo dnf install SDL2-devel cmake gcc-c++
+cmake -B build && cmake --build build --target go_viewer
+./build/go_viewer
+```
+
+### macOS (Homebrew)
 
 ```bash
-cd go_viewer
-mkdir build
-cd build
-cmake ..
-make
+brew install sdl2 cmake
+cmake -B build && cmake --build build --target go_viewer
+./build/go_viewer
 ```
+
+### Windows (MSYS2 / MinGW64)
+
+1. Install [MSYS2](https://www.msys2.org/) and open the **MSYS2 MinGW64** shell.
+2. Install dependencies:
+```bash
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkg-config
+```
+3. Build (direct g++ invocation is more reliable than CMake on MSYS2):
+```bash
+export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
+export TEMP="/tmp" TMP="/tmp"
+g++ -std=c++17 -O2 $(pkg-config --cflags sdl2) \
+    main.cpp go_rules.cpp game_state.cpp analysis_state.cpp catalog.cpp renderer.cpp \
+    $(pkg-config --libs sdl2) -o go_viewer.exe
+```
+4. Copy `SDL2.dll` next to the executable so it can run outside the MSYS2 shell:
+```bash
+cp /c/msys64/mingw64/bin/SDL2.dll .
+```
+5. Run: `./go_viewer.exe`
 
 ## Usage
 
-1. Place SGF files in the `go_viewer/games/` directory
-2. Run the executable: `./go_viewer` (Linux/Mac) or `go_viewer.exe` (Windows)
-3. The viewer will automatically load and play a random game
-4. Use the controls to navigate through the game
+1. Place `.sgf` files in a `games/` folder next to the executable.
+   You can organise them in subdirectories — the catalog browser handles them.
+2. Run the executable.  It picks a random game on startup.
+3. Press **ESC** at any time to toggle the in-app help overlay.
 
 ## Controls
 
-### General
-- **Q**: Quit the application
-- **N**: Load next random game
-- **P**: Load previous game (if available)
-- **R**: Restart current game
-- **C**: Open catalog to browse games
-- **ESC**: Toggle help overlay
+| Key | Action |
+|-----|--------|
+| **Q** | Quit |
+| **N** | Next game |
+| **R** | Restart current game |
+| **C** | Open catalog browser |
+| **ESC** | Toggle help overlay |
+| **Up / Down** | Faster / slower auto-playback |
+| **Left / Right** | Step back / forward one move |
 
-### Playback
-- **Space**: Pause/Resume playback
-- **Left/Right** (when paused): Step backward/forward through moves
-- **Up/Down**: Increase/Decrease playback speed
+### Modes
 
-### Special Modes
-- **A**: Toggle analysis mode (place stones manually)
-- **G**: Toggle guess mode (predict next moves)
-- **U**: Show chains/units
+| Key | Mode |
+|-----|------|
+| **Space / A** | Analysis mode — place and remove stones freely |
+| **G** | Guess mode — predict each move; scored ±1 per guess |
+| **P** | Play mode — two players on an empty board |
+| **T** | Territory drill — estimate which marked territory is larger |
+| **U** | Toggle chain-connection lines |
 
-### Catalog Browser
-- **Up/Down**: Navigate through files
-- **Enter**: Select and load a game
-- **ESC**: Close catalog
+### Analysis mode
+- **Left-click empty** — place a stone (alternates black/white)
+- **Hold B / W** while clicking — force black or white
+- **Left-click stone** — show / hide its chain's liberties
+- **Right-click stone** — remove it
 
-## Special Modes
+### Catalog browser
+- **Up / Down** — navigate; **Enter** — open; **ESC** — close
 
-### Analysis Mode (A key)
-Analysis mode lets you explore variations by placing stones manually on the board.
+## Source files
 
-- Press **A** to enter analysis mode
-- **Left click** on empty intersections to place stones
-- **Right click** on stones to remove them
-- **Hold B** while clicking to force black stones
-- **Hold W** while clicking to force white stones
-- **Left click** on existing stones to show/hide their liberties (dots)
-- Press **A** again to exit analysis mode
-
-Analysis mode follows Go rules - you cannot place stones that would be suicide moves or on occupied positions.
-
-### Guess Mode (G key)
-Guess mode tests your skills by challenging you to predict the next move.
-
-- Press **G** to enter guess mode
-- The game pauses and shows the current position
-- **Left click** on an empty intersection to guess where the next stone goes
-- If correct: you get a point and the move plays
-- If wrong: you lose a point and the correct move plays
-- Your score is shown in the bottom-left corner
-- Press **G** again to exit guess mode
-
-## File Format
-
-The viewer reads Go games in SGF (Smart Game Format). Example:
-
-```
-(;EV[2nd Tengen]RO[1]PB[Tainaka Shin]BR[9p]PW[Yoshida Yoichi]WR[8p]KM[5.5]RE[W+R]DT[1976-02-19]PC[Kansai Ki-in]
-;B[qd];W[dd];B[pp];W[od];B[dp];W[cn];B[fp];W[eo];B[cp];W[dj]
-;B[mc];W[ne];B[me];W[mf];B[md];W[pc];B[lf];W[ng];B[qg];W[lg]
-;B[kf];W[gc];B[kg];W[lh];B[of];W[nf];B[kh];W[li];B[cd];W[ce]
-;B[be];W[de];B[bd];W[bf];B[dc];W[ec];B[db];W[cg];B[eb];W[fb]
-;B[ic];W[bb];B[ed];W[fc];B[cb];W[fe];B[qj];W[nq];B[em];W[en]
-;B[gq];W[go];B[cm];W[dm];B[dl];W[dn];B[ej];W[bm];B[di];W[cl]
-;B[ef];W[ee];B[jj];W[qc];B[iq];W[qn];B[np];W[mp];B[oq];W[no]
-;B[op];W[jq];B[mq];W[ir];B[hq];W[lp];B[qo];W[pn];B[re];W[ei]
-;B[fj];W[eh];B[oo];W[on];B[nn];W[mo];B[jp];W[kp];B[jr];W[kr]
-;B[kq];W[lq];B[nr];W[jq];B[nm];W[pk];B[kq];W[lm];B[jq];W[mr]
-;B[qk];W[ql];B[pj];W[ok];B[ro];W[hj];B[nk];W[oj];B[ll];W[ml]
-;B[hk];W[rl];B[rc];W[jc];B[jd];W[kl];B[oi];W[pi])
-```
-
-## Game Data
-
-Place your SGF files in the `games/` directory. The viewer will automatically discover and load them. You can organize games in subdirectories - the catalog browser will show them all.
+| File | Purpose |
+|------|---------|
+| `go_viewer.hpp` | Shared constants and types |
+| `go_rules.cpp/hpp` | Go rules (capture, liberty counting, suicide check) |
+| `game_state.cpp/hpp` | Game state and snapshot history |
+| `analysis_state.cpp/hpp` | Free-placement analysis board |
+| `catalog.cpp/hpp` | SGF file browser |
+| `renderer.cpp/hpp` | All SDL2 rendering |
+| `main.cpp` | App loop, input handling, drill logic |
+| `CMakeLists.txt` | CMake build (Linux / macOS / MSVC) |
