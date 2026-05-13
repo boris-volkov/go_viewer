@@ -174,7 +174,7 @@ static TerritoryProblem generate_territory_problem() {
                         int nr=r+d[0], nc=c+d[1];
                         if (nr<0||nr>=BOARD_SIZE||nc<0||nc>=BOARD_SIZE) continue;
                         if (!wblob[nr][nc] && prob.board[nr][nc] == 0)
-                            prob.board[nr][nc] = -1;
+                            prob.board[nr][nc] = 2;
                     }
                 }
             }
@@ -221,7 +221,7 @@ static TerritoryProblem generate_territory_problem() {
         };
 
         add_corner_fills(bblob, 1);
-        add_corner_fills(wblob, -1);
+        add_corner_fills(wblob, 2);
 
         // Scatter interior stones (same colour) to reduce apparent territory
         for (int r = 0; r < BOARD_SIZE; r++) {
@@ -229,7 +229,7 @@ static TerritoryProblem generate_territory_problem() {
                 if (bblob[r][c] && prob.board[r][c] == 0 && rand() % 5 == 0)
                     prob.board[r][c] = 1;
                 if (wblob[r][c] && prob.board[r][c] == 0 && rand() % 5 == 0)
-                    prob.board[r][c] = -1;
+                    prob.board[r][c] = 2;
             }
         }
 
@@ -870,8 +870,8 @@ bool App::play_current_game() {
         if (guess_pending && game_index < sgf.move_count) {
             int er, ef;
             if (parse_sgf_move(sgf.moves[game_index], er, ef)) {
-                if (er == guess_r && ef == guess_f) guess_score++;
-                else                                guess_score--;
+                if (er == guess_r && ef == guess_f) guess_score += 5;
+                else                                guess_score -= 5;
                 bool is_black = (sgf.colors[game_index] == 1);
                 animate_move(er, ef, is_black);
                 game_index++;

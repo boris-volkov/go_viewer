@@ -354,30 +354,13 @@ void Renderer::render_guess_score(const BoardView& view, bool guess_mode, int sc
     snprintf(buf, sizeof(buf), "Score: %d", score);
     int scale  = (view.square >= 30) ? 3 : 2;
     int margin = (view.square >= 30) ? 16 : 8;
-    int tw     = text_width_px(buf, scale);
     int th     = 7 * scale;
-    int swatch = (th < 16) ? th : 16;
-    int gap    = (scale >= 3) ? 6 : 4;
-    int x      = view.offset_x + margin;
-    int y      = view.offset_y + view.board_px - margin - th;
-    int sx     = x - gap - swatch;
-    int ls     = view.offset_x;
-    int rs     = view.screen_w - (view.offset_x + view.board_px);
-    int need   = tw + swatch + gap + margin * 2;
-    if (ls >= need) {
-        x = view.offset_x - margin - tw;
-        sx = x - gap - swatch;
-    } else if (rs >= need) {
-        sx = view.offset_x + view.board_px + margin;
-        x  = sx + swatch + gap;
-    } else if (view.offset_y >= th + margin * 2) {
-        sx = view.offset_x + margin;
-        x  = sx + swatch + gap;
-        y  = view.offset_y - margin - th;
-    }
-    if (y < view.offset_y + margin) y = view.offset_y + margin;
-    (void)sx;
-    SDL_Color c = {255, 255, 255, 255};
+    int gap    = scale + 2;
+    // Render just below the "GUESS MODE" label (same left-aligned x, one line down)
+    int tw_mode = text_width_px("GUESS MODE", scale);
+    int x = view.offset_x - margin - tw_mode;
+    int y = view.offset_y + margin + th + gap;
+    SDL_Color c = {200, 200, 200, 255};
     draw_text(x, y, scale, buf, c);
 }
 
