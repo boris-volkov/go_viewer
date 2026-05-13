@@ -457,8 +457,9 @@ void App::sync_cursor() {
         for (int i = 0; i < 2; i++) {
             if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
         }
-        stone_cursors[0] = create_stone_cursor(false, view.square);
-        stone_cursors[1] = create_stone_cursor(true,  view.square);
+        int csz = std::min(view.square, 56); // cap so it doesn't look huge on 4K
+        stone_cursors[0] = create_stone_cursor(false, csz);
+        stone_cursors[1] = create_stone_cursor(true,  csz);
         cursor_square = view.square;
     }
 
