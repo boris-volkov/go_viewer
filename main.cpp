@@ -650,6 +650,16 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         return;
     }
 
+    if (key == SDLK_x && in_analysis()) {
+        memset(analysis->board, 0, sizeof(analysis->board));
+        analysis->black_prisoners = 0;
+        analysis->white_prisoners = 0;
+        game.liberty_count = 0;
+        game.selected_group_count = 0;
+        draw_board();
+        return;
+    }
+
     if (!guess_mode) {
         if (key == SDLK_LEFT && game_index > 0) {
             if (in_analysis()) exit_analysis();

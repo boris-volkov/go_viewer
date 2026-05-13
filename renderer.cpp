@@ -496,6 +496,7 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
         {"CLICK",      "PLACE STONE"},
         {"HOLD B/W",   "FORCE COLOR"},
         {"R.CLICK",    "REMOVE STONE"},
+        {"X",          "CLEAR BOARD"},
         {"",           ""},
         {nullptr,      "CATALOG"},
         {"UP/DOWN",    "NAVIGATE"},
