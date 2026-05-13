@@ -263,6 +263,7 @@ private:
     SDL_Window*   window   = nullptr;
     SDL_Renderer* sdl_rend = nullptr;
     SDL_Cursor*   stone_cursors[2] = {nullptr, nullptr}; // [0]=white, [1]=black
+    int           cursor_square    = 0;                  // square size used when cursors were last built
 
     // Core state
     GameState                      game;
@@ -378,7 +379,7 @@ private:
     void note_mouse_activity_event(const SDL_Event& e);
     void update_cursor_auto_hide(Uint32 now);
 
-    SDL_Cursor* create_stone_cursor(bool is_black);
+    SDL_Cursor* create_stone_cursor(bool is_black, int square);
 
     Renderer::DrawState make_draw_state() {
         const TerritoryProblem* tp = territory_problem.get();
@@ -421,9 +422,10 @@ private:
 // ---------------------------------------------------------------------------
 // SDL cursor
 
-SDL_Cursor* App::create_stone_cursor(bool is_black) {
-    const int sz = 32, mid = sz / 2;
-    const float radius = 13.0f;
+SDL_Cursor* App::create_stone_cursor(bool is_black, int square) {
+    const int sz     = square;
+    const int mid    = sz / 2;
+    const float radius = (float)(square / 2 - 2);
     SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, sz, sz, 32, SDL_PIXELFORMAT_RGBA32);
     if (!surf) return nullptr;
     if (SDL_LockSurface(surf) != 0) { SDL_FreeSurface(surf); return nullptr; }
@@ -449,6 +451,17 @@ SDL_Cursor* App::create_stone_cursor(bool is_black) {
 }
 
 void App::sync_cursor() {
+    // Rebuild cursors if the board square size changed (e.g. window resize or different monitor)
+    BoardView view; renderer->get_board_view(view);
+    if (view.square != cursor_square && view.square > 0) {
+        for (int i = 0; i < 2; i++) {
+            if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
+        }
+        stone_cursors[0] = create_stone_cursor(false, view.square);
+        stone_cursors[1] = create_stone_cursor(true,  view.square);
+        cursor_square = view.square;
+    }
+
     if ((in_analysis() || game_mode || guess_mode) && cursor_visible) {
         const Uint8* kb = SDL_GetKeyboardState(nullptr);
         int is_black;
@@ -508,8 +521,6 @@ bool App::init() {
                                   SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!window || !sdl_rend) return false;
     renderer = new Renderer(sdl_rend);
-    stone_cursors[0] = create_stone_cursor(false); // white
-    stone_cursors[1] = create_stone_cursor(true);  // black
     set_cursor_visible(true);
     note_mouse_activity(SDL_GetTicks());
     srand((unsigned int)time(nullptr));
