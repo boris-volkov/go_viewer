@@ -11,6 +11,7 @@
 #include <cstring>
 #include <ctime>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -575,7 +576,7 @@ bool App::init() {
     renderer = new Renderer(sdl_rend);
     set_cursor_visible(true);
     note_mouse_activity(SDL_GetTicks());
-    srand((unsigned int)time(nullptr));
+    srand(std::random_device{}());
     return true;
 }
 
