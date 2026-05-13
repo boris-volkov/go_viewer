@@ -465,11 +465,12 @@ SDL_Cursor* App::create_cross_cursor(int square) {
     Uint32  shadow = SDL_MapRGBA(surf->format, 0, 0, 0, 140);
     // Clear to transparent
     for (int i = 0; i < sz * sz; i++) px[i] = transp;
-    // Arms extend from edge to a small gap around the centre
-    int gap = std::max(1, sz / 12);
+    // Arms extend from an outer margin to a small gap around the centre
+    int gap    = std::max(1, sz / 12);
+    int margin = sz / 8;   // outer end cut-off — makes arms 3/4 length
     // Draw shadow (offset 1px down-right) then yellow on top
     auto draw_cross = [&](int ox, int oy, Uint32 col) {
-        for (int i = 0; i < sz; i++) {
+        for (int i = margin; i < sz - margin; i++) {
             // horizontal arm
             if (i < mid - gap || i > mid + gap) {
                 int px_x = i + ox, px_y = mid + oy;
