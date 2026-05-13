@@ -453,7 +453,7 @@ void Renderer::render_game_date(const BoardView& view, const std::string& date) 
     int tw     = text_width_px(year, scale);
     // Primary: left of board, sitting comfortably above the bottom
     int x = view.offset_x - margin - tw;
-    int y = view.offset_y + view.board_px - th - margin * 4;
+    int y = view.offset_y + view.board_px - margin - th;
     // Fallback: below the board left-aligned (only on non-widescreen layouts)
     if (x < 0) {
         x = view.offset_x;
