@@ -670,7 +670,7 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     SDL_RenderFillRect(sdl, &board_rect);
 
     // Grid lines
-    SDL_Color grid_color = {0, 0, 0, 255};
+    SDL_Color grid_color = {28, 35, 45, 255};  // dark blue-gray, same family as board
     int normal_t   = (view.square >= 30) ? 2 : 1;
     int boundary_t = normal_t * 2;
     int boundary_idx[2] = {0, BOARD_SIZE - 1};
