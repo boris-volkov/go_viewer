@@ -444,19 +444,20 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
 
 void Renderer::render_game_date(const BoardView& view, const std::string& date) {
     if (date.size() < 4) return;
-    // Show year only
     char year[5];
     memcpy(year, date.c_str(), 4);
     year[4] = '\0';
     int scale  = (view.square >= 30) ? 3 : 2;
     int margin = (view.square >= 30) ? 16 : 8;
     int th     = 7 * scale;
-    int x = view.offset_x;
-    int y = view.offset_y + view.board_px - th - margin / 2;
-    if (y + th > view.screen_h - margin) {
-        int tw = text_width_px(year, scale);
-        x = view.offset_x - margin - tw;
-        y = view.offset_y + view.board_px - th;
+    int tw     = text_width_px(year, scale);
+    // Primary: left of board, sitting comfortably above the bottom
+    int x = view.offset_x - margin - tw;
+    int y = view.offset_y + view.board_px - th - margin * 4;
+    // Fallback: below the board left-aligned (only on non-widescreen layouts)
+    if (x < 0) {
+        x = view.offset_x;
+        y = view.offset_y + view.board_px + margin / 2;
     }
     SDL_Color c = {120, 120, 120, 255};
     draw_text(x, y, scale, year, c);
