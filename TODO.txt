@@ -1,0 +1,10 @@
+1) the file names for the games are all over the place. would like to rename them to a standard format like 
+Lee_Sedol_vs_Yun_Hyunseok_2013.sgf based on what is in the sgf
+
+2) would like to display the date that the game was played, if available, to the bottom left of the board
+
+3) show the score for guess mode right below the text "guess mode" to the top left. correct guesses get 5 points.
+
+4) unit/chain mode only works for black pieces in the territory drills mode
+
+5) there is something wrong with the build file, left over from when this program was in the subdirectory of another program called the chess_viewer. something wrong with the directory path or something. 
