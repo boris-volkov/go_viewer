@@ -466,7 +466,7 @@ SDL_Cursor* App::create_cross_cursor(int square) {
     // Clear to transparent
     for (int i = 0; i < sz * sz; i++) px[i] = transp;
     // Arms extend from edge to a small gap around the centre
-    int gap = std::max(2, sz / 6);
+    int gap = std::max(1, sz / 12);
     // Draw shadow (offset 1px down-right) then yellow on top
     auto draw_cross = [&](int ox, int oy, Uint32 col) {
         for (int i = 0; i < sz; i++) {
