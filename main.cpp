@@ -263,6 +263,7 @@ private:
     SDL_Window*   window   = nullptr;
     SDL_Renderer* sdl_rend = nullptr;
     SDL_Cursor*   stone_cursors[2] = {nullptr, nullptr}; // [0]=white, [1]=black
+    SDL_Cursor*   cross_cursor     = nullptr;            // yellow crosshair — default cursor
     int           cursor_square    = 0;                  // square size used when cursors were last built
 
     // Core state
@@ -380,6 +381,7 @@ private:
     void update_cursor_auto_hide(Uint32 now);
 
     SDL_Cursor* create_stone_cursor(bool is_black, int square);
+    SDL_Cursor* create_cross_cursor(int square);
 
     Renderer::DrawState make_draw_state() {
         const TerritoryProblem* tp = territory_problem.get();
@@ -450,6 +452,46 @@ SDL_Cursor* App::create_stone_cursor(bool is_black, int square) {
     return c;
 }
 
+SDL_Cursor* App::create_cross_cursor(int square) {
+    const int sz  = square;
+    const int mid = sz / 2;
+    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, sz, sz, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!surf) return nullptr;
+    if (SDL_LockSurface(surf) != 0) { SDL_FreeSurface(surf); return nullptr; }
+    Uint32* px    = (Uint32*)surf->pixels;
+    int     pitch = surf->pitch / 4;
+    Uint32  transp = SDL_MapRGBA(surf->format, 0, 0, 0, 0);
+    Uint32  yellow = SDL_MapRGBA(surf->format, 255, 220, 50, 255);
+    Uint32  shadow = SDL_MapRGBA(surf->format, 0, 0, 0, 140);
+    // Clear to transparent
+    for (int i = 0; i < sz * sz; i++) px[i] = transp;
+    // Arms extend from edge to a small gap around the centre
+    int gap = std::max(2, sz / 6);
+    // Draw shadow (offset 1px down-right) then yellow on top
+    auto draw_cross = [&](int ox, int oy, Uint32 col) {
+        for (int i = 0; i < sz; i++) {
+            // horizontal arm
+            if (i < mid - gap || i > mid + gap) {
+                int px_x = i + ox, px_y = mid + oy;
+                if (px_x >= 0 && px_x < sz && px_y >= 0 && px_y < sz)
+                    px[px_y * pitch + px_x] = col;
+            }
+            // vertical arm
+            if (i < mid - gap || i > mid + gap) {
+                int px_x = mid + ox, px_y = i + oy;
+                if (px_x >= 0 && px_x < sz && px_y >= 0 && px_y < sz)
+                    px[px_y * pitch + px_x] = col;
+            }
+        }
+    };
+    draw_cross(1, 1, shadow);  // dark drop shadow
+    draw_cross(0, 0, yellow);  // yellow cross on top
+    SDL_UnlockSurface(surf);
+    SDL_Cursor* c = SDL_CreateColorCursor(surf, mid, mid);
+    SDL_FreeSurface(surf);
+    return c;
+}
+
 void App::sync_cursor() {
     // Rebuild cursors if the board square size changed (e.g. window resize or different monitor)
     BoardView view; renderer->get_board_view(view);
@@ -457,16 +499,19 @@ void App::sync_cursor() {
         for (int i = 0; i < 2; i++) {
             if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
         }
+        if (cross_cursor) { SDL_FreeCursor(cross_cursor); cross_cursor = nullptr; }
         // Windows scales custom cursor bitmaps by the integer DPI step (e.g. 2× at 175% DPI)
         // while SDL window content is scaled by the exact DPI factor (1.75×). Dividing by 2
         // compensates so the cursor appears the same visual size as the board stones.
         int csz = std::max(8, view.square / 2);
         stone_cursors[0] = create_stone_cursor(false, csz);
         stone_cursors[1] = create_stone_cursor(true,  csz);
+        cross_cursor      = create_cross_cursor(csz);
         cursor_square = view.square;
     }
 
     if ((in_analysis() || game_mode || guess_mode) && cursor_visible) {
+        // Stone placement modes: show a stone cursor matching whose turn it is
         const Uint8* kb = SDL_GetKeyboardState(nullptr);
         int is_black;
         if (in_analysis() && kb[SDL_SCANCODE_B])      is_black = 1;
@@ -475,8 +520,10 @@ void App::sync_cursor() {
         else                                          is_black = game.turn_is_black;
         SDL_Cursor* c = stone_cursors[is_black ? 1 : 0];
         if (c) SDL_SetCursor(c);
-    } else {
-        SDL_SetCursor(SDL_GetDefaultCursor());
+    } else if (cursor_visible) {
+        // Default: yellow crosshair
+        SDL_Cursor* c = cross_cursor ? cross_cursor : SDL_GetDefaultCursor();
+        SDL_SetCursor(c);
     }
 }
 
@@ -536,6 +583,7 @@ void App::cleanup() {
     for (int i = 0; i < 2; i++) {
         if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
     }
+    if (cross_cursor) { SDL_FreeCursor(cross_cursor); cross_cursor = nullptr; }
     if (sdl_rend) { SDL_DestroyRenderer(sdl_rend); sdl_rend = nullptr; }
     if (window)   { SDL_DestroyWindow(window);      window   = nullptr; }
     SDL_Quit();
