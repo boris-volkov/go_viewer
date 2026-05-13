@@ -457,14 +457,10 @@ void App::sync_cursor() {
         for (int i = 0; i < 2; i++) {
             if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
         }
-        // Cursors use logical pixels; the renderer uses physical pixels (SDL_GetRendererOutputSize).
-        // Divide by the DPI scale so the cursor matches the visual stone size on HiDPI screens.
-        int win_w = 1, win_h = 1;
-        SDL_GetWindowSize(window, &win_w, &win_h);
-        int out_w = 1;
-        SDL_GetRendererOutputSize(sdl_rend, &out_w, nullptr);
-        float dpi = (win_w > 0) ? (float)out_w / win_w : 1.0f;
-        int csz = std::max(8, (int)(view.square / dpi));
+        // Windows scales custom cursor bitmaps by the integer DPI step (e.g. 2× at 175% DPI)
+        // while SDL window content is scaled by the exact DPI factor (1.75×). Dividing by 2
+        // compensates so the cursor appears the same visual size as the board stones.
+        int csz = std::max(8, view.square / 2);
         stone_cursors[0] = create_stone_cursor(false, csz);
         stone_cursors[1] = create_stone_cursor(true,  csz);
         cursor_square = view.square;
