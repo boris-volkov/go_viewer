@@ -442,6 +442,24 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
     draw_text(tx, bot_y + th + line_gap, scale, wpstr, prisoner_color);
 }
 
+void Renderer::render_game_date(const BoardView& view, const std::string& date) {
+    if (date.empty()) return;
+    int scale  = (view.square >= 30) ? 2 : 1;
+    int margin = (view.square >= 30) ? 16 : 8;
+    int th     = 7 * scale;
+    // Below the board, left-aligned; fall back to left of board if no space below
+    int x = view.offset_x;
+    int y = view.offset_y + view.board_px + margin;
+    if (y + th > view.screen_h - margin) {
+        // not enough space below — place to the left of the board, near the bottom
+        int tw = text_width_px(date.c_str(), scale);
+        x = view.offset_x - margin - tw;
+        y = view.offset_y + view.board_px - th;
+    }
+    SDL_Color c = {140, 140, 140, 255};
+    draw_text(x, y, scale, date.c_str(), c);
+}
+
 void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
     if (!show_help) return;
 
@@ -719,6 +737,7 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
         render_speed_label(view, ds.move_delay_ms, ds.speed_message_until);
         render_guess_score(view, ds.guess_mode, ds.guess_score);
         render_result_message(view, ds);
+        render_game_date(view, ds.game_date);
     }
     render_mode_status(view, ds.analysis_mode, ds.game_mode, ds.guess_mode, ds.territory_drill, false);
     render_territory_overlay(view, ds);

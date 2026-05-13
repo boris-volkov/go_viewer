@@ -24,6 +24,7 @@ struct SgfGame {
     char  black_name[NAME_LEN]            = "Black";
     char  white_name[NAME_LEN]            = "White";
     char  result[RESULT_LEN]              = {};
+    char  date[32]                        = {};
 };
 
 static bool parse_sgf_move(const char* move_str, int& out_r, int& out_f) {
@@ -42,6 +43,7 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     g.black_name[0] = '\0';
     g.white_name[0] = '\0';
     g.result[0]    = '\0';
+    g.date[0]      = '\0';
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
         // Moves
@@ -89,6 +91,7 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
         extract("PW[", g.white_name, sizeof(g.white_name));
         if (!strstr(line, "PW[")) extract("pw[", g.white_name, sizeof(g.white_name));
         extract("RE[", g.result, sizeof(g.result));
+        extract("DT[", g.date,   sizeof(g.date));
     }
     fclose(fp);
     if (g.black_name[0] == '\0') strcpy(g.black_name, "Black");
@@ -289,6 +292,7 @@ private:
     Uint32 speed_message_until = 0;
     bool   suppress_present    = false;
     std::string result_message;
+    std::string game_date;
     std::string black_name, white_name;
     std::string games_dir;
     std::string forced_path;  // set by catalog selection
@@ -391,6 +395,7 @@ private:
             black_name,
             white_name,
             result_message,
+            game_date,
             move_delay_ms,
             speed_message_until,
             suppress_present,
@@ -780,6 +785,7 @@ std::string App::pick_next_file(NavRequest req) {
 
 bool App::play_current_game() {
     result_message = sgf.result;
+    game_date      = sgf.date;
     black_name     = sgf.black_name;
     white_name     = sgf.white_name;
 

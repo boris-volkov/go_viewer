@@ -25,6 +25,7 @@ public:
         const std::string&    black_name;
         const std::string&    white_name;
         const std::string&    result_message;
+        const std::string&    game_date;
         int   move_delay_ms          = MOVE_DELAY_MS;
         Uint32 speed_message_until   = 0;
         bool  suppress_present       = false;
@@ -60,6 +61,7 @@ private:
     void render_mode_status(const BoardView& view, bool analysis_mode, bool game_mode, bool guess_mode, bool territory_drill, bool paused);
     void render_territory_overlay(const BoardView& view, const DrawState& ds);
     void render_result_message(const BoardView& view, const DrawState& ds);
+    void render_game_date(const BoardView& view, const std::string& date);
     void render_help_overlay(const BoardView& view, bool show_help);
     void render_catalog_overlay(const BoardView& view, const Catalog& catalog);
 
