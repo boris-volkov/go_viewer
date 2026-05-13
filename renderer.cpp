@@ -658,7 +658,7 @@ void Renderer::draw_board(const DrawState& ds) {
 }
 
 void Renderer::render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds) {
-    SDL_SetRenderDrawColor(sdl, 50, 50, 50, 255);
+    SDL_SetRenderDrawColor(sdl, 52, 60, 72, 255);  // dark desaturated version of board colour
     SDL_RenderClear(sdl);
 
     // Board background colour varies by mode
