@@ -443,21 +443,23 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
 }
 
 void Renderer::render_game_date(const BoardView& view, const std::string& date) {
-    if (date.empty()) return;
-    int scale  = (view.square >= 30) ? 2 : 1;
+    if (date.size() < 4) return;
+    // Show year only
+    char year[5];
+    memcpy(year, date.c_str(), 4);
+    year[4] = '\0';
+    int scale  = (view.square >= 30) ? 3 : 2;
     int margin = (view.square >= 30) ? 16 : 8;
     int th     = 7 * scale;
-    // Below the board, left-aligned; fall back to left of board if no space below
     int x = view.offset_x;
     int y = view.offset_y + view.board_px + margin;
     if (y + th > view.screen_h - margin) {
-        // not enough space below — place to the left of the board, near the bottom
-        int tw = text_width_px(date.c_str(), scale);
+        int tw = text_width_px(year, scale);
         x = view.offset_x - margin - tw;
         y = view.offset_y + view.board_px - th;
     }
-    SDL_Color c = {140, 140, 140, 255};
-    draw_text(x, y, scale, date.c_str(), c);
+    SDL_Color c = {120, 120, 120, 255};
+    draw_text(x, y, scale, year, c);
 }
 
 void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
