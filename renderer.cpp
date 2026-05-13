@@ -452,7 +452,7 @@ void Renderer::render_game_date(const BoardView& view, const std::string& date) 
     int margin = (view.square >= 30) ? 16 : 8;
     int th     = 7 * scale;
     int x = view.offset_x;
-    int y = view.offset_y + view.board_px + margin / 2;
+    int y = view.offset_y + view.board_px - th - margin / 2;
     if (y + th > view.screen_h - margin) {
         int tw = text_width_px(year, scale);
         x = view.offset_x - margin - tw;
