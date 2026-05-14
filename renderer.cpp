@@ -778,10 +778,20 @@ void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds
     int sq = view.square > 0 ? view.square : 32;
 
     if (ds.cursor_type >= 2) {
-        // Stone cursor: opaque circle, same radius as board stones
+        // Stone cursor: filled circle with a yellow border ring
         int is_black = (ds.cursor_type == 3);
         int radius   = sq / 2 - 2;
         if (radius < 2) radius = 2;
+        // Yellow ring: 2px wide just outside the stone fill
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(sdl, 255, 220, 50, 255);
+        int outer = radius + 2;
+        for (int dy = -outer; dy <= outer; dy++)
+            for (int dx = -outer; dx <= outer; dx++) {
+                int d2 = dx*dx + dy*dy;
+                if (d2 <= outer*outer && d2 > radius*radius)
+                    SDL_RenderDrawPoint(sdl, cx+dx, cy+dy);
+            }
         draw_stone_at_px(cx, cy, radius, is_black, 255);
     } else {
         // Crosshair cursor: yellow with dark shadow, center gap, 3/4-length arms
