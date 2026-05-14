@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "palette.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -300,8 +301,7 @@ void Renderer::render_mode_status(const BoardView& view,
     int tw = text_width_px(txt, scale);
     int x  = view.offset_x - margin - tw;
     int y  = view.offset_y + margin;
-    SDL_Color c = {255, 255, 180, 255};
-    draw_text(x, y, scale, txt, c);
+    draw_text(x, y, scale, txt, Palette::ACCENT);
 }
 
 void Renderer::render_result_message(const BoardView& view, const DrawState& ds) {
@@ -315,8 +315,7 @@ void Renderer::render_result_message(const BoardView& view, const DrawState& ds)
     int x      = view.offset_x + view.board_px + margin;
     int y      = view.offset_y + (view.board_px - th) / 2;
     (void)tw;
-    SDL_Color c = {255, 255, 180, 255};
-    draw_text(x, y, scale, txt, c);
+    draw_text(x, y, scale, txt, Palette::ACCENT);
 }
 
 void Renderer::render_speed_label(const BoardView& view, int delay_ms, Uint32 until) {
@@ -342,10 +341,9 @@ void Renderer::render_speed_label(const BoardView& view, int delay_ms, Uint32 un
     int pad = (scale >= 3) ? 4 : 3;
     SDL_Rect bg = {x - pad, y - pad, tw + pad * 2, th + pad * 2};
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(sdl, 80, 80, 80, 180);
+    SDL_SetRenderDrawColor(sdl, Palette::OVERLAY_SPEED.r, Palette::OVERLAY_SPEED.g, Palette::OVERLAY_SPEED.b, Palette::OVERLAY_SPEED.a);
     SDL_RenderFillRect(sdl, &bg);
-    SDL_Color c = {255, 255, 255, 255};
-    draw_text(x, y, scale, buf, c);
+    draw_text(x, y, scale, buf, Palette::TEXT_WHITE);
 }
 
 void Renderer::render_guess_score(const BoardView& view, bool guess_mode, int score) {
@@ -360,8 +358,7 @@ void Renderer::render_guess_score(const BoardView& view, bool guess_mode, int sc
     int tw_mode = text_width_px("GUESS MODE", scale);
     int x = view.offset_x - margin - tw_mode;
     int y = view.offset_y + margin + th + gap;
-    SDL_Color c = {200, 200, 200, 255};
-    draw_text(x, y, scale, buf, c);
+    draw_text(x, y, scale, buf, Palette::TEXT_SECONDARY);
 }
 
 void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) {
@@ -411,8 +408,8 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
     int tx        = right_x0 + stone_dim + gap;
     int scx       = right_x0 + radius;
 
-    SDL_Color name_color     = {230, 230, 230, 255};
-    SDL_Color prisoner_color = {120, 120, 120, 255};
+    SDL_Color name_color     = Palette::TEXT_PRIMARY;
+    SDL_Color prisoner_color = Palette::TEXT_DIM;
 
     // Helper: draw a filled circle for the player stone
     auto draw_stone = [&](int cx, int cy, bool is_black) {
@@ -459,8 +456,7 @@ void Renderer::render_game_date(const BoardView& view, const std::string& date) 
         x = view.offset_x;
         y = view.offset_y + view.board_px + margin / 2;
     }
-    SDL_Color c = {120, 120, 120, 255};
-    draw_text(x, y, scale, year, c);
+    draw_text(x, y, scale, year, Palette::TEXT_DIM);
 }
 
 void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
@@ -534,13 +530,13 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
 
     SDL_Rect bg = {x, y, bw, bh};
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(sdl, 30, 30, 30, 210);
+    SDL_SetRenderDrawColor(sdl, Palette::OVERLAY_DARK.r, Palette::OVERLAY_DARK.g, Palette::OVERLAY_DARK.b, Palette::OVERLAY_DARK.a);
     SDL_RenderFillRect(sdl, &bg);
 
-    SDL_Color col_title  = {255, 255, 255, 255};
+    SDL_Color col_title  = Palette::TEXT_WHITE;
     SDL_Color col_header = {160, 160, 160, 255};
-    SDL_Color col_key    = {255, 220,  50, 255};
-    SDL_Color col_desc   = {200, 200, 200, 255};
+    SDL_Color col_key    = Palette::ACCENT;
+    SDL_Color col_desc   = Palette::TEXT_SECONDARY;
 
     int ty = y + pad;
     for (int i = 0; i < n; i++) {
@@ -592,12 +588,11 @@ void Renderer::render_catalog_overlay(const BoardView& view, const Catalog& cat)
     int by = (view.screen_h - bh) / 2;
     SDL_Rect bg = {bx, by, bw, bh};
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(sdl, 80, 80, 80, 190);
+    SDL_SetRenderDrawColor(sdl, Palette::OVERLAY_MID.r, Palette::OVERLAY_MID.g, Palette::OVERLAY_MID.b, Palette::OVERLAY_MID.a);
     SDL_RenderFillRect(sdl, &bg);
-    SDL_Color white = {255, 255, 255, 255};
     int tx = bx + pad;
     int ty = by + pad;
-    draw_text(tx, ty, scale, title, white);
+    draw_text(tx, ty, scale, title, Palette::TEXT_WHITE);
     ty += th + header_gap;
     for (int i = 0; i < max_lines; i++) {
         int ei = scroll + i;
@@ -608,10 +603,10 @@ void Renderer::render_catalog_overlay(const BoardView& view, const Catalog& cat)
         else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
         if (ei == idx) {
             SDL_Rect hi = {tx - 3, ty - 3, max_w + 6, th + 6};
-            SDL_SetRenderDrawColor(sdl, 40, 120, 255, 190);
+            SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g, Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
             SDL_RenderFillRect(sdl, &hi);
         }
-        draw_text(tx, ty, scale, lbl, white);
+        draw_text(tx, ty, scale, lbl, Palette::TEXT_WHITE);
         ty += line_h;
     }
 }
@@ -625,9 +620,9 @@ void Renderer::render_territory_overlay(const BoardView& view, const DrawState& 
     int tx     = view.offset_x + view.board_px + margin;
     int ty     = view.offset_y + view.board_px / 2 - lh * 2;
 
-    SDL_Color white  = {230, 230, 230, 255};
-    SDL_Color yellow = {255, 255, 100, 255};
-    SDL_Color green  = {100, 220, 100, 255};
+    SDL_Color white  = Palette::SCORE_TEXT;
+    SDL_Color yellow = Palette::ACCENT;
+    SDL_Color green  = Palette::SCORE_CORRECT;
     SDL_Color red    = {255, 100, 100, 255};
 
     if (!ds.territory_answered) {
@@ -658,19 +653,19 @@ void Renderer::draw_board(const DrawState& ds) {
 }
 
 void Renderer::render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds) {
-    SDL_SetRenderDrawColor(sdl, 52, 60, 72, 255);  // dark desaturated version of board colour
+    SDL_SetRenderDrawColor(sdl, Palette::BACKGROUND.r, Palette::BACKGROUND.g, Palette::BACKGROUND.b, 255);
     SDL_RenderClear(sdl);
 
     // Board background colour varies by mode
-    if (ds.analysis_mode)
-        SDL_SetRenderDrawColor(sdl, 110, 115, 150, 255);
-    else
-        SDL_SetRenderDrawColor(sdl, 95, 115, 150, 255);
+    {
+        SDL_Color bc = ds.analysis_mode ? Palette::BOARD_ANALYSIS : Palette::BOARD;
+        SDL_SetRenderDrawColor(sdl, bc.r, bc.g, bc.b, 255);
+    }
     SDL_Rect board_rect = {view.offset_x, view.offset_y, view.board_px, view.board_px};
     SDL_RenderFillRect(sdl, &board_rect);
 
     // Grid lines
-    SDL_Color grid_color = {45, 55, 70, 255};  // dark blue-gray, same family as board
+    SDL_Color grid_color = Palette::GRID;
     int normal_t   = (view.square >= 30) ? 2 : 1;
     int boundary_t = normal_t * 2;
     int boundary_idx[2] = {0, BOARD_SIZE - 1};
@@ -782,9 +777,9 @@ void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds
         int is_black = (ds.cursor_type == 3);
         int radius   = sq / 2 - 2;
         if (radius < 2) radius = 2;
-        // Yellow ring: 2px wide just outside the stone fill
+        // Accent ring: 2px wide just outside the stone fill
         SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(sdl, 255, 220, 50, 255);
+        SDL_SetRenderDrawColor(sdl, Palette::ACCENT.r, Palette::ACCENT.g, Palette::ACCENT.b, 255);
         int outer = radius + 2;
         for (int dy = -outer; dy <= outer; dy++)
             for (int dx = -outer; dx <= outer; dx++) {
@@ -798,10 +793,10 @@ void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds
         int arm = sq * 3 / 8;            // half-arm length from centre
         int gap = std::max(1, sq / 12);  // gap around the hotspot
         SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-        // Draw shadow (offset 1,1) then yellow on top
+        // Draw shadow (offset 1,1) then accent colour on top
         const struct { int ox, oy; Uint8 r, g, b, a; } passes[2] = {
             {1, 1,   0,   0,  0, 140},
-            {0, 0, 255, 220, 50, 255},
+            {0, 0, Palette::ACCENT.r, Palette::ACCENT.g, Palette::ACCENT.b, 255},
         };
         for (auto& p : passes) {
             SDL_Color col = {p.r, p.g, p.b, p.a};
