@@ -502,17 +502,24 @@ void App::sync_cursor() {
             if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
         }
         if (cross_cursor) { SDL_FreeCursor(cross_cursor); cross_cursor = nullptr; }
-        // Cursor bitmaps go through the OS cursor pipeline, which applies DPI scaling
-        // independently from the SDL window renderer. We read the actual display DPI
-        // and divide by the integer cursor scale factor the OS will apply.
-        // e.g. Windows at 175% DPI (168 dpi) → rounds to 2× cursor scale → divide by 2.
-        //      Windows at 100% DPI (96 dpi)  → 1× cursor scale → no division needed.
+        // Cursor bitmaps are scaled by the OS based on physical display density,
+        // independently of the SDL window renderer.
+        //
+        // We estimate physical screen height = out_h * (ddpi/96), then divide by 1080
+        // (standard HD height) to get the integer cursor scale factor the OS applies.
+        // e.g. 4K at 175% DPI: out_h=1234, ddpi=168  → phys≈2160 → scale=2 → csz=view.square*1.75/2≈56
+        //      4K at 100% DPI: out_h=2160, ddpi=96   → phys=2160 → scale=2 → csz=view.square/2≈56
+        //      2K at 100% DPI: out_h=1440, ddpi=96   → phys=1440 → scale=1 → csz=view.square
+        int out_w2 = 1, out_h2 = 1;
+        SDL_GetRendererOutputSize(sdl_rend, &out_w2, &out_h2);
         float ddpi = 96.0f;
         int disp = SDL_GetWindowDisplayIndex(window);
         SDL_GetDisplayDPI(disp >= 0 ? disp : 0, &ddpi, nullptr, nullptr);
         if (ddpi <= 0.0f) ddpi = 96.0f;
-        int cursor_scale = std::max(1, (int)std::round(ddpi / 96.0f));
-        int csz = std::max(8, view.square / cursor_scale);
+        float win_scale   = ddpi / 96.0f;
+        float phys_h      = out_h2 * win_scale;
+        int   cursor_scale = std::max(1, (int)std::round(phys_h / 1080.0f));
+        int csz = std::max(8, (int)std::round(view.square * win_scale / cursor_scale));
         stone_cursors[0] = create_stone_cursor(false, csz);
         stone_cursors[1] = create_stone_cursor(true,  csz);
         cross_cursor      = create_cross_cursor(csz);
