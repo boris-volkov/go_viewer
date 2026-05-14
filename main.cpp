@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include <SDL2/SDL_syswm.h>
+
 // ---------------------------------------------------------------------------
 // SGF parser (self-contained, no global state)
 
@@ -502,24 +504,63 @@ void App::sync_cursor() {
             if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
         }
         if (cross_cursor) { SDL_FreeCursor(cross_cursor); cross_cursor = nullptr; }
-        // Cursor bitmaps are scaled by the OS based on physical display density,
-        // independently of the SDL window renderer.
+        // Cursor bitmaps go through the OS cursor pipeline, which scales them
+        // independently of the SDL renderer.  To match cursor size to board stones:
         //
-        // We estimate physical screen height = out_h * (ddpi/96), then divide by 1080
-        // (standard HD height) to get the integer cursor scale factor the OS applies.
-        // e.g. 4K at 175% DPI: out_h=1234, ddpi=168  → phys≈2160 → scale=2 → csz=view.square*1.75/2≈56
-        //      4K at 100% DPI: out_h=2160, ddpi=96   → phys=2160 → scale=2 → csz=view.square/2≈56
-        //      2K at 100% DPI: out_h=1440, ddpi=96   → phys=1440 → scale=1 → csz=view.square
+        //   csz = view.square * actual_scale / cursor_os_scale
+        //
+        // actual_scale  = native_h / out_h
+        //   The OS "DPI virtualization" factor — how many physical pixels the
+        //   renderer surface covers per logical pixel (e.g. 2.0 on 4K at 175%).
+        //
+        // cursor_os_scale = physical_dpi / 96
+        //   The factor by which the OS upscales cursor bitmaps based on monitor
+        //   physical pixel density (e.g. ~2.47 for a 4K 24" Cintiq at any scale).
+        //   On Linux/X11 cursors are rendered 1:1 physical, so this is 1.0.
+        //
+        // SDL_GetDisplayDPI is NOT used — it returns the Windows setting DPI
+        // (always 96 at 100% scale), not the physical monitor DPI.
+
         int out_w2 = 1, out_h2 = 1;
         SDL_GetRendererOutputSize(sdl_rend, &out_w2, &out_h2);
-        float ddpi = 96.0f;
+
+        // actual_scale: ratio of native pixels to renderer pixels
         int disp = SDL_GetWindowDisplayIndex(window);
-        SDL_GetDisplayDPI(disp >= 0 ? disp : 0, &ddpi, nullptr, nullptr);
-        if (ddpi <= 0.0f) ddpi = 96.0f;
-        float win_scale   = ddpi / 96.0f;
-        float phys_h      = out_h2 * win_scale;
-        int   cursor_scale = std::max(1, (int)std::round(phys_h / 1080.0f));
-        int csz = std::max(8, (int)std::round(view.square * win_scale / cursor_scale));
+        if (disp < 0) disp = 0;
+        SDL_DisplayMode native_mode{};
+        SDL_GetDisplayMode(disp, 0, &native_mode);
+        float actual_scale = (native_mode.h > 0 && out_h2 > 0)
+                             ? (float)native_mode.h / (float)out_h2
+                             : 1.0f;
+
+        // cursor_os_scale: how much the OS stretches our bitmap for this monitor
+        float cursor_os_scale = 1.0f;
+#ifdef _WIN32
+        {
+            SDL_SysWMinfo wm{};
+            SDL_VERSION(&wm.version);
+            if (SDL_GetWindowWMInfo(window, &wm)) {
+                HWND  hwnd = wm.info.win.window;
+                HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                // GetDpiForMonitor with MDT_RAW_DPI=2 returns physical pixel density
+                HMODULE shcore = LoadLibraryA("Shcore.dll");
+                if (shcore) {
+                    typedef HRESULT (WINAPI* GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
+                    FARPROC raw = GetProcAddress(shcore, "GetDpiForMonitor");
+                    GetDpiForMonitorFn fn;
+                    memcpy(&fn, &raw, sizeof(fn));
+                    if (fn) {
+                        UINT rawX = 0, rawY = 0;
+                        if (SUCCEEDED(fn(hmon, 2 /*MDT_RAW_DPI*/, &rawX, &rawY)) && rawX > 0)
+                            cursor_os_scale = (float)rawX / 96.0f;
+                    }
+                    FreeLibrary(shcore);
+                }
+            }
+        }
+#endif
+
+        int csz = std::max(8, (int)std::round((float)view.square * actual_scale / cursor_os_scale));
         stone_cursors[0] = create_stone_cursor(false, csz);
         stone_cursors[1] = create_stone_cursor(true,  csz);
         cross_cursor      = create_cross_cursor(csz);
