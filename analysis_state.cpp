@@ -1,11 +1,23 @@
 #include "analysis_state.hpp"
 #include <cstring>
 
-AnalysisState::AnalysisState(const GameSnapshot& base) {
+AnalysisState::AnalysisState(const GameSnapshot& base) : base_snapshot(base) {
     memcpy(board, base.board, sizeof(board));
     turn_is_black        = base.turn_is_black;
     black_prisoners      = base.black_prisoners;
     white_prisoners      = base.white_prisoners;
+    analysis_stone_count = 0;
+    liberty_count        = 0;
+    selected_group_count = 0;
+    liberty_display_r    = -1;
+    liberty_display_f    = -1;
+}
+
+void AnalysisState::reset_to_base() {
+    memcpy(board, base_snapshot.board, sizeof(board));
+    turn_is_black        = 1;  // analysis always restarts with black to play
+    black_prisoners      = base_snapshot.black_prisoners;
+    white_prisoners      = base_snapshot.white_prisoners;
     analysis_stone_count = 0;
     liberty_count        = 0;
     selected_group_count = 0;

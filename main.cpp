@@ -535,8 +535,18 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         enter_territory_drill(); draw_board(); return;
     }
 
-    if (key == SDLK_n) { nav_request = NAV_NEXT;    quit = true; return; }
-    if (key == SDLK_r) { nav_request = NAV_RESTART; quit = true; return; }
+    if (key == SDLK_n) { nav_request = NAV_NEXT; quit = true; return; }
+    if (key == SDLK_r) {
+        if (in_analysis()) {
+            // Reset analysis board back to the position it was opened on
+            analysis->reset_to_base();
+            game.liberty_count = 0;
+            game.selected_group_count = 0;
+            draw_board();
+            return;
+        }
+        nav_request = NAV_RESTART; quit = true; return;
+    }
 
     if (key == SDLK_c) {
         catalog.open(games_dir);

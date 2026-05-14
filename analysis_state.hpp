@@ -25,6 +25,9 @@ public:
 
     explicit AnalysisState(const GameSnapshot& base);
 
+    // Reset the board back to the state analysis was opened with.
+    void reset_to_base();
+
     // Try to place a stone (respects go rules). Returns true if successful.
     bool place_stone(int r, int f, int is_black);
 
@@ -37,5 +40,6 @@ public:
     bool is_stone_in_selected_group(int r, int f) const;
 
 private:
+    GameSnapshot base_snapshot;  // snapshot captured when analysis was opened
     void remove_from_analysis_list(int r, int f);
 };
