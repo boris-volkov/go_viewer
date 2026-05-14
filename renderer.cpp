@@ -794,15 +794,15 @@ void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds
             {0, 0, 255, 220, 50, 255},
         };
         for (auto& p : passes) {
-            SDL_SetRenderDrawColor(sdl, p.r, p.g, p.b, p.a);
+            SDL_Color col = {p.r, p.g, p.b, p.a};
             // left arm
-            SDL_RenderDrawLine(sdl, cx+p.ox-arm, cy+p.oy, cx+p.ox-gap-1, cy+p.oy);
+            draw_thick_line(cx+p.ox-arm, cy+p.oy, cx+p.ox-gap-1, cy+p.oy, 2, col);
             // right arm
-            SDL_RenderDrawLine(sdl, cx+p.ox+gap, cy+p.oy, cx+p.ox+arm,   cy+p.oy);
+            draw_thick_line(cx+p.ox+gap, cy+p.oy, cx+p.ox+arm,   cy+p.oy, 2, col);
             // top arm
-            SDL_RenderDrawLine(sdl, cx+p.ox, cy+p.oy-arm, cx+p.ox, cy+p.oy-gap-1);
+            draw_thick_line(cx+p.ox, cy+p.oy-arm, cx+p.ox, cy+p.oy-gap-1, 2, col);
             // bottom arm
-            SDL_RenderDrawLine(sdl, cx+p.ox, cy+p.oy+gap, cx+p.ox, cy+p.oy+arm);
+            draw_thick_line(cx+p.ox, cy+p.oy+gap, cx+p.ox, cy+p.oy+arm,   2, col);
         }
     }
 }
