@@ -753,7 +753,56 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     // }
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds.catalog);
+    render_software_cursor(view, ds);
 
     if (!ds.suppress_present)
         SDL_RenderPresent(sdl);
+}
+
+// ---------------------------------------------------------------------------
+// Software cursor (drawn directly in renderer — no OS scaling involved)
+
+void Renderer::draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha) {
+    SDL_SetRenderDrawBlendMode(sdl, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    Uint8 v = is_black ? 30 : 240;
+    SDL_SetRenderDrawColor(sdl, v, v, v, alpha);
+    for (int dy = -radius; dy <= radius; dy++)
+        for (int dx = -radius; dx <= radius; dx++)
+            if (dx*dx + dy*dy <= radius*radius)
+                SDL_RenderDrawPoint(sdl, cx+dx, cy+dy);
+}
+
+void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds) {
+    if (ds.cursor_type == 0 || ds.cursor_x < 0 || ds.cursor_y < 0) return;
+    int cx = ds.cursor_x, cy = ds.cursor_y;
+    int sq = view.square > 0 ? view.square : 32;
+
+    if (ds.cursor_type >= 2) {
+        // Stone cursor: opaque circle, same radius as board stones
+        int is_black = (ds.cursor_type == 3);
+        int radius   = sq / 2 - 2;
+        if (radius < 2) radius = 2;
+        draw_stone_at_px(cx, cy, radius, is_black, 255);
+    } else {
+        // Crosshair cursor: yellow with dark shadow, center gap, 3/4-length arms
+        int arm = sq * 3 / 8;            // half-arm length from centre
+        int gap = std::max(1, sq / 12);  // gap around the hotspot
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+        // Draw shadow (offset 1,1) then yellow on top
+        const struct { int ox, oy; Uint8 r, g, b, a; } passes[2] = {
+            {1, 1,   0,   0,  0, 140},
+            {0, 0, 255, 220, 50, 255},
+        };
+        for (auto& p : passes) {
+            SDL_SetRenderDrawColor(sdl, p.r, p.g, p.b, p.a);
+            // left arm
+            SDL_RenderDrawLine(sdl, cx+p.ox-arm, cy+p.oy, cx+p.ox-gap-1, cy+p.oy);
+            // right arm
+            SDL_RenderDrawLine(sdl, cx+p.ox+gap, cy+p.oy, cx+p.ox+arm,   cy+p.oy);
+            // top arm
+            SDL_RenderDrawLine(sdl, cx+p.ox, cy+p.oy-arm, cx+p.ox, cy+p.oy-gap-1);
+            // bottom arm
+            SDL_RenderDrawLine(sdl, cx+p.ox, cy+p.oy+gap, cx+p.ox, cy+p.oy+arm);
+        }
+    }
 }

@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-#include <SDL2/SDL_syswm.h>
 
 // ---------------------------------------------------------------------------
 // SGF parser (self-contained, no global state)
@@ -265,9 +264,6 @@ private:
     // SDL
     SDL_Window*   window   = nullptr;
     SDL_Renderer* sdl_rend = nullptr;
-    SDL_Cursor*   stone_cursors[2] = {nullptr, nullptr}; // [0]=white, [1]=black
-    SDL_Cursor*   cross_cursor     = nullptr;            // yellow crosshair — default cursor
-    int           cursor_square    = 0;                  // square size used when cursors were last built
 
     // Core state
     GameState                      game;
@@ -378,16 +374,31 @@ private:
 
     int  adjust_move_delay(int delta_ms, Uint32 now);
     void set_cursor_visible(bool v);
-    void sync_cursor();
     void note_mouse_activity(Uint32 now);
     void note_mouse_activity_event(const SDL_Event& e);
     void update_cursor_auto_hide(Uint32 now);
 
-    SDL_Cursor* create_stone_cursor(bool is_black, int square);
-    SDL_Cursor* create_cross_cursor(int square);
-
     Renderer::DrawState make_draw_state() {
         const TerritoryProblem* tp = territory_problem.get();
+
+        // Software cursor type: determined from current mode
+        int cursor_type = 0;
+        if (cursor_visible) {
+            if (in_analysis() || game_mode || guess_mode) {
+                const Uint8* kb = SDL_GetKeyboardState(nullptr);
+                int is_black;
+                if (in_analysis() && kb[SDL_SCANCODE_B])      is_black = 1;
+                else if (in_analysis() && kb[SDL_SCANCODE_W]) is_black = 0;
+                else if (in_analysis() || game_mode)          is_black = analysis ? analysis->turn_is_black : 1;
+                else                                          is_black = game.turn_is_black;
+                cursor_type = is_black ? 3 : 2;  // 3=black stone, 2=white stone
+            } else {
+                cursor_type = 1;  // crosshair
+            }
+        }
+        int cx = -1, cy = -1;
+        SDL_GetMouseState(&cx, &cy);
+
         return Renderer::DrawState{
             game,
             analysis.get(),
@@ -411,11 +422,11 @@ private:
             tp ? tp->white_score : 0,
             tp ? tp->answered    : false,
             tp ? tp->correct     : false,
+            cx, cy, cursor_type,
         };
     }
 
     void draw_board() {
-        sync_cursor();
         auto ds = make_draw_state();
         renderer->draw_board(ds);
     }
@@ -424,170 +435,8 @@ private:
     std::string pick_next_file(NavRequest req);
 };
 
-// ---------------------------------------------------------------------------
-// SDL cursor
-
-SDL_Cursor* App::create_stone_cursor(bool is_black, int square) {
-    const int sz     = square;
-    const int mid    = sz / 2;
-    const float radius = (float)(square / 2 - 2);
-    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, sz, sz, 32, SDL_PIXELFORMAT_RGBA32);
-    if (!surf) return nullptr;
-    if (SDL_LockSurface(surf) != 0) { SDL_FreeSurface(surf); return nullptr; }
-    Uint32* px    = (Uint32*)surf->pixels;
-    int     pitch = surf->pitch / 4;
-    Uint8 r = is_black ?  30 : 240;
-    Uint8 g = is_black ?  30 : 240;
-    Uint8 b = is_black ?  30 : 240;
-    for (int y = 0; y < sz; y++) {
-        for (int x = 0; x < sz; x++) {
-            float dx = x - mid + 0.5f, dy = y - mid + 0.5f;
-            float dist = sqrtf(dx*dx + dy*dy);
-            // smoothstep over a 1-pixel band at the edge
-            float t = radius + 0.5f - dist;
-            Uint8 a = (t <= 0.0f) ? 0 : (t >= 1.0f) ? 255 : (Uint8)(t * 255.0f);
-            px[y*pitch+x] = SDL_MapRGBA(surf->format, r, g, b, a);
-        }
-    }
-    SDL_UnlockSurface(surf);
-    SDL_Cursor* c = SDL_CreateColorCursor(surf, mid, mid);
-    SDL_FreeSurface(surf);
-    return c;
-}
-
-SDL_Cursor* App::create_cross_cursor(int square) {
-    const int sz  = square;
-    const int mid = sz / 2;
-    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, sz, sz, 32, SDL_PIXELFORMAT_RGBA32);
-    if (!surf) return nullptr;
-    if (SDL_LockSurface(surf) != 0) { SDL_FreeSurface(surf); return nullptr; }
-    Uint32* px    = (Uint32*)surf->pixels;
-    int     pitch = surf->pitch / 4;
-    Uint32  transp = SDL_MapRGBA(surf->format, 0, 0, 0, 0);
-    Uint32  yellow = SDL_MapRGBA(surf->format, 255, 220, 50, 255);
-    Uint32  shadow = SDL_MapRGBA(surf->format, 0, 0, 0, 140);
-    // Clear to transparent
-    for (int i = 0; i < sz * sz; i++) px[i] = transp;
-    // Arms extend from an outer margin to a small gap around the centre
-    int gap    = std::max(1, sz / 12);
-    int margin = sz / 8;   // outer end cut-off — makes arms 3/4 length
-    // Draw shadow (offset 1px down-right) then yellow on top
-    auto draw_cross = [&](int ox, int oy, Uint32 col) {
-        for (int i = margin; i < sz - margin; i++) {
-            // horizontal arm
-            if (i < mid - gap || i > mid + gap) {
-                int px_x = i + ox, px_y = mid + oy;
-                if (px_x >= 0 && px_x < sz && px_y >= 0 && px_y < sz)
-                    px[px_y * pitch + px_x] = col;
-            }
-            // vertical arm
-            if (i < mid - gap || i > mid + gap) {
-                int px_x = mid + ox, px_y = i + oy;
-                if (px_x >= 0 && px_x < sz && px_y >= 0 && px_y < sz)
-                    px[px_y * pitch + px_x] = col;
-            }
-        }
-    };
-    draw_cross(1, 1, shadow);  // dark drop shadow
-    draw_cross(0, 0, yellow);  // yellow cross on top
-    SDL_UnlockSurface(surf);
-    SDL_Cursor* c = SDL_CreateColorCursor(surf, mid, mid);
-    SDL_FreeSurface(surf);
-    return c;
-}
-
-void App::sync_cursor() {
-    // Rebuild cursors if the board square size changed (e.g. window resize or different monitor)
-    BoardView view; renderer->get_board_view(view);
-    if (view.square != cursor_square && view.square > 0) {
-        for (int i = 0; i < 2; i++) {
-            if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
-        }
-        if (cross_cursor) { SDL_FreeCursor(cross_cursor); cross_cursor = nullptr; }
-        // Cursor bitmaps go through the OS cursor pipeline, which scales them
-        // independently of the SDL renderer.  To match cursor size to board stones:
-        //
-        //   csz = view.square * actual_scale / cursor_os_scale
-        //
-        // actual_scale  = native_h / out_h
-        //   The OS "DPI virtualization" factor — how many physical pixels the
-        //   renderer surface covers per logical pixel (e.g. 2.0 on 4K at 175%).
-        //
-        // cursor_os_scale = physical_dpi / 96
-        //   The factor by which the OS upscales cursor bitmaps based on monitor
-        //   physical pixel density (e.g. ~2.47 for a 4K 24" Cintiq at any scale).
-        //   On Linux/X11 cursors are rendered 1:1 physical, so this is 1.0.
-        //
-        // SDL_GetDisplayDPI is NOT used — it returns the Windows setting DPI
-        // (always 96 at 100% scale), not the physical monitor DPI.
-
-        int out_w2 = 1, out_h2 = 1;
-        SDL_GetRendererOutputSize(sdl_rend, &out_w2, &out_h2);
-
-        // actual_scale: ratio of native pixels to renderer pixels
-        int disp = SDL_GetWindowDisplayIndex(window);
-        if (disp < 0) disp = 0;
-        SDL_DisplayMode native_mode{};
-        SDL_GetDisplayMode(disp, 0, &native_mode);
-        float actual_scale = (native_mode.h > 0 && out_h2 > 0)
-                             ? (float)native_mode.h / (float)out_h2
-                             : 1.0f;
-
-        // cursor_os_scale: how much the OS stretches our bitmap for this monitor
-        float cursor_os_scale = 1.0f;
-#ifdef _WIN32
-        {
-            SDL_SysWMinfo wm{};
-            SDL_VERSION(&wm.version);
-            if (SDL_GetWindowWMInfo(window, &wm)) {
-                HWND  hwnd = wm.info.win.window;
-                HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-                // GetDpiForMonitor with MDT_RAW_DPI=2 returns physical pixel density
-                HMODULE shcore = LoadLibraryA("Shcore.dll");
-                if (shcore) {
-                    typedef HRESULT (WINAPI* GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
-                    FARPROC raw = GetProcAddress(shcore, "GetDpiForMonitor");
-                    GetDpiForMonitorFn fn;
-                    memcpy(&fn, &raw, sizeof(fn));
-                    if (fn) {
-                        UINT rawX = 0, rawY = 0;
-                        if (SUCCEEDED(fn(hmon, 2 /*MDT_RAW_DPI*/, &rawX, &rawY)) && rawX > 0)
-                            cursor_os_scale = (float)rawX / 96.0f;
-                    }
-                    FreeLibrary(shcore);
-                }
-            }
-        }
-#endif
-
-        int csz = std::max(8, (int)std::round((float)view.square * actual_scale / cursor_os_scale));
-        stone_cursors[0] = create_stone_cursor(false, csz);
-        stone_cursors[1] = create_stone_cursor(true,  csz);
-        cross_cursor      = create_cross_cursor(csz);
-        cursor_square = view.square;
-    }
-
-    if ((in_analysis() || game_mode || guess_mode) && cursor_visible) {
-        // Stone placement modes: show a stone cursor matching whose turn it is
-        const Uint8* kb = SDL_GetKeyboardState(nullptr);
-        int is_black;
-        if (in_analysis() && kb[SDL_SCANCODE_B])      is_black = 1;
-        else if (in_analysis() && kb[SDL_SCANCODE_W]) is_black = 0;
-        else if (in_analysis() || game_mode)          is_black = analysis ? analysis->turn_is_black : 1;
-        else                                          is_black = game.turn_is_black;
-        SDL_Cursor* c = stone_cursors[is_black ? 1 : 0];
-        if (c) SDL_SetCursor(c);
-    } else if (cursor_visible) {
-        // Default: yellow crosshair
-        SDL_Cursor* c = cross_cursor ? cross_cursor : SDL_GetDefaultCursor();
-        SDL_SetCursor(c);
-    }
-}
-
 void App::set_cursor_visible(bool v) {
-    SDL_ShowCursor(v ? SDL_ENABLE : SDL_DISABLE);
     cursor_visible = v;
-    sync_cursor();
 }
 
 void App::note_mouse_activity(Uint32 now) {
@@ -629,7 +478,8 @@ bool App::init() {
                                   SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!window || !sdl_rend) return false;
     renderer = new Renderer(sdl_rend);
-    set_cursor_visible(true);
+    SDL_ShowCursor(SDL_DISABLE);  // software cursor drawn by renderer
+    cursor_visible = true;
     note_mouse_activity(SDL_GetTicks());
     srand(std::random_device{}());
     return true;
@@ -637,10 +487,6 @@ bool App::init() {
 
 void App::cleanup() {
     delete renderer; renderer = nullptr;
-    for (int i = 0; i < 2; i++) {
-        if (stone_cursors[i]) { SDL_FreeCursor(stone_cursors[i]); stone_cursors[i] = nullptr; }
-    }
-    if (cross_cursor) { SDL_FreeCursor(cross_cursor); cross_cursor = nullptr; }
     if (sdl_rend) { SDL_DestroyRenderer(sdl_rend); sdl_rend = nullptr; }
     if (window)   { SDL_DestroyWindow(window);      window   = nullptr; }
     SDL_Quit();
@@ -1046,6 +892,8 @@ bool App::play_current_game() {
                 quit = true;
             }
         }
+        // Always redraw in playback mode so the software cursor tracks the mouse
+        draw_board();
         SDL_Delay(10);
     }
 

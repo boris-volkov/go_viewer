@@ -36,6 +36,10 @@ public:
         int   territory_w_score  = 0;
         bool  territory_answered = false;
         bool  territory_correct  = false;
+        // Software cursor (drawn by renderer, bypasses OS DPI scaling entirely)
+        int   cursor_x    = -1;
+        int   cursor_y    = -1;
+        int   cursor_type = 0;  // 0=hidden, 1=crosshair, 2=white stone, 3=black stone
     };
 
     void get_board_view(BoardView& view) const;
@@ -64,6 +68,8 @@ private:
     void render_game_date(const BoardView& view, const std::string& date);
     void render_help_overlay(const BoardView& view, bool show_help);
     void render_catalog_overlay(const BoardView& view, const Catalog& catalog);
+    void render_software_cursor(const BoardView& view, const DrawState& ds);
+    void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
 
     static const char* format_result_message(const char* sgf_result);
 
