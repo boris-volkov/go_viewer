@@ -597,7 +597,8 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int scale      = (view.square >= 30) ? 3 : 2;
     int line_gap   = (scale >= 3) ? 4 : 3;
     int th         = 7 * scale;
-    int pad        = (scale >= 3) ? 10 : 8;
+    int pad        = (scale >= 3) ? 10 : 8;   // vertical padding
+    int hpad       = (scale >= 3) ? 22 : 16;  // horizontal padding (left/right)
     int header_gap = line_gap + (scale >= 3 ? 4 : 2);
 
     // Measure list width
@@ -619,7 +620,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     if (max_lines > total) max_lines = total;
 
     int list_h   = max_lines * line_h - line_gap;
-    int list_bw  = max_w + pad * 2;
+    int list_bw  = max_w + hpad * 2;
     int bh       = th + header_gap + list_h + pad * 2;
 
     // Thumbnail pane: two boards stacked vertically (opening + final)
@@ -652,7 +653,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     if (idx >= scroll + max_lines) scroll = idx - max_lines + 1;
 
     // Title
-    int tx = bx + pad;
+    int tx = bx + hpad;
     int ty = by + pad;
     draw_text(tx, ty, scale, title, Palette::TEXT_WHITE);
     ty += th + header_gap;
@@ -666,7 +667,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
         else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
         if (ei == idx) {
-            SDL_Rect hi = {tx - 3, ty - 3, max_w + 6, th + 6};
+            SDL_Rect hi = {bx + hpad - 3, ty - 3, max_w + 6, th + 6};
             SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
                                    Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
             SDL_RenderFillRect(sdl, &hi);
