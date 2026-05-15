@@ -169,24 +169,23 @@ void Renderer::draw_thick_line(int x1, int y1, int x2, int y2, int thickness, SD
     SDL_RenderGeometry(sdl, nullptr, verts, 4, indices, 6);
 }
 
+// Scanline fill of a circle — ~2*r SDL calls instead of ~π*r² point calls.
+// Colour and blend mode must be set by the caller.
+void Renderer::fill_circle(int cx, int cy, int radius) {
+    for (int dy = -radius; dy <= radius; dy++) {
+        int dx = (int)sqrtf((float)(radius * radius - dy * dy));
+        SDL_RenderDrawLine(sdl, cx - dx, cy + dy, cx + dx, cy + dy);
+    }
+}
+
 void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha) {
-    int bx = view.offset_x + f * view.square;
-    int by = view.offset_y + r * view.square;
-    int cx = bx + view.square / 2;
-    int cy = by + view.square / 2;
+    int cx     = view.offset_x + f * view.square + view.square / 2;
+    int cy     = view.offset_y + r * view.square + view.square / 2;
     int radius = view.square / 2 - 2;
     SDL_SetRenderDrawBlendMode(sdl, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
-    SDL_SetRenderDrawColor(sdl,
-        is_black ? 30  : 240,
-        is_black ? 30  : 240,
-        is_black ? 30  : 240,
-        alpha);
-    for (int dy = -radius; dy <= radius; dy++) {
-        for (int dx = -radius; dx <= radius; dx++) {
-            if (dx * dx + dy * dy <= radius * radius)
-                SDL_RenderDrawPoint(sdl, cx + dx, cy + dy);
-        }
-    }
+    Uint8 v = is_black ? 30 : 240;
+    SDL_SetRenderDrawColor(sdl, v, v, v, alpha);
+    fill_circle(cx, cy, radius);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,11 +235,8 @@ void Renderer::render_liberties(const BoardView& view,
         int cy = view.offset_y + lib_r[i] * view.square + view.square / 2;
         int rad = view.square / 4;
         if (rad < 2) rad = 2;
-        SDL_SetRenderDrawColor(sdl, 220, 50, 50, 200);
-        for (int dy = -rad; dy <= rad; dy++)
-            for (int dx = -rad; dx <= rad; dx++)
-                if (dx * dx + dy * dy <= rad * rad)
-                    SDL_RenderDrawPoint(sdl, cx + dx, cy + dy);
+        SDL_SetRenderDrawColor(sdl, Palette::LIBERTY_DOT.r, Palette::LIBERTY_DOT.g, Palette::LIBERTY_DOT.b, Palette::LIBERTY_DOT.a);
+        fill_circle(cx, cy, rad);
     }
 }
 
@@ -652,7 +648,84 @@ void Renderer::draw_board(const DrawState& ds) {
     render_board(view, nullptr, ds);
 }
 
-void Renderer::render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds) {
+// ---------------------------------------------------------------------------
+// Board cache hash — covers everything that affects the visual output
+// except the cursor position (cursor_x/y/type), which is composited on top
+// each frame without touching the cache.
+
+uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
+    // FNV-1a 64-bit
+    uint64_t h = 14695981039346656037ULL;
+    auto mix8  = [&](uint8_t  v) { h ^= v; h *= 1099511628211ULL; };
+    auto mix64 = [&](uint64_t v) {
+        for (int i = 0; i < 8; i++, v >>= 8) mix8(uint8_t(v));
+    };
+    auto mix_str = [&](const std::string& s) {
+        for (char c : s) mix8(uint8_t(c));
+        mix8(0);
+    };
+
+    // Active board array
+    const char (*board)[BOARD_SIZE] =
+        ds.territory_board ? ds.territory_board :
+        (ds.analysis_mode && ds.analysis ? ds.analysis->board : ds.game.board);
+    for (int r = 0; r < BOARD_SIZE; r++)
+        for (int f = 0; f < BOARD_SIZE; f++)
+            mix8(uint8_t(board[r][f]));
+
+    // Mode flags
+    mix8(uint8_t(ds.analysis_mode));
+    mix8(uint8_t(ds.game_mode));
+    mix8(uint8_t(ds.guess_mode));
+    mix8(uint8_t(ds.chain_mode));
+    mix8(uint8_t(ds.show_help));
+    mix8(uint8_t(ds.territory_drill));
+    mix64(uint64_t(ds.guess_score));
+
+    // Turn / liberty overlay
+    if (ds.analysis) {
+        mix8(uint8_t(ds.analysis->turn_is_black));
+        mix64(uint64_t(ds.analysis->liberty_count));
+        mix64(uint64_t(ds.analysis->liberty_display_r));
+        mix64(uint64_t(ds.analysis->liberty_display_f));
+        mix64(uint64_t(ds.analysis->selected_group_count));
+    }
+    mix64(uint64_t(ds.game.liberty_count));
+    mix8(uint8_t(ds.game.game_finished));
+
+    // Catalog (only need to track when active)
+    mix8(uint8_t(ds.catalog.active));
+    if (ds.catalog.active) {
+        mix64(uint64_t(ds.catalog.index));
+        mix64(uint64_t(ds.catalog.scroll));
+    }
+
+    // HUD text
+    mix_str(ds.black_name);
+    mix_str(ds.white_name);
+    mix_str(ds.result_message);
+    mix_str(ds.game_date);
+
+    // Speed message: hash whether it is currently visible (and the delay value)
+    Uint32 now = SDL_GetTicks();
+    bool speed_on = ds.speed_message_until > 0 && now < ds.speed_message_until;
+    mix8(uint8_t(speed_on));
+    if (speed_on) mix64(uint64_t(ds.move_delay_ms));
+
+    // Territory drill answer state
+    if (ds.territory_drill) {
+        mix64(uint64_t(ds.territory_b_score));
+        mix64(uint64_t(ds.territory_w_score));
+        mix8(uint8_t(ds.territory_answered));
+        mix8(uint8_t(ds.territory_correct));
+    }
+
+    return h;
+}
+
+// Draws board+HUD to whatever render target is currently active.
+// Does NOT draw the software cursor or call SDL_RenderPresent.
+void Renderer::render_board_content(const BoardView& view, const Overlay* overlay, const DrawState& ds) {
     SDL_SetRenderDrawColor(sdl, Palette::BACKGROUND.r, Palette::BACKGROUND.g, Palette::BACKGROUND.b, 255);
     SDL_RenderClear(sdl);
 
@@ -748,8 +821,34 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     // }
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds.catalog);
-    render_software_cursor(view, ds);
+}
 
+// Public entry point: uses a cached texture for the board+HUD so that
+// cursor-only frames (mouse movement) are essentially free.
+void Renderer::render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds) {
+    uint64_t h = compute_cache_hash(ds);
+
+    if (h != cache_hash_) {
+        // (Re)create the cache texture if the output size changed
+        int out_w = 0, out_h = 0;
+        SDL_GetRendererOutputSize(sdl, &out_w, &out_h);
+        if (!board_cache_ || cache_w_ != out_w || cache_h_ != out_h) {
+            if (board_cache_) SDL_DestroyTexture(board_cache_);
+            board_cache_ = SDL_CreateTexture(sdl,
+                SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                out_w, out_h);
+            cache_w_ = out_w;
+            cache_h_ = out_h;
+        }
+        SDL_SetRenderTarget(sdl, board_cache_);
+        render_board_content(view, overlay, ds);
+        SDL_SetRenderTarget(sdl, nullptr);
+        cache_hash_ = h;
+    }
+
+    // Blit cached board, then draw the cursor on top (always, every frame)
+    SDL_RenderCopy(sdl, board_cache_, nullptr, nullptr);
+    render_software_cursor(view, ds);
     if (!ds.suppress_present)
         SDL_RenderPresent(sdl);
 }
@@ -761,10 +860,7 @@ void Renderer::draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 
     SDL_SetRenderDrawBlendMode(sdl, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     Uint8 v = is_black ? 30 : 240;
     SDL_SetRenderDrawColor(sdl, v, v, v, alpha);
-    for (int dy = -radius; dy <= radius; dy++)
-        for (int dx = -radius; dx <= radius; dx++)
-            if (dx*dx + dy*dy <= radius*radius)
-                SDL_RenderDrawPoint(sdl, cx+dx, cy+dy);
+    fill_circle(cx, cy, radius);
 }
 
 void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds) {

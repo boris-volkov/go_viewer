@@ -10,6 +10,7 @@ public:
     SDL_Renderer* sdl = nullptr;
 
     explicit Renderer(SDL_Renderer* r) : sdl(r) {}
+    ~Renderer() { if (board_cache_) SDL_DestroyTexture(board_cache_); }
 
     // All draw state needed for one frame
     struct DrawState {
@@ -70,6 +71,17 @@ private:
     void render_catalog_overlay(const BoardView& view, const Catalog& catalog);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
+    void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set
+
+    // Board cache: the board+HUD are rendered to a texture and only rebuilt when
+    // board state changes.  Cursor is composited on top each frame for free.
+    void render_board_content(const BoardView& view, const Overlay* overlay, const DrawState& ds);
+    uint64_t compute_cache_hash(const DrawState& ds) const;
+
+    SDL_Texture* board_cache_ = nullptr;
+    int          cache_w_     = 0;
+    int          cache_h_     = 0;
+    uint64_t     cache_hash_  = ~0ULL;   // initialised so first frame always rebuilds
 
     static const char* format_result_message(const char* sgf_result);
 
