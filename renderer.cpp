@@ -625,7 +625,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     // Centered horizontally in the space between list_right and the screen edge.
     int thumb_inner_gap = 40;
     int thumb_vpad      = 40;   // top/bottom clearance around the pair
-    int thumb_size      = (view.screen_h - thumb_vpad * 2 - thumb_inner_gap) / 2;
+    int thumb_size      = (view.screen_h - thumb_vpad * 2 - thumb_inner_gap) * 4 / 10;
     int two_h           = thumb_size * 2 + thumb_inner_gap;
     int thumb_x         = list_right + (view.screen_w - list_right - thumb_size) / 2;
     int thumb_y_top     = (view.screen_h - two_h) / 2;
