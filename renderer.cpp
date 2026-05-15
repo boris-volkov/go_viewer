@@ -629,7 +629,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
                            && ds.catalog_thumb_final != nullptr;
     int  thumb_outer_gap = has_thumb ? (scale >= 3 ? 14 : 10) : 0;
     int  thumb_pad       = has_thumb ? (scale >= 3 ? 10 :  7) : 0;  // padding inside pane
-    int  thumb_inner_gap = has_thumb ? (scale >= 3 ?  8 :  5) : 0;  // gap between the two boards
+    int  thumb_inner_gap = has_thumb ? (scale >= 3 ? 20 : 14) : 0;  // gap between the two boards
     // 80% of what would fill the full pane height, centered with thumb_pad breathing room
     int  thumb_size      = has_thumb
                            ? (bh - pad * 2 - thumb_inner_gap - thumb_pad * 2) * 4 / 10
