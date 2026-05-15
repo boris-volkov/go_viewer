@@ -625,7 +625,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     // Thumbnail pane dimensions (only for SGF entries)
     bool has_thumb  = ds.catalog_thumb_valid && ds.catalog_thumb_board != nullptr;
     int  thumb_gap  = has_thumb ? (scale >= 3 ? 14 : 10) : 0;
-    int  thumb_size = has_thumb ? (bh - pad * 2) : 0;
+    int  thumb_size = has_thumb ? (bh - pad * 2) / 2 : 0;
     int  total_bw   = list_bw + (has_thumb ? thumb_gap + thumb_size : 0);
 
     int bx = (view.screen_w - total_bw) / 2;
