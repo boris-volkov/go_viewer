@@ -43,9 +43,10 @@ public:
         int   cursor_x    = -1;
         int   cursor_y    = -1;
         int   cursor_type = 0;  // 0=hidden, 1=crosshair, 2=white stone, 3=black stone
-        // Catalog thumbnail: final-position board of the selected SGF
-        bool        catalog_thumb_valid = false;
-        const char (*catalog_thumb_board)[BOARD_SIZE] = nullptr;
+        // Catalog thumbnails: opening (first N moves) and final position
+        bool        catalog_thumb_valid       = false;
+        const char (*catalog_thumb_open) [BOARD_SIZE] = nullptr;
+        const char (*catalog_thumb_final)[BOARD_SIZE] = nullptr;
     };
 
     void get_board_view(BoardView& view) const;

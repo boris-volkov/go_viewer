@@ -622,11 +622,14 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int list_bw  = max_w + pad * 2;
     int bh       = th + header_gap + list_h + pad * 2;
 
-    // Thumbnail pane dimensions (only for SGF entries)
-    bool has_thumb  = ds.catalog_thumb_valid && ds.catalog_thumb_board != nullptr;
-    int  thumb_gap  = has_thumb ? (scale >= 3 ? 14 : 10) : 0;
-    int  thumb_size = has_thumb ? (bh - pad * 2) / 2 : 0;
-    int  total_bw   = list_bw + (has_thumb ? thumb_gap + thumb_size : 0);
+    // Thumbnail pane: two boards stacked vertically (opening + final)
+    bool has_thumb       = ds.catalog_thumb_valid
+                           && ds.catalog_thumb_open  != nullptr
+                           && ds.catalog_thumb_final != nullptr;
+    int  thumb_outer_gap = has_thumb ? (scale >= 3 ? 14 : 10) : 0;
+    int  thumb_inner_gap = has_thumb ? (scale >= 3 ?  6 :  4) : 0;
+    int  thumb_size      = has_thumb ? (bh - pad * 2 - thumb_inner_gap) / 2 : 0;
+    int  total_bw        = list_bw + (has_thumb ? thumb_outer_gap + thumb_size : 0);
 
     int bx = (view.screen_w - total_bw) / 2;
     int by = (view.screen_h - bh) / 2;
@@ -668,11 +671,13 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         ty += line_h;
     }
 
-    // Thumbnail
+    // Two thumbnails stacked: opening on top, final position on bottom
     if (has_thumb) {
-        int thumb_x = bx + list_bw + thumb_gap;
-        int thumb_y = by + pad;
-        render_mini_board(thumb_x, thumb_y, thumb_size, ds.catalog_thumb_board);
+        int thumb_x = bx + list_bw + thumb_outer_gap;
+        render_mini_board(thumb_x, by + pad,
+                          thumb_size, ds.catalog_thumb_open);
+        render_mini_board(thumb_x, by + pad + thumb_size + thumb_inner_gap,
+                          thumb_size, ds.catalog_thumb_final);
     }
 }
 
@@ -771,6 +776,7 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         mix64(uint64_t(ds.catalog.index));
         mix64(uint64_t(ds.catalog.scroll));
         mix8(uint8_t(ds.catalog_thumb_valid));
+        // no need to hash board contents — index change already invalidates
     }
 
     // HUD text

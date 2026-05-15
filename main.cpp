@@ -101,14 +101,17 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     return g.move_count > 0;
 }
 
-// Play all moves in an SGF to completion and return the final board state.
+// Play up to max_moves moves from an SGF and write the resulting board.
+// max_moves = -1 means play the whole game.
 // Pure CPU — no SDL, no GameState overhead.  Used for catalog thumbnails.
-static bool sgf_final_board(const std::string& path,
-                             char board_out[BOARD_SIZE][BOARD_SIZE]) {
+static bool sgf_board_at(const std::string& path,
+                          char board_out[BOARD_SIZE][BOARD_SIZE],
+                          int max_moves = -1) {
     SgfGame g;
     if (!load_sgf(path, g)) return false;
+    int limit = (max_moves < 0 || max_moves > g.move_count) ? g.move_count : max_moves;
     char board[BOARD_SIZE][BOARD_SIZE] = {};
-    for (int i = 0; i < g.move_count; i++) {
+    for (int i = 0; i < limit; i++) {
         int r, f;
         if (!parse_sgf_move(g.moves[i], r, f)) continue;
         if (board[r][f] != 0) continue;
@@ -122,6 +125,8 @@ static bool sgf_final_board(const std::string& path,
     memcpy(board_out, board, sizeof(board));
     return true;
 }
+
+static constexpr int THUMB_OPENING_MOVES = 10;
 
 // ---------------------------------------------------------------------------
 // Territory estimation drill
@@ -320,9 +325,10 @@ private:
     std::string games_dir;
     std::string forced_path;  // set by catalog selection
 
-    // Catalog thumbnail: cached final-position board for the selected SGF.
-    std::string thumb_path;                          // path of cached thumbnail
-    char        thumb_board[BOARD_SIZE][BOARD_SIZE]; // final board state
+    // Catalog thumbnails: opening (first N moves) and final position.
+    std::string thumb_path;
+    char        thumb_open[BOARD_SIZE][BOARD_SIZE];   // after THUMB_OPENING_MOVES moves
+    char        thumb_final[BOARD_SIZE][BOARD_SIZE];  // after all moves
     bool        thumb_valid = false;
 
     // Navigation
@@ -426,12 +432,14 @@ private:
         int cx = -1, cy = -1;
         SDL_GetMouseState(&cx, &cy);
 
-        // Catalog thumbnail: parse to final position when selection changes
+        // Catalog thumbnails: parse opening + final position when selection changes
         if (catalog.active) {
             std::string sel = catalog.selected_entry_path();
             if (sel != thumb_path) {
                 thumb_path  = sel;
-                thumb_valid = !sel.empty() && sgf_final_board(sel, thumb_board);
+                thumb_valid = !sel.empty()
+                    && sgf_board_at(sel, thumb_open,  THUMB_OPENING_MOVES)
+                    && sgf_board_at(sel, thumb_final);
             }
         }
 
@@ -469,7 +477,8 @@ private:
             stone_filter,
             cx, cy, cursor_type,
             thumb_valid,
-            thumb_valid ? thumb_board : nullptr,
+            thumb_valid ? thumb_open  : nullptr,
+            thumb_valid ? thumb_final : nullptr,
         };
     }
 
