@@ -890,6 +890,7 @@ bool App::play_current_game() {
                         int total = (int)catalog.entries.size();
                         if (key == SDLK_ESCAPE || key == SDLK_c) {
                             catalog.close();
+                            last_move_tick = SDL_GetTicks();
                         } else if (key == SDLK_UP && catalog.index > 0) {
                             catalog.index--;
                         } else if (key == SDLK_DOWN && catalog.index < total - 1) {
@@ -951,8 +952,8 @@ bool App::play_current_game() {
             guess_pending = false;
         }
 
-        // Auto-advance playback (analysis/guess modes freeze this)
-        if (!in_analysis() && !guess_mode && !territory_drill_active) {
+        // Auto-advance playback (analysis/guess/catalog modes freeze this)
+        if (!in_analysis() && !guess_mode && !territory_drill_active && !catalog.active) {
             now = SDL_GetTicks();
             if (game_index < sgf.move_count) {
                 if (now - last_move_tick >= (Uint32)move_delay_ms) {
