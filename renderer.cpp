@@ -598,7 +598,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int line_gap   = (scale >= 3) ? 4 : 3;
     int th         = 7 * scale;
     int pad        = (scale >= 3) ? 10 : 8;   // vertical padding
-    int hpad       = (scale >= 3) ? 22 : 16;  // horizontal padding (left/right)
+    int hpad       = 100;  // horizontal padding (left/right)
     int header_gap = line_gap + (scale >= 3 ? 4 : 2);
 
     // Measure list width
