@@ -37,6 +37,8 @@ public:
         int   territory_w_score  = 0;
         bool  territory_answered = false;
         bool  territory_correct  = false;
+        // Stone visibility filter for playback (hold B or W key)
+        int   stone_filter = 0;   // 0=all, 1=black only, 2=white only
         // Software cursor (drawn by renderer, bypasses OS DPI scaling entirely)
         int   cursor_x    = -1;
         int   cursor_y    = -1;

@@ -399,6 +399,14 @@ private:
         int cx = -1, cy = -1;
         SDL_GetMouseState(&cx, &cy);
 
+        // Stone visibility filter: only active during plain playback
+        int stone_filter = 0;
+        if (!in_analysis() && !game_mode && !guess_mode && !territory_drill_active) {
+            const Uint8* kb2 = SDL_GetKeyboardState(nullptr);
+            if      (kb2[SDL_SCANCODE_B]) stone_filter = 1;  // black only
+            else if (kb2[SDL_SCANCODE_W]) stone_filter = 2;  // white only
+        }
+
         return Renderer::DrawState{
             game,
             analysis.get(),
@@ -422,6 +430,7 @@ private:
             tp ? tp->white_score : 0,
             tp ? tp->answered    : false,
             tp ? tp->correct     : false,
+            stone_filter,
             cx, cy, cursor_type,
         };
     }

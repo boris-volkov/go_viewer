@@ -673,6 +673,9 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         for (int f = 0; f < BOARD_SIZE; f++)
             mix8(uint8_t(board[r][f]));
 
+    // Stone filter
+    mix8(uint8_t(ds.stone_filter));
+
     // Mode flags
     mix8(uint8_t(ds.analysis_mode));
     mix8(uint8_t(ds.game_mode));
@@ -788,11 +791,16 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     // Chain connections (behind stones)
     render_chain_connections(view, active_board, ds.chain_mode);
 
-    // Stones
+    // Stones (stone_filter: 0=all, 1=black only, 2=white only)
     for (int r = 0; r < BOARD_SIZE; r++)
-        for (int f = 0; f < BOARD_SIZE; f++)
-            if (active_board[r][f] != 0)
-                draw_stone_circle(view, r, f, active_board[r][f] == 1, 255);
+        for (int f = 0; f < BOARD_SIZE; f++) {
+            int cell = active_board[r][f];
+            if (cell == 0) continue;
+            int is_black = (cell == 1);
+            if (ds.stone_filter == 1 && !is_black) continue;
+            if (ds.stone_filter == 2 &&  is_black) continue;
+            draw_stone_circle(view, r, f, is_black, 255);
+        }
 
     // Liberty dots
     render_liberties(view, lib_r, lib_f, lib_count);
