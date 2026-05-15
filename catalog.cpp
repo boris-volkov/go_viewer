@@ -185,6 +185,16 @@ void Catalog::close() {
     active = false;
 }
 
+std::string Catalog::selected_entry_path() const {
+    if (index < 0 || index >= (int)entries.size()) return {};
+    const CatalogEntry& e = entries[index];
+    if (e.type != 0) return {};  // directory or ".." — no path
+    std::string dir = base_dir;
+    if (!current_subdir.empty())
+        dir = join_path(base_dir, current_subdir);
+    return join_path(dir, e.name);
+}
+
 void Catalog::dir_up() {
     auto pos = current_subdir.find_last_of("/\\");
     if (pos == std::string::npos)

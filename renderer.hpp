@@ -43,6 +43,9 @@ public:
         int   cursor_x    = -1;
         int   cursor_y    = -1;
         int   cursor_type = 0;  // 0=hidden, 1=crosshair, 2=white stone, 3=black stone
+        // Catalog thumbnail: final-position board of the selected SGF
+        bool        catalog_thumb_valid = false;
+        const char (*catalog_thumb_board)[BOARD_SIZE] = nullptr;
     };
 
     void get_board_view(BoardView& view) const;
@@ -70,7 +73,8 @@ private:
     void render_result_message(const BoardView& view, const DrawState& ds);
     void render_game_date(const BoardView& view, const std::string& date);
     void render_help_overlay(const BoardView& view, bool show_help);
-    void render_catalog_overlay(const BoardView& view, const Catalog& catalog);
+    void render_catalog_overlay(const BoardView& view, const DrawState& ds);
+    void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE]);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
     void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set

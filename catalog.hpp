@@ -34,11 +34,17 @@ public:
     // Returns false on error.
     static bool list_sgf_files(const std::string& dir, std::vector<std::string>& out);
 
+    // Build a full path from two components (handles trailing separators).
+    static std::string join_path(const std::string& dir, const std::string& name);
+
+    // Return the full filesystem path of the currently selected entry,
+    // or empty string if the selection is a directory or parent link.
+    std::string selected_entry_path() const;
+
 private:
     void dir_up();
     bool load_entries();
     static bool list_recursive(const std::string& dir, const std::string& base,
                                std::vector<std::string>& out);
     static bool has_sgf_ext(const std::string& name);
-    static std::string join_path(const std::string& dir, const std::string& name);
 };

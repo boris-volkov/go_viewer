@@ -101,6 +101,28 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     return g.move_count > 0;
 }
 
+// Play all moves in an SGF to completion and return the final board state.
+// Pure CPU — no SDL, no GameState overhead.  Used for catalog thumbnails.
+static bool sgf_final_board(const std::string& path,
+                             char board_out[BOARD_SIZE][BOARD_SIZE]) {
+    SgfGame g;
+    if (!load_sgf(path, g)) return false;
+    char board[BOARD_SIZE][BOARD_SIZE] = {};
+    for (int i = 0; i < g.move_count; i++) {
+        int r, f;
+        if (!parse_sgf_move(g.moves[i], r, f)) continue;
+        if (board[r][f] != 0) continue;
+        int is_black = (g.colors[i] == 1);
+        if (GoRules::would_be_suicide(board, r, f, is_black)) continue;
+        board[r][f] = is_black ? 1 : 2;
+        int cap_r[BOARD_SIZE * BOARD_SIZE], cap_f[BOARD_SIZE * BOARD_SIZE], cap_count = 0;
+        GoRules::find_captured(board, is_black, r, f, cap_r, cap_f, cap_count);
+        for (int j = 0; j < cap_count; j++) board[cap_r[j]][cap_f[j]] = 0;
+    }
+    memcpy(board_out, board, sizeof(board));
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Territory estimation drill
 
@@ -298,6 +320,11 @@ private:
     std::string games_dir;
     std::string forced_path;  // set by catalog selection
 
+    // Catalog thumbnail: cached final-position board for the selected SGF.
+    std::string thumb_path;                          // path of cached thumbnail
+    char        thumb_board[BOARD_SIZE][BOARD_SIZE]; // final board state
+    bool        thumb_valid = false;
+
     // Navigation
     NavRequest nav_request     = NAV_NONE;
 
@@ -399,6 +426,15 @@ private:
         int cx = -1, cy = -1;
         SDL_GetMouseState(&cx, &cy);
 
+        // Catalog thumbnail: parse to final position when selection changes
+        if (catalog.active) {
+            std::string sel = catalog.selected_entry_path();
+            if (sel != thumb_path) {
+                thumb_path  = sel;
+                thumb_valid = !sel.empty() && sgf_final_board(sel, thumb_board);
+            }
+        }
+
         // Stone visibility filter: only active during plain playback
         int stone_filter = 0;
         if (!in_analysis() && !game_mode && !guess_mode && !territory_drill_active) {
@@ -432,6 +468,8 @@ private:
             tp ? tp->correct     : false,
             stone_filter,
             cx, cy, cursor_type,
+            thumb_valid,
+            thumb_valid ? thumb_board : nullptr,
         };
     }
 
