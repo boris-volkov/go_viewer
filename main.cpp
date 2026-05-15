@@ -798,67 +798,89 @@ bool App::play_current_game() {
         if (game_index < sgf.move_count)
             game.turn_is_black = sgf.colors[game_index];
 
+        // ---------------------------------------------------------------------------
+        // Compute how long we can sleep before something needs to happen on a timer.
+        // Any input event (mouse move, key, etc.) wakes us immediately regardless,
+        // so cursor tracking is always smooth with near-zero CPU when idle.
+        int wait_ms = 1000;
+
+        // Wake when the speed-change label should disappear
+        if (speed_message_until > 0 && speed_message_until > now)
+            wait_ms = std::min(wait_ms, (int)(speed_message_until - now));
+
+        // In playback: wake when the next move is due or the game-over pause ends
+        if (!in_analysis() && !guess_mode && !territory_drill_active && !catalog.active) {
+            if (game_index < sgf.move_count) {
+                int remaining = (int)move_delay_ms - (int)(now - last_move_tick);
+                wait_ms = std::min(wait_ms, std::max(remaining, 0));
+            } else if (game.game_finished && game.game_finished_timer > 0) {
+                int remaining = (int)GAME_OVER_PAUSE_MS - (int)(now - game.game_finished_timer);
+                wait_ms = std::min(wait_ms, std::max(remaining, 0));
+            }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Block until an event arrives or the timer fires
         SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            note_mouse_activity_event(e);
+        if (SDL_WaitEventTimeout(&e, wait_ms)) {
+            // Process this event then drain any others that queued up
+            do {
+                note_mouse_activity_event(e);
 
-            // Catalog events intercept everything
-            if (catalog.active) {
-                if (e.type == SDL_KEYDOWN) {
-                    SDL_Keycode key = e.key.keysym.sym;
-                    int total = (int)catalog.entries.size();
-                    if (key == SDLK_ESCAPE || key == SDLK_c) {
-                        catalog.close();
-                        draw_board();
-                    } else if (key == SDLK_UP && catalog.index > 0) {
-                        catalog.index--; draw_board();
-                    } else if (key == SDLK_DOWN && catalog.index < total - 1) {
-                        catalog.index++; draw_board();
-                    } else if (key == SDLK_PAGEUP) {
-                        catalog.index = (catalog.index > 6) ? catalog.index - 6 : 0;
-                        draw_board();
-                    } else if (key == SDLK_PAGEDOWN) {
-                        catalog.index = (catalog.index + 6 < total) ? catalog.index + 6 : total - 1;
-                        draw_board();
-                    } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
-                        catalog.select();
-                        if (catalog.selection_made) {
-                            forced_path  = catalog.selected_path;
-                            catalog.selection_made = false;
-                            nav_request  = NAV_SELECT;
-                            quit         = true;
+                // Catalog intercepts all input
+                if (catalog.active) {
+                    if (e.type == SDL_KEYDOWN) {
+                        SDL_Keycode key = e.key.keysym.sym;
+                        int total = (int)catalog.entries.size();
+                        if (key == SDLK_ESCAPE || key == SDLK_c) {
+                            catalog.close();
+                        } else if (key == SDLK_UP && catalog.index > 0) {
+                            catalog.index--;
+                        } else if (key == SDLK_DOWN && catalog.index < total - 1) {
+                            catalog.index++;
+                        } else if (key == SDLK_PAGEUP) {
+                            catalog.index = (catalog.index > 6) ? catalog.index - 6 : 0;
+                        } else if (key == SDLK_PAGEDOWN) {
+                            catalog.index = (catalog.index + 6 < total) ? catalog.index + 6 : total - 1;
+                        } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                            catalog.select();
+                            if (catalog.selection_made) {
+                                forced_path  = catalog.selected_path;
+                                catalog.selection_made = false;
+                                nav_request  = NAV_SELECT;
+                                quit         = true;
+                            }
                         }
-                        draw_board();
                     }
+                    continue;  // skip game-event handling; drain next event
                 }
-                continue;
-            }
 
-            if (e.type == SDL_QUIT) {
-                nav_request = NAV_NONE; quit = true;
-            } else if (e.type == SDL_KEYDOWN) {
-                const Uint8* kb = SDL_GetKeyboardState(nullptr);
-                handle_key(e.key.keysym.sym, kb, quit);
-            } else if (in_analysis() && e.type == SDL_MOUSEBUTTONDOWN) {
-                BoardView view; renderer->get_board_view(view);
-                const Uint8* kb = SDL_GetKeyboardState(nullptr);
-                if (e.button.button == SDL_BUTTON_LEFT)
-                    handle_analysis_lclick(view, e.button.x, e.button.y, kb);
-                else if (e.button.button == SDL_BUTTON_RIGHT)
-                    handle_analysis_rclick(view, e.button.x, e.button.y);
-            } else if (!in_analysis() && !guess_mode && e.type == SDL_MOUSEBUTTONDOWN &&
-                       e.button.button == SDL_BUTTON_LEFT) {
-                BoardView view; renderer->get_board_view(view);
-                handle_playback_lclick(view, e.button.x, e.button.y);
-            } else if (guess_mode && !in_analysis() && e.type == SDL_MOUSEBUTTONDOWN &&
-                       e.button.button == SDL_BUTTON_LEFT) {
-                BoardView view; renderer->get_board_view(view);
-                handle_guess_lclick(view, e.button.x, e.button.y, guess_pending, guess_r, guess_f);
-            }
+                if (e.type == SDL_QUIT) {
+                    nav_request = NAV_NONE; quit = true;
+                } else if (e.type == SDL_KEYDOWN) {
+                    const Uint8* kb = SDL_GetKeyboardState(nullptr);
+                    handle_key(e.key.keysym.sym, kb, quit);
+                } else if (in_analysis() && e.type == SDL_MOUSEBUTTONDOWN) {
+                    BoardView view; renderer->get_board_view(view);
+                    const Uint8* kb = SDL_GetKeyboardState(nullptr);
+                    if (e.button.button == SDL_BUTTON_LEFT)
+                        handle_analysis_lclick(view, e.button.x, e.button.y, kb);
+                    else if (e.button.button == SDL_BUTTON_RIGHT)
+                        handle_analysis_rclick(view, e.button.x, e.button.y);
+                } else if (!in_analysis() && !guess_mode && e.type == SDL_MOUSEBUTTONDOWN &&
+                           e.button.button == SDL_BUTTON_LEFT) {
+                    BoardView view; renderer->get_board_view(view);
+                    handle_playback_lclick(view, e.button.x, e.button.y);
+                } else if (guess_mode && !in_analysis() && e.type == SDL_MOUSEBUTTONDOWN &&
+                           e.button.button == SDL_BUTTON_LEFT) {
+                    BoardView view; renderer->get_board_view(view);
+                    handle_guess_lclick(view, e.button.x, e.button.y, guess_pending, guess_r, guess_f);
+                }
+            } while (!quit && SDL_PollEvent(&e));
         }
         if (quit) break;
 
-        // Guess mode: compare and advance
+        // Guess mode: resolve pending guess and advance
         if (guess_pending && game_index < sgf.move_count) {
             int er, ef;
             if (parse_sgf_move(sgf.moves[game_index], er, ef)) {
@@ -873,38 +895,33 @@ bool App::play_current_game() {
             guess_pending = false;
         }
 
-        // Analysis and guess modes freeze auto-advance
-        if (in_analysis() || guess_mode) {
-            draw_board();
-            SDL_Delay(10);
-            continue;
+        // Auto-advance playback (analysis/guess modes freeze this)
+        if (!in_analysis() && !guess_mode && !territory_drill_active) {
+            now = SDL_GetTicks();
+            if (game_index < sgf.move_count) {
+                if (now - last_move_tick >= (Uint32)move_delay_ms) {
+                    int r, f;
+                    if (parse_sgf_move(sgf.moves[game_index], r, f)) {
+                        bool is_black = (sgf.colors[game_index] == 1);
+                        animate_move(r, f, is_black);
+                    }
+                    game_index++;
+                    if (game_index < sgf.move_count) game.turn_is_black = sgf.colors[game_index];
+                    last_move_tick = now;
+                }
+            } else {
+                if (!game.game_finished) {
+                    game.game_finished      = 1;
+                    game.game_finished_timer = now;
+                }
+                if (now - game.game_finished_timer >= GAME_OVER_PAUSE_MS) {
+                    nav_request = NAV_NEXT;
+                    quit        = true;
+                }
+            }
         }
 
-        // Auto-advance playback
-        if (!in_analysis() && !territory_drill_active && game_index < sgf.move_count) {
-            if (now - last_move_tick >= (Uint32)move_delay_ms) {
-                int r, f;
-                if (parse_sgf_move(sgf.moves[game_index], r, f)) {
-                    bool is_black = (sgf.colors[game_index] == 1);
-                    animate_move(r, f, is_black);
-                }
-                game_index++;
-                if (game_index < sgf.move_count) game.turn_is_black = sgf.colors[game_index];
-                last_move_tick = now;
-            }
-        } else if (game_index >= sgf.move_count) {
-            game.game_finished = 1;
-            if (game.game_finished_timer == 0)
-                game.game_finished_timer = SDL_GetTicks();
-            draw_board();
-            if (SDL_GetTicks() - game.game_finished_timer >= GAME_OVER_PAUSE_MS) {
-                nav_request = NAV_NEXT;
-                quit = true;
-            }
-        }
-        // Always redraw in playback mode so the software cursor tracks the mouse
         draw_board();
-        SDL_Delay(10);
     }
 
     return quit && nav_request == NAV_NONE;
