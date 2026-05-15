@@ -627,9 +627,15 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
                            && ds.catalog_thumb_open  != nullptr
                            && ds.catalog_thumb_final != nullptr;
     int  thumb_outer_gap = has_thumb ? (scale >= 3 ? 14 : 10) : 0;
-    int  thumb_inner_gap = has_thumb ? (scale >= 3 ?  6 :  4) : 0;
-    int  thumb_size      = has_thumb ? (bh - pad * 2 - thumb_inner_gap) / 2 : 0;
-    int  total_bw        = list_bw + (has_thumb ? thumb_outer_gap + thumb_size : 0);
+    int  thumb_pad       = has_thumb ? (scale >= 3 ? 14 :  9) : 0;  // padding inside pane
+    int  thumb_inner_gap = has_thumb ? (scale >= 3 ?  8 :  5) : 0;  // gap between the two boards
+    int  thumb_max       = scale >= 3 ? 110 : 76;                    // cap size
+    int  thumb_size      = has_thumb
+                           ? std::min(thumb_max,
+                                      (bh - pad * 2 - thumb_inner_gap - thumb_pad * 2) / 2)
+                           : 0;
+    int  pane_w          = has_thumb ? thumb_pad * 2 + thumb_size : 0;
+    int  total_bw        = list_bw + (has_thumb ? thumb_outer_gap + pane_w : 0);
 
     int bx = (view.screen_w - total_bw) / 2;
     int by = (view.screen_h - bh) / 2;
@@ -671,12 +677,15 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         ty += line_h;
     }
 
-    // Two thumbnails stacked: opening on top, final position on bottom
+    // Two thumbnails stacked: opening on top, final position on bottom.
+    // Centered vertically within the pane with thumb_pad on all sides.
     if (has_thumb) {
-        int thumb_x = bx + list_bw + thumb_outer_gap;
-        render_mini_board(thumb_x, by + pad,
+        int thumb_x     = bx + list_bw + thumb_outer_gap + thumb_pad;
+        int two_h       = thumb_size * 2 + thumb_inner_gap;
+        int thumb_y_top = by + (bh - two_h) / 2;
+        render_mini_board(thumb_x, thumb_y_top,
                           thumb_size, ds.catalog_thumb_open);
-        render_mini_board(thumb_x, by + pad + thumb_size + thumb_inner_gap,
+        render_mini_board(thumb_x, thumb_y_top + thumb_size + thumb_inner_gap,
                           thumb_size, ds.catalog_thumb_final);
     }
 }
