@@ -612,7 +612,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     // Both boards are always reserved on the right; they just draw when ready.
     int thumb_inner_gap = 40;
     int thumb_vpad      = 40;   // top/bottom clearance around the pair
-    int thumb_rpad      = 40;   // right edge clearance
+    int thumb_rpad      = 100;  // right edge clearance
     int thumb_size      = (view.screen_h - thumb_vpad * 2 - thumb_inner_gap) / 2;
     int two_h           = thumb_size * 2 + thumb_inner_gap;
     int thumb_x         = view.screen_w - thumb_rpad - thumb_size;
