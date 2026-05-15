@@ -654,7 +654,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
 
     int tx = hpad;
     int ty = pad;
-    draw_text(tx, ty, scale, title, Palette::TEXT_WHITE);
+    draw_text(tx, ty, scale, title, Palette::ACCENT);
     ty += th + header_gap;
 
     for (int i = 0; i < max_lines; i++) {
