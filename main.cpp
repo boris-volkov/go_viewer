@@ -126,7 +126,7 @@ static bool sgf_board_at(const std::string& path,
     return true;
 }
 
-static constexpr int THUMB_OPENING_MOVES = 10;
+static constexpr int THUMB_OPENING_MOVES = 16;
 
 // ---------------------------------------------------------------------------
 // Territory estimation drill
