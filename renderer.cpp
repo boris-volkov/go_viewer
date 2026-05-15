@@ -593,16 +593,52 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     const Catalog& cat = ds.catalog;
     if (!cat.active) return;
 
+    // Full-screen panel — no peeking behind the edges
+    SDL_Rect bg = {0, 0, view.screen_w, view.screen_h};
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
+    SDL_RenderFillRect(sdl, &bg);
+
     const char* title = "CATALOG";
     int total      = (int)cat.entries.size();
     int scale      = (view.square >= 30) ? 3 : 2;
     int line_gap   = (scale >= 3) ? 4 : 3;
     int th         = 7 * scale;
-    int pad        = (scale >= 3) ? 10 : 8;   // vertical padding
-    int hpad       = 100;  // horizontal padding (left/right)
+    int pad        = (scale >= 3) ? 10 : 8;
+    int hpad       = 100;
     int header_gap = line_gap + (scale >= 3 ? 4 : 2);
 
-    // Measure list width
+    // Thumbnails — sized and positioned unconditionally so the list never shifts.
+    // Both boards are always reserved on the right; they just draw when ready.
+    int thumb_inner_gap = 40;
+    int thumb_size      = (view.screen_h - pad * 2 - thumb_inner_gap) * 3 / 10;
+    int two_h           = thumb_size * 2 + thumb_inner_gap;
+    int thumb_x         = view.screen_w - hpad - thumb_size;
+    int thumb_y_top     = (view.screen_h - two_h) / 2;
+
+    bool has_thumb = ds.catalog_thumb_valid
+                     && ds.catalog_thumb_open  != nullptr
+                     && ds.catalog_thumb_final != nullptr;
+    if (has_thumb) {
+        render_mini_board(thumb_x, thumb_y_top,
+                          thumb_size, ds.catalog_thumb_open);
+        render_mini_board(thumb_x, thumb_y_top + thumb_size + thumb_inner_gap,
+                          thumb_size, ds.catalog_thumb_final);
+    }
+
+    // List — anchored to the left at hpad, uses full screen height for max_lines
+    int avail_h   = view.screen_h - pad * 2 - th - header_gap;
+    int line_h    = th + line_gap;
+    int max_lines = (avail_h > 0) ? (avail_h / line_h) : 4;
+    if (max_lines < 4)     max_lines = 4;
+    if (max_lines > total) max_lines = total;
+
+    int scroll = cat.scroll;
+    int idx    = cat.index;
+    if (idx < scroll) scroll = idx;
+    if (idx >= scroll + max_lines) scroll = idx - max_lines + 1;
+
+    // Measure list width for the selection highlight
     int max_w = text_width_px(title, scale);
     char lbl[1024];
     for (int i = 0; i < total; i++) {
@@ -614,52 +650,11 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         if (w > max_w) max_w = w;
     }
 
-    int avail_h   = view.screen_h - pad * 4 - th - header_gap;
-    int line_h    = th + line_gap;
-    int max_lines = (avail_h > 0) ? (avail_h / line_h) : 4;
-    if (max_lines < 4)     max_lines = 4;
-    if (max_lines > total) max_lines = total;
-
-    int list_h   = max_lines * line_h - line_gap;
-    int list_bw  = max_w + hpad * 2;
-    int bh       = th + header_gap + list_h + pad * 2;
-
-    // Thumbnail pane: two boards stacked vertically (opening + final)
-    bool has_thumb       = ds.catalog_thumb_valid
-                           && ds.catalog_thumb_open  != nullptr
-                           && ds.catalog_thumb_final != nullptr;
-    int  thumb_outer_gap = has_thumb ? (scale >= 3 ? 14 : 10) : 0;
-    int  thumb_pad       = has_thumb ? (scale >= 3 ? 10 :  7) : 0;  // padding inside pane
-    int  thumb_inner_gap = has_thumb ? 40 : 0;  // gap between the two boards
-    // 80% of what would fill the full pane height, centered with thumb_pad breathing room
-    int  thumb_size      = has_thumb
-                           ? (bh - pad * 2 - thumb_inner_gap - thumb_pad * 2) * 4 / 10
-                           : 0;
-    int  pane_w          = has_thumb ? thumb_pad + thumb_size + hpad : 0;  // hpad on right edge
-    int  total_bw        = list_bw + (has_thumb ? thumb_outer_gap + pane_w : 0);
-
-    int bx = (view.screen_w - total_bw) / 2;
-    int by = (view.screen_h - bh) / 2;
-
-    // Background panel — solid, no transparency
-    SDL_Rect bg = {bx, by, total_bw, bh};
-    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
-    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
-    SDL_RenderFillRect(sdl, &bg);
-
-    // Scroll adjustment
-    int scroll = cat.scroll;
-    int idx    = cat.index;
-    if (idx < scroll) scroll = idx;
-    if (idx >= scroll + max_lines) scroll = idx - max_lines + 1;
-
-    // Title
-    int tx = bx + hpad;
-    int ty = by + pad;
+    int tx = hpad;
+    int ty = pad;
     draw_text(tx, ty, scale, title, Palette::TEXT_WHITE);
     ty += th + header_gap;
 
-    // Entry list
     for (int i = 0; i < max_lines; i++) {
         int ei = scroll + i;
         if (ei >= total) break;
@@ -668,25 +663,13 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
         else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
         if (ei == idx) {
-            SDL_Rect hi = {bx + hpad - 3, ty - 3, max_w + 6, th + 6};
+            SDL_Rect hi = {hpad - 3, ty - 3, max_w + 6, th + 6};
             SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
                                    Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
             SDL_RenderFillRect(sdl, &hi);
         }
         draw_text(tx, ty, scale, lbl, Palette::TEXT_WHITE);
         ty += line_h;
-    }
-
-    // Two thumbnails stacked: opening on top, final position on bottom.
-    // Centered vertically within the pane with thumb_pad on all sides.
-    if (has_thumb) {
-        int thumb_x     = bx + list_bw + thumb_outer_gap + thumb_pad;
-        int two_h       = thumb_size * 2 + thumb_inner_gap;
-        int thumb_y_top = by + (bh - two_h) / 2;
-        render_mini_board(thumb_x, thumb_y_top,
-                          thumb_size, ds.catalog_thumb_open);
-        render_mini_board(thumb_x, thumb_y_top + thumb_size + thumb_inner_gap,
-                          thumb_size, ds.catalog_thumb_final);
     }
 }
 
