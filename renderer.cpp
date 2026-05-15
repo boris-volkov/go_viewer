@@ -634,7 +634,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int  thumb_size      = has_thumb
                            ? (bh - pad * 2 - thumb_inner_gap - thumb_pad * 2) * 4 / 10
                            : 0;
-    int  pane_w          = has_thumb ? thumb_pad * 2 + thumb_size : 0;
+    int  pane_w          = has_thumb ? thumb_pad + thumb_size + hpad : 0;  // hpad on right edge
     int  total_bw        = list_bw + (has_thumb ? thumb_outer_gap + pane_w : 0);
 
     int bx = (view.screen_w - total_bw) / 2;
