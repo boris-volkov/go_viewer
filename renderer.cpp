@@ -608,14 +608,26 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int hpad       = 100;
     int header_gap = line_gap + (scale >= 3 ? 4 : 2);
 
+    // Measure list width first so we can center thumbnails in the remaining space.
+    int max_w = text_width_px(title, scale);
+    char lbl[1024];
+    for (int i = 0; i < total; i++) {
+        const auto& e = cat.entries[i];
+        if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.name.c_str());
+        else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
+        else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
+        int w = text_width_px(lbl, scale);
+        if (w > max_w) max_w = w;
+    }
+    int list_right = hpad + max_w;  // x-coordinate where the list text ends
+
     // Thumbnails — sized and positioned unconditionally so the list never shifts.
-    // Both boards are always reserved on the right; they just draw when ready.
+    // Centered horizontally in the space between list_right and the screen edge.
     int thumb_inner_gap = 40;
     int thumb_vpad      = 40;   // top/bottom clearance around the pair
-    int thumb_rpad      = 100;  // right edge clearance
     int thumb_size      = (view.screen_h - thumb_vpad * 2 - thumb_inner_gap) / 2;
     int two_h           = thumb_size * 2 + thumb_inner_gap;
-    int thumb_x         = view.screen_w - thumb_rpad - thumb_size;
+    int thumb_x         = list_right + (view.screen_w - list_right - thumb_size) / 2;
     int thumb_y_top     = (view.screen_h - two_h) / 2;
 
     bool has_thumb = ds.catalog_thumb_valid
@@ -639,18 +651,6 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int idx    = cat.index;
     if (idx < scroll) scroll = idx;
     if (idx >= scroll + max_lines) scroll = idx - max_lines + 1;
-
-    // Measure list width for the selection highlight
-    int max_w = text_width_px(title, scale);
-    char lbl[1024];
-    for (int i = 0; i < total; i++) {
-        const auto& e = cat.entries[i];
-        if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.name.c_str());
-        else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
-        else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
-        int w = text_width_px(lbl, scale);
-        if (w > max_w) max_w = w;
-    }
 
     int tx = hpad;
     int ty = pad;
