@@ -675,6 +675,36 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     }
 }
 
+void Renderer::render_quit_confirm(const BoardView& view) {
+    int scale = (view.square >= 30) ? 3 : 2;
+    int th    = 7 * scale;
+    int pad   = scale >= 3 ? 16 : 12;
+
+    const char* line1 = "QUIT?";
+    const char* line2 = "press Q again to quit";
+    const char* line3 = "or ESC to cancel";
+    int gap   = scale >= 3 ? 6 : 4;
+    int lh    = th + gap;
+    int w     = text_width_px(line2, scale);
+    int bw    = w + pad * 2;
+    int bh    = th + lh * 2 + pad * 2;
+    int bx    = (view.screen_w - bw) / 2;
+    int by    = (view.screen_h - bh) / 2;
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
+    SDL_Rect bg = {bx, by, bw, bh};
+    SDL_RenderFillRect(sdl, &bg);
+
+    int tx = bx + pad;
+    int ty = by + pad;
+    draw_text(tx, ty, scale, line1, Palette::ACCENT);
+    ty += lh;
+    draw_text(tx, ty, scale, line2, Palette::TEXT_PRIMARY);
+    ty += lh;
+    draw_text(tx, ty, scale, line3, Palette::TEXT_DIM);
+}
+
 void Renderer::render_territory_overlay(const BoardView& view, const DrawState& ds) {
     if (!ds.territory_drill) return;
     int scale  = (view.square >= 30) ? 3 : 2;
@@ -743,6 +773,9 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
 
     // Stone filter
     mix8(uint8_t(ds.stone_filter));
+
+    // Quit confirmation
+    mix8(uint8_t(ds.quit_confirm));
 
     // Mode flags
     mix8(uint8_t(ds.analysis_mode));
@@ -899,6 +932,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     // }
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds);
+    if (ds.quit_confirm) render_quit_confirm(view);
 }
 
 // Public entry point: uses a cached texture for the board+HUD so that

@@ -324,6 +324,7 @@ private:
     std::string black_name, white_name;
     std::string games_dir;
     std::string forced_path;  // set by catalog selection
+    bool quit_confirm = false; // waiting for second Q to confirm quit
 
     // Catalog thumbnails: opening (first N moves) and final position.
     std::string thumb_path;
@@ -476,6 +477,7 @@ private:
             tp ? tp->correct     : false,
             stone_filter,
             cx, cy, cursor_type,
+            quit_confirm,
             thumb_valid,
             thumb_valid ? thumb_open  : nullptr,
             thumb_valid ? thumb_final : nullptr,
@@ -565,8 +567,13 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
     Uint32 now = SDL_GetTicks();
 
     if (key == SDLK_q) {
-        nav_request = NAV_NONE; quit = true; return;
+        if (quit_confirm) { nav_request = NAV_NONE; quit = true; return; }
+        quit_confirm = true;
+        draw_board();
+        return;
     }
+    // Any other key cancels a pending quit confirmation
+    if (quit_confirm) { quit_confirm = false; draw_board(); }
 
     // Territory drill intercepts most keys
     if (territory_drill_active) {
@@ -610,6 +617,7 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         return;
     }
     if (key == SDLK_ESCAPE) {
+        if (quit_confirm) { quit_confirm = false; draw_board(); return; }
         show_help = !show_help;
         draw_board();
         return;
