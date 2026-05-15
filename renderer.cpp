@@ -554,10 +554,11 @@ void Renderer::render_mini_board(int x, int y, int size,
     SDL_SetRenderDrawColor(sdl, Palette::BOARD.r, Palette::BOARD.g, Palette::BOARD.b, 255);
     SDL_RenderFillRect(sdl, &bg);
 
-    int sq = size / BOARD_SIZE;   // pixels per intersection
+    int sq  = size / BOARD_SIZE;                  // pixels per intersection
     if (sq < 1) sq = 1;
-    int px0 = x + sq / 2;        // top-left intersection (x)
-    int py0 = y + sq / 2;        // top-left intersection (y)
+    int margin = (size - BOARD_SIZE * sq) / 2;    // center the grid in the box
+    int px0 = x + margin + sq / 2;               // top-left intersection (x)
+    int py0 = y + margin + sq / 2;               // top-left intersection (y)
     int span = (BOARD_SIZE - 1) * sq;
 
     // Grid lines
