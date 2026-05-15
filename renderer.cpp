@@ -639,11 +639,10 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int bx = (view.screen_w - total_bw) / 2;
     int by = (view.screen_h - bh) / 2;
 
-    // Background panel
+    // Background panel — solid, no transparency
     SDL_Rect bg = {bx, by, total_bw, bh};
-    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(sdl, Palette::OVERLAY_MID.r, Palette::OVERLAY_MID.g,
-                           Palette::OVERLAY_MID.b, Palette::OVERLAY_MID.a);
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
     SDL_RenderFillRect(sdl, &bg);
 
     // Scroll adjustment
