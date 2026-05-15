@@ -572,8 +572,8 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         draw_board();
         return;
     }
-    // Any other key cancels a pending quit confirmation
-    if (quit_confirm) { quit_confirm = false; draw_board(); }
+    // Any other key (except Escape, which has its own handler below) cancels confirm
+    if (quit_confirm && key != SDLK_ESCAPE) { quit_confirm = false; draw_board(); }
 
     // Territory drill intercepts most keys
     if (territory_drill_active) {
