@@ -837,7 +837,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
 
     // Board background colour varies by mode
     {
-        SDL_Color bc = ds.analysis_mode ? Palette::BOARD_ANALYSIS : Palette::BOARD;
+        SDL_Color bc = Palette::BOARD;
         SDL_SetRenderDrawColor(sdl, bc.r, bc.g, bc.b, 255);
     }
     SDL_Rect board_rect = {view.offset_x, view.offset_y, view.board_px, view.board_px};
