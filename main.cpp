@@ -689,7 +689,10 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
     if (!guess_mode && !in_analysis()) {
         if (key == SDLK_LEFT && game_index > 0) {
             game_index--;
-            game.restore_snapshot(game_index);
+            if (game_index == 0)
+                game.reset();
+            else
+                game.restore_snapshot(game_index - 1);
             last_move_tick = SDL_GetTicks();
             draw_board();
             return;
