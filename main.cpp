@@ -334,6 +334,7 @@ private:
 
     // Navigation
     NavRequest nav_request     = NAV_NONE;
+    Uint32     last_move_tick  = 0;  // time of the last move advance (auto or manual)
 
     // Helpers
     bool in_analysis() const { return analysis != nullptr; }
@@ -689,6 +690,7 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         if (key == SDLK_LEFT && game_index > 0) {
             game_index--;
             game.restore_snapshot(game_index);
+            last_move_tick = SDL_GetTicks();
             draw_board();
             return;
         }
@@ -704,6 +706,7 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
             } else {
                 game_index++;
             }
+            last_move_tick = SDL_GetTicks();  // reset timer so auto-advance doesn't fire immediately
             draw_board();
             return;
         }
@@ -850,7 +853,7 @@ bool App::play_current_game() {
     bool quit          = false;
     bool guess_pending = false;
     int  guess_r = -1, guess_f = -1;
-    Uint32 last_move_tick = SDL_GetTicks();
+    last_move_tick = SDL_GetTicks();
 
     while (!quit) {
         Uint32 now = SDL_GetTicks();
