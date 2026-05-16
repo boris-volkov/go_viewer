@@ -803,7 +803,7 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         mix64(uint64_t(ds.catalog.index));
         mix64(uint64_t(ds.catalog.scroll));
         mix8(uint8_t(ds.catalog_thumb_valid));
-        // no need to hash board contents — index change already invalidates
+        mix_str(ds.catalog.current_subdir);  // invalidate on directory change
     }
 
     // HUD text

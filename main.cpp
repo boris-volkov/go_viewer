@@ -909,6 +909,7 @@ bool App::play_current_game() {
                             catalog.index = (catalog.index + 6 < total) ? catalog.index + 6 : total - 1;
                         } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
                             catalog.select();
+                            draw_board();  // refresh immediately (dir nav or file select)
                             if (catalog.selection_made) {
                                 forced_path  = catalog.selected_path;
                                 catalog.selection_made = false;
