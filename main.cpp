@@ -685,16 +685,14 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         return;
     }
 
-    if (!guess_mode) {
+    if (!guess_mode && !in_analysis()) {
         if (key == SDLK_LEFT && game_index > 0) {
-            if (in_analysis()) exit_analysis();
             game_index--;
             game.restore_snapshot(game_index);
             draw_board();
             return;
         }
         if (key == SDLK_RIGHT && game_index < sgf.move_count) {
-            if (in_analysis()) exit_analysis();
             int r, f;
             if (parse_sgf_move(sgf.moves[game_index], r, f)) {
                 bool is_black = (sgf.colors[game_index] == 1);
