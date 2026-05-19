@@ -44,6 +44,11 @@ public:
         int   cursor_y    = -1;
         int   cursor_type = 0;  // 0=hidden, 1=crosshair, 2=white stone, 3=black stone
         bool  quit_confirm   = false;
+        // Box selection
+        bool  box_sel_pending = false;
+        bool  box_sel_active  = false;
+        int   box_sel_r1 = 0, box_sel_f1 = 0;
+        int   box_sel_r2 = 0, box_sel_f2 = 0;
         // Catalog thumbnails: opening (first N moves) and final position
         bool        catalog_thumb_valid       = false;
         const char (*catalog_thumb_open) [BOARD_SIZE] = nullptr;
@@ -79,6 +84,7 @@ private:
     void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE]);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
     void render_quit_confirm(const BoardView& view);
+    void render_box_selection(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
     void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set
 

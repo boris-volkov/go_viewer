@@ -50,6 +50,7 @@ constexpr SDL_Color OVERLAY_SPEED   = {80,  80,  80,  180};  // speed-change fla
 
 constexpr SDL_Color CATALOG_SELECT  = {40,  120, 255, 190};  // catalog highlighted row
 constexpr SDL_Color LIBERTY_DOT     = {220, 50,  50,  200};  // liberty indicator dots
+constexpr SDL_Color BOX_SELECT      = {80,  220, 80,  200};  // box-selection highlight
 
 // ---------------------------------------------------------------------------
 // Territory drill

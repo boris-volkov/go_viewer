@@ -326,6 +326,36 @@ private:
     std::string forced_path;  // set by catalog selection
     bool quit_confirm = false; // waiting for second Q to confirm quit
 
+    // Box selection (shift+click two corners → highlight rectangle + count)
+    bool box_sel_pending = false;   // first corner placed, awaiting second
+    bool box_sel_active  = false;   // both corners set, rectangle displayed
+    int  box_sel_r1 = 0, box_sel_f1 = 0;
+    int  box_sel_r2 = 0, box_sel_f2 = 0;
+
+    void clear_box_sel() { box_sel_pending = false; box_sel_active = false; }
+
+    // Returns true if the click was consumed by box selection logic.
+    bool handle_box_sel_click(const BoardView& view, int mx, int my) {
+        const Uint8* kb = SDL_GetKeyboardState(nullptr);
+        if (!kb[SDL_SCANCODE_LSHIFT] && !kb[SDL_SCANCODE_RSHIFT]) {
+            if (box_sel_pending || box_sel_active) { clear_box_sel(); draw_board(); }
+            return false;
+        }
+        int r = -1, f = -1;
+        if (!renderer->screen_to_board(view, mx, my, r, f)) return true;
+        if (!box_sel_pending) {
+            box_sel_r1 = r; box_sel_f1 = f;
+            box_sel_pending = true;
+            box_sel_active  = false;
+        } else {
+            box_sel_r2 = r; box_sel_f2 = f;
+            box_sel_pending = false;
+            box_sel_active  = true;
+        }
+        draw_board();
+        return true;
+    }
+
     // Catalog thumbnails: opening (first N moves) and final position.
     std::string thumb_path;
     char        thumb_open[BOARD_SIZE][BOARD_SIZE];   // after THUMB_OPENING_MOVES moves
@@ -479,6 +509,9 @@ private:
             stone_filter,
             cx, cy, cursor_type,
             quit_confirm,
+            box_sel_pending, box_sel_active,
+            box_sel_r1, box_sel_f1,
+            box_sel_r2, box_sel_f2,
             thumb_valid,
             thumb_valid ? thumb_open  : nullptr,
             thumb_valid ? thumb_final : nullptr,
@@ -619,6 +652,7 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
     }
     if (key == SDLK_ESCAPE) {
         if (quit_confirm) { quit_confirm = false; draw_board(); return; }
+        if (box_sel_pending || box_sel_active) { clear_box_sel(); draw_board(); return; }
         show_help = !show_help;
         draw_board();
         return;
@@ -717,6 +751,7 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
 }
 
 void App::handle_analysis_lclick(const BoardView& view, int mx, int my, const Uint8* kb) {
+    if (handle_box_sel_click(view, mx, my)) return;
     int r = -1, f = -1;
     if (!renderer->screen_to_board(view, mx, my, r, f)) return;
     if (!analysis) return;
@@ -764,6 +799,7 @@ void App::handle_analysis_rclick(const BoardView& view, int mx, int my) {
 }
 
 void App::handle_playback_lclick(const BoardView& view, int mx, int my) {
+    if (handle_box_sel_click(view, mx, my)) return;
     int r = -1, f = -1;
     if (!renderer->screen_to_board(view, mx, my, r, f)) return;
     if (game.board[r][f] == 0) return;

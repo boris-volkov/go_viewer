@@ -675,6 +675,43 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     }
 }
 
+void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) {
+    if (!ds.box_sel_pending && !ds.box_sel_active) return;
+
+    int r1 = ds.box_sel_r1, f1 = ds.box_sel_f1;
+    int r2 = ds.box_sel_active ? ds.box_sel_r2 : r1;
+    int f2 = ds.box_sel_active ? ds.box_sel_f2 : f1;
+    int rmin = std::min(r1, r2), rmax = std::max(r1, r2);
+    int fmin = std::min(f1, f2), fmax = std::max(f1, f2);
+
+    int dot_r = std::max(2, view.square / 4);
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(sdl, Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
+                           Palette::BOX_SELECT.b, Palette::BOX_SELECT.a);
+    for (int r = rmin; r <= rmax; r++) {
+        for (int f = fmin; f <= fmax; f++) {
+            int x, y;
+            board_to_screen(view, r, f, x, y);
+            fill_circle(x, y, dot_r);
+        }
+    }
+
+    // Count label on the right side of the board
+    if (ds.box_sel_active) {
+        int count = (rmax - rmin + 1) * (fmax - fmin + 1);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", count);
+        int scale  = (view.square >= 30) ? 3 : 2;
+        int margin = (view.square >= 30) ? 16 : 8;
+        int tx = view.offset_x + view.board_px + margin;
+        int ty = view.offset_y + view.board_px / 2 - 7 * scale / 2;
+        SDL_Color c = {Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
+                       Palette::BOX_SELECT.b, 255};
+        draw_text(tx, ty, scale, buf, c);
+    }
+}
+
 void Renderer::render_quit_confirm(const BoardView& view) {
     int scale = (view.square >= 30) ? 3 : 2;
     int th    = 7 * scale;
@@ -776,6 +813,14 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
 
     // Quit confirmation
     mix8(uint8_t(ds.quit_confirm));
+
+    // Box selection
+    mix8(uint8_t(ds.box_sel_pending));
+    mix8(uint8_t(ds.box_sel_active));
+    if (ds.box_sel_pending || ds.box_sel_active) {
+        mix64(uint64_t(ds.box_sel_r1)); mix64(uint64_t(ds.box_sel_f1));
+        mix64(uint64_t(ds.box_sel_r2)); mix64(uint64_t(ds.box_sel_f2));
+    }
 
     // Mode flags
     mix8(uint8_t(ds.analysis_mode));
@@ -930,6 +975,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     //     int is_black = ds.analysis ? ds.analysis->turn_is_black : ds.game.turn_is_black;
     //     render_turn_indicator(view, is_black);
     // }
+    render_box_selection(view, ds);
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds);
     if (ds.quit_confirm) render_quit_confirm(view);
