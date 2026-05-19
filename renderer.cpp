@@ -689,11 +689,12 @@ void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) 
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(sdl, Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
                            Palette::BOX_SELECT.b, Palette::BOX_SELECT.a);
+    int half = view.square / 2;
     for (int r = rmin; r <= rmax; r++) {
         for (int f = fmin; f <= fmax; f++) {
             int x, y;
             board_to_screen(view, r, f, x, y);
-            fill_circle(x, y, dot_r);
+            fill_circle(x + half, y + half, dot_r);
         }
     }
 
