@@ -707,8 +707,7 @@ void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) 
         int margin = (view.square >= 30) ? 16 : 8;
         int tx = view.offset_x + view.board_px + margin;
         int ty = view.offset_y + view.board_px / 2 - 7 * scale / 2;
-        SDL_Color c = {Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
-                       Palette::BOX_SELECT.b, 255};
+        SDL_Color c = Palette::ACCENT;
         draw_text(tx, ty, scale, buf, c);
     }
 }
