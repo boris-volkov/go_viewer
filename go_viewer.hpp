@@ -38,6 +38,11 @@ struct Stone {
     int r = 0, f = 0, is_black = 0;
 };
 
+struct MoveNumCell {
+    int num      = 0;  // 1-based move number, 0 = no move played here
+    int is_black = 0;
+};
+
 // Complete snapshot of board + stone-tracking arrays (used for history / analysis init)
 struct GameSnapshot {
     char  board[BOARD_SIZE][BOARD_SIZE] = {};

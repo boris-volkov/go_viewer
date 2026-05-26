@@ -593,38 +593,88 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     const Catalog& cat = ds.catalog;
     if (!cat.active) return;
 
-    // Full-screen panel — no peeking behind the edges
+    // Full-screen panel
     SDL_Rect bg = {0, 0, view.screen_w, view.screen_h};
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
     SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
     SDL_RenderFillRect(sdl, &bg);
 
-    const char* title = "CATALOG";
     int total      = (int)cat.entries.size();
     int scale      = (view.square >= 30) ? 3 : 2;
-    int line_gap   = (scale >= 3) ? 4 : 3;
+    int line_gap   = (scale >= 3) ? 8 : 4;
     int th         = 7 * scale;
     int pad        = (scale >= 3) ? 10 : 8;
     int hpad       = 100;
     int header_gap = line_gap + (scale >= 3 ? 4 : 2);
+    int line_h     = th + line_gap;
 
-    // Measure list width first so we can center thumbnails in the remaining space.
-    int max_w = text_width_px(title, scale);
+    // tx/ty track the current draw cursor for the left-side list column
+    int tx = hpad;
+    int ty = pad;
+
+    // --- Header ---
+    const char* title = cat.search_mode ? "CATALOG  (ESC to clear search)" : "CATALOG";
+    draw_text(tx, ty, scale, title, Palette::ACCENT);
+    ty += th + header_gap;
+
+    // --- Index status / search bar ---
+    bool index_ready   = cat.game_index.loaded();
+    bool index_loading = cat.game_index.is_loading();
+
+    if (index_loading && !index_ready) {
+        // Show a brief "building..." hint below the header
+        draw_text(tx, ty, scale, "Building index...", Palette::TEXT_WHITE);
+        ty += th + line_gap + (scale >= 3 ? 4 : 2);
+    }
+
+    if (!cat.search_query.empty() || cat.search_mode) {
+        char search_lbl[256];
+        if (!index_ready && !cat.search_query.empty()) {
+            snprintf(search_lbl, sizeof(search_lbl), "SEARCH: %s_  (indexing...)", cat.search_query.c_str());
+        } else {
+            snprintf(search_lbl, sizeof(search_lbl), "SEARCH: %s_", cat.search_query.c_str());
+        }
+        draw_text(tx, ty, scale, search_lbl, Palette::ACCENT);
+        ty += th + line_gap;
+        char count_lbl[64];
+        snprintf(count_lbl, sizeof(count_lbl), "%d result%s",
+                 total, total == 1 ? "" : "s");
+        draw_text(tx, ty, scale, count_lbl, Palette::TEXT_WHITE);
+        ty += th + line_gap + (scale >= 3 ? 4 : 2);
+    }
+
+    // --- Measure list width and black-column width for aligned player names ---
     char lbl[1024];
+    int vs_w     = text_width_px("vs", scale);
+    int col_gap  = scale * 6;   // pixel gap between columns
+    int max_w       = text_width_px(title, scale);
+    int max_black_w = 0;        // widest black-player name across all entries
+
     for (int i = 0; i < total; i++) {
         const auto& e = cat.entries[i];
-        if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.name.c_str());
-        else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
-        else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
-        int w = text_width_px(lbl, scale);
+        int w;
+        if (e.type == 0 && (!e.player_black.empty() || !e.player_white.empty())) {
+            // Three-column: black  vs  white
+            const char* bn = e.player_black.empty() ? "?" : e.player_black.c_str();
+            const char* wn = e.player_white.empty() ? "?" : e.player_white.c_str();
+            int bw = text_width_px(bn, scale);
+            int ww = text_width_px(wn, scale);
+            if (bw > max_black_w) max_black_w = bw;
+            w = bw + col_gap + vs_w + col_gap + ww;
+        } else {
+            if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.display_name.c_str());
+            else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
+            else if (e.type == 3) snprintf(lbl, sizeof(lbl), "[%s]", e.display_name.c_str());
+            else                  snprintf(lbl, sizeof(lbl), "%s", e.display_name.c_str());
+            w = text_width_px(lbl, scale);
+        }
         if (w > max_w) max_w = w;
     }
-    int list_right = hpad + max_w;  // x-coordinate where the list text ends
+    int list_right = hpad + max_w;
 
-    // Thumbnails — sized and positioned unconditionally so the list never shifts.
-    // Centered horizontally in the space between list_right and the screen edge.
+    // --- Thumbnails ---
     int thumb_inner_gap = 40;
-    int thumb_vpad      = 40;   // top/bottom clearance around the pair
+    int thumb_vpad      = 40;
     int thumb_size      = (view.screen_h - thumb_vpad * 2 - thumb_inner_gap) * 4 / 10;
     int two_h           = thumb_size * 2 + thumb_inner_gap;
     int thumb_x         = list_right + (view.screen_w - list_right - thumb_size) / 2;
@@ -640,9 +690,8 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
                           thumb_size, ds.catalog_thumb_final);
     }
 
-    // List — anchored to the left at hpad, uses full screen height for max_lines
-    int avail_h   = view.screen_h - pad * 2 - th - header_gap;
-    int line_h    = th + line_gap;
+    // --- Entry list ---
+    int avail_h   = view.screen_h - ty - pad;
     int max_lines = (avail_h > 0) ? (avail_h / line_h) : 4;
     if (max_lines < 4)     max_lines = 4;
     if (max_lines > total) max_lines = total;
@@ -652,63 +701,121 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     if (idx < scroll) scroll = idx;
     if (idx >= scroll + max_lines) scroll = idx - max_lines + 1;
 
-    int tx = hpad;
-    int ty = pad;
-    draw_text(tx, ty, scale, title, Palette::ACCENT);
-    ty += th + header_gap;
-
     for (int i = 0; i < max_lines; i++) {
         int ei = scroll + i;
         if (ei >= total) break;
         const auto& e = cat.entries[ei];
-        if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.name.c_str());
-        else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
-        else                  snprintf(lbl, sizeof(lbl), "%s", e.name.c_str());
+
+        // Highlight bar for the selected entry
         if (ei == idx) {
             SDL_Rect hi = {hpad - 3, ty - 3, max_w + 6, th + 6};
             SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
                                    Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
             SDL_RenderFillRect(sdl, &hi);
         }
-        draw_text(tx, ty, scale, lbl, Palette::TEXT_WHITE);
+
+        if (e.type == 0 && (!e.player_black.empty() || !e.player_white.empty())) {
+            // Three-column layout: [black ACCENT] [vs WHITE] [white ACCENT]
+            const char* bn = e.player_black.empty() ? "?" : e.player_black.c_str();
+            const char* wn = e.player_white.empty() ? "?" : e.player_white.c_str();
+            draw_text(tx,                                    ty, scale, bn,   Palette::ACCENT);
+            draw_text(tx + max_black_w + col_gap,            ty, scale, "vs", Palette::TEXT_WHITE);
+            draw_text(tx + max_black_w + col_gap + vs_w + col_gap, ty, scale, wn, Palette::ACCENT);
+        } else {
+            if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.display_name.c_str());
+            else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
+            else if (e.type == 3) snprintf(lbl, sizeof(lbl), "[%s]", e.display_name.c_str());
+            else                  snprintf(lbl, sizeof(lbl), "%s", e.display_name.c_str());
+            draw_text(tx, ty, scale, lbl, Palette::TEXT_WHITE);
+        }
+
         ty += line_h;
     }
 }
 
+// Draw a dashed line between two pixel points, alternating drawn/skipped segments.
+void Renderer::draw_dashed_line(int x1, int y1, int x2, int y2, int dash_len, int gap_len) {
+    int dx = x2 - x1, dy = y2 - y1;
+    int steps = std::max(std::abs(dx), std::abs(dy));
+    if (steps == 0) return;
+    float sx = (float)dx / steps, sy = (float)dy / steps;
+    int period = dash_len + gap_len;
+    for (int i = 0; i <= steps; i++) {
+        if ((i % period) < dash_len) {
+            int px = x1 + (int)(sx * i);
+            int py = y1 + (int)(sy * i);
+            SDL_RenderDrawPoint(sdl, px, py);
+        }
+    }
+}
+
 void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) {
-    if (!ds.box_sel_pending && !ds.box_sel_active) return;
+    bool has_committed = (ds.box_sel_pts != nullptr && ds.box_sel_count > 0);
+    if (!has_committed && !ds.box_drag_active) return;
 
-    int r1 = ds.box_sel_r1, f1 = ds.box_sel_f1;
-    int r2 = ds.box_sel_active ? ds.box_sel_r2 : r1;
-    int f2 = ds.box_sel_active ? ds.box_sel_f2 : f1;
-    int rmin = std::min(r1, r2), rmax = std::max(r1, r2);
-    int fmin = std::min(f1, f2), fmax = std::max(f1, f2);
-
-    int dot_r = std::max(2, view.square / 4);
+    int half   = view.square / 2;
+    int dot_r  = std::max(2, view.square / 5);
 
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(sdl, Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
-                           Palette::BOX_SELECT.b, Palette::BOX_SELECT.a);
-    int half = view.square / 2;
-    for (int r = rmin; r <= rmax; r++) {
-        for (int f = fmin; f <= fmax; f++) {
-            int x, y;
-            board_to_screen(view, r, f, x, y);
-            fill_circle(x + half, y + half, dot_r);
+
+    // --- Draw committed intersection dots ---
+    if (has_committed) {
+        SDL_SetRenderDrawColor(sdl, Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
+                               Palette::BOX_SELECT.b, Palette::BOX_SELECT.a);
+        for (int r = 0; r < BOARD_SIZE; r++) {
+            for (int f = 0; f < BOARD_SIZE; f++) {
+                if (!ds.box_sel_pts[r][f]) continue;
+                int x, y;
+                board_to_screen(view, r, f, x, y);
+                fill_circle(x + half, y + half, dot_r);
+            }
         }
     }
 
-    // Count label on the right side of the board
-    if (ds.box_sel_active) {
-        int count = (rmax - rmin + 1) * (fmax - fmin + 1);
+    // --- Draw dashed rubber-band rectangle for active drag ---
+    if (ds.box_drag_active) {
+        int r1 = ds.box_drag_r1, f1 = ds.box_drag_f1;
+        int r2 = ds.box_drag_r2, f2 = ds.box_drag_f2;
+        int rmin = std::min(r1, r2), rmax = std::max(r1, r2);
+        int fmin = std::min(f1, f2), fmax = std::max(f1, f2);
+
+        int x1, y1, x2, y2;
+        board_to_screen(view, rmin, fmin, x1, y1);
+        board_to_screen(view, rmax, fmax, x2, y2);
+        // Shift to intersection centers
+        x1 += half; y1 += half;
+        x2 += half; y2 += half;
+
+        // Thick-ish dashed rect: draw 2px wide by offsetting
+        SDL_Color dc = Palette::BOX_SELECT;
+        SDL_SetRenderDrawColor(sdl, dc.r, dc.g, dc.b, dc.a);
+        int dash = 6, gap = 4;
+        for (int t = 0; t <= 1; t++) {
+            draw_dashed_line(x1-t, y1-t, x2+t, y1-t, dash, gap);  // top
+            draw_dashed_line(x1-t, y2+t, x2+t, y2+t, dash, gap);  // bottom
+            draw_dashed_line(x1-t, y1-t, x1-t, y2+t, dash, gap);  // left
+            draw_dashed_line(x2+t, y1-t, x2+t, y2+t, dash, gap);  // right
+        }
+    }
+
+    // --- Count label on the right side of the board ---
+    int total = ds.box_sel_count;
+    // Add drag preview intersections to the count display
+    if (ds.box_drag_active) {
+        int r1 = ds.box_drag_r1, f1 = ds.box_drag_f1;
+        int r2 = ds.box_drag_r2, f2 = ds.box_drag_f2;
+        int rmin = std::min(r1, r2), rmax = std::max(r1, r2);
+        int fmin = std::min(f1, f2), fmax = std::max(f1, f2);
+        total += (rmax - rmin + 1) * (fmax - fmin + 1);
+    }
+    if (total > 0) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%d", count);
+        snprintf(buf, sizeof(buf), "%d", total);
         int scale  = (view.square >= 30) ? 3 : 2;
         int margin = (view.square >= 30) ? 16 : 8;
         int tx = view.offset_x + view.board_px + margin;
         int ty = view.offset_y + view.board_px / 2 - 7 * scale / 2;
-        SDL_Color c = Palette::ACCENT;
-        draw_text(tx, ty, scale, buf, c);
+        draw_text(tx, ty, scale, buf, Palette::ACCENT);
     }
 }
 
@@ -812,14 +919,22 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix8(uint8_t(ds.stone_filter));
 
     // Quit confirmation
+    mix8(uint8_t(ds.show_move_numbers));
+    mix64(uint64_t(ds.sgf_game_index));
     mix8(uint8_t(ds.quit_confirm));
 
     // Box selection
-    mix8(uint8_t(ds.box_sel_pending));
-    mix8(uint8_t(ds.box_sel_active));
-    if (ds.box_sel_pending || ds.box_sel_active) {
-        mix64(uint64_t(ds.box_sel_r1)); mix64(uint64_t(ds.box_sel_f1));
-        mix64(uint64_t(ds.box_sel_r2)); mix64(uint64_t(ds.box_sel_f2));
+    mix64(uint64_t(ds.box_sel_count));
+    mix8(uint8_t(ds.box_drag_active));
+    if (ds.box_drag_active) {
+        mix64(uint64_t(ds.box_drag_r1)); mix64(uint64_t(ds.box_drag_f1));
+        mix64(uint64_t(ds.box_drag_r2)); mix64(uint64_t(ds.box_drag_f2));
+    }
+    // Hash the committed points grid (only if non-empty to save time)
+    if (ds.box_sel_pts && ds.box_sel_count > 0) {
+        for (int r = 0; r < BOARD_SIZE; r++)
+            for (int f = 0; f < BOARD_SIZE; f++)
+                mix8(uint8_t(ds.box_sel_pts[r][f]));
     }
 
     // Mode flags
@@ -848,7 +963,14 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         mix64(uint64_t(ds.catalog.index));
         mix64(uint64_t(ds.catalog.scroll));
         mix8(uint8_t(ds.catalog_thumb_valid));
-        mix_str(ds.catalog.current_subdir);  // invalidate on directory change
+        mix8(uint8_t(ds.catalog.search_mode));
+        mix8(uint8_t(ds.catalog.game_index.loaded()));
+        mix8(uint8_t(ds.catalog.game_index.is_loading()));
+        mix8(uint8_t(ds.catalog.virtual_year_mode));
+        mix_str(ds.catalog.virtual_year);
+        mix_str(ds.catalog.current_subdir);
+        mix_str(ds.catalog.search_query);
+        mix64(uint64_t(ds.catalog.entries.size()));
     }
 
     // HUD text
@@ -949,6 +1071,70 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
             if (ds.stone_filter == 2 &&  is_black) continue;
             draw_stone_circle(view, r, f, is_black, 255);
         }
+
+    // Move-number overlay
+    if (ds.show_move_numbers) {
+        // Build num/col grids from the appropriate source:
+        //   analysis mode → App's persistent grids (never touched by captures)
+        //   playback      → raw SGF arrays (position-based, also capture-immune)
+        int num_grid[BOARD_SIZE][BOARD_SIZE] = {};
+        int col_grid[BOARD_SIZE][BOARD_SIZE] = {};
+
+        if (ds.analysis_mode && ds.analysis_num_grid && ds.analysis_col_grid) {
+            for (int r = 0; r < BOARD_SIZE; r++)
+                for (int f = 0; f < BOARD_SIZE; f++) {
+                    num_grid[r][f] = ds.analysis_num_grid[r][f];
+                    col_grid[r][f] = ds.analysis_col_grid[r][f];
+                }
+        } else if (!ds.analysis_mode && ds.sgf_moves && ds.sgf_colors) {
+            for (int i = 0; i < ds.sgf_game_index; i++) {
+                const char* mv = ds.sgf_moves[i];
+                if (strlen(mv) == 2
+                    && mv[0] >= 'a' && mv[0] <= 's'
+                    && mv[1] >= 'a' && mv[1] <= 's') {
+                    int f = mv[0] - 'a';
+                    int r = mv[1] - 'a';
+                    num_grid[r][f] = i + 1;
+                    col_grid[r][f] = ds.sgf_colors[i];
+                }
+            }
+        }
+
+        int half   = view.square / 2;
+        int radius = view.square / 2 - 2;
+        for (int r = 0; r < BOARD_SIZE; r++) {
+            for (int f = 0; f < BOARD_SIZE; f++) {
+                if (num_grid[r][f] == 0) continue;
+                int  num      = num_grid[r][f];
+                int  is_black = col_grid[r][f];
+                bool captured = (active_board[r][f] == 0);
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d", num);
+                int ndigits = (int)strlen(buf);
+                int scale   = 1;
+                if (radius >= 14 && ndigits <= 2) scale = 2;
+                if (radius >= 20 && ndigits == 1) scale = 3;
+                int tw = text_width_px(buf, scale);
+                int th = 7 * scale;
+                int cx = view.offset_x + f * view.square + half;
+                int cy = view.offset_y + r * view.square + half;
+                int tx = cx - tw / 2;
+                int ty = cy - th / 2;
+                if (captured) {
+                    // Faint ghost circle so the number reads at an empty intersection
+                    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+                    Uint8 bv = is_black ? 30 : 200;
+                    SDL_SetRenderDrawColor(sdl, bv, bv, bv, 110);
+                    fill_circle(cx, cy, radius * 3 / 4);
+                }
+                SDL_Color tc = captured
+                    ? Palette::ACCENT
+                    : (is_black ? SDL_Color{230, 230, 230, 255}
+                                : SDL_Color{40,  40,  40,  255});
+                draw_text(tx, ty, scale, buf, tc);
+            }
+        }
+    }
 
     // Liberty dots
     render_liberties(view, lib_r, lib_f, lib_count);

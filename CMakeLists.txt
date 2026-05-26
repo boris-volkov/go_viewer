@@ -13,6 +13,7 @@ set(SOURCES
     game_state.cpp
     analysis_state.cpp
     catalog.cpp
+    game_index.cpp
     renderer.cpp
 )
 

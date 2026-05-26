@@ -324,36 +324,40 @@ private:
     std::string black_name, white_name;
     std::string games_dir;
     std::string forced_path;  // set by catalog selection
-    bool quit_confirm = false; // waiting for second Q to confirm quit
+    bool quit_confirm      = false; // waiting for second Q to confirm quit
+    bool show_move_numbers = false; // overlay move numbers on stones (toggle with 1)
+    // Persistent analysis number grid — updated on placement, never on capture.
+    int  analysis_num_grid[BOARD_SIZE][BOARD_SIZE] = {};  // 1-based move#, 0=none
+    int  analysis_col_grid[BOARD_SIZE][BOARD_SIZE] = {};  // 1=black, 0=white
+    int  analysis_move_num = 0;
 
-    // Box selection (shift+click two corners → highlight rectangle + count)
-    bool box_sel_pending = false;   // first corner placed, awaiting second
-    bool box_sel_active  = false;   // both corners set, rectangle displayed
-    int  box_sel_r1 = 0, box_sel_f1 = 0;
-    int  box_sel_r2 = 0, box_sel_f2 = 0;
 
-    void clear_box_sel() { box_sel_pending = false; box_sel_active = false; }
+    // Box selection: shift+drag to select rectangles, additive across drags
+    bool box_sel_pts[BOARD_SIZE][BOARD_SIZE] = {};  // accumulated committed points
+    int  box_sel_count  = 0;
+    bool box_drag_active = false;   // drag in progress
+    int  box_drag_r1 = 0, box_drag_f1 = 0;  // drag start (board coords)
 
-    // Returns true if the click was consumed by box selection logic.
-    bool handle_box_sel_click(const BoardView& view, int mx, int my) {
-        const Uint8* kb = SDL_GetKeyboardState(nullptr);
-        if (!kb[SDL_SCANCODE_LSHIFT] && !kb[SDL_SCANCODE_RSHIFT]) {
-            if (box_sel_pending || box_sel_active) { clear_box_sel(); draw_board(); }
-            return false;
-        }
-        int r = -1, f = -1;
-        if (!renderer->screen_to_board(view, mx, my, r, f)) return true;
-        if (!box_sel_pending) {
-            box_sel_r1 = r; box_sel_f1 = f;
-            box_sel_pending = true;
-            box_sel_active  = false;
-        } else {
-            box_sel_r2 = r; box_sel_f2 = f;
-            box_sel_pending = false;
-            box_sel_active  = true;
-        }
-        draw_board();
-        return true;
+    void clear_box_sel() {
+        memset(box_sel_pts, 0, sizeof(box_sel_pts));
+        box_sel_count   = 0;
+        box_drag_active = false;
+    }
+
+    void commit_box(int r1, int f1, int r2, int f2) {
+        int rmin = std::min(r1,r2), rmax = std::max(r1,r2);
+        int fmin = std::min(f1,f2), fmax = std::max(f1,f2);
+        for (int r = rmin; r <= rmax; r++)
+            for (int f = fmin; f <= fmax; f++)
+                if (!box_sel_pts[r][f]) { box_sel_pts[r][f] = true; box_sel_count++; }
+    }
+
+    // Clamp a screen position to the nearest board intersection.
+    void screen_to_board_clamped(const BoardView& view, int mx, int my, int& r, int& f) {
+        r = (my - view.offset_y) / view.square;
+        f = (mx - view.offset_x) / view.square;
+        r = std::max(0, std::min(BOARD_SIZE - 1, r));
+        f = std::max(0, std::min(BOARD_SIZE - 1, f));
     }
 
     // Catalog thumbnails: opening (first N moves) and final position.
@@ -375,6 +379,9 @@ private:
         analysis = std::make_unique<AnalysisState>(game.take_snapshot());
         // Analysis always starts with black's turn in the C original; replicate that.
         analysis->turn_is_black = 1;
+        memset(analysis_num_grid, 0, sizeof(analysis_num_grid));
+        memset(analysis_col_grid, 0, sizeof(analysis_col_grid));
+        analysis_move_num = 0;
         game.liberty_count = 0;
         game.selected_group_count = 0;
     }
@@ -483,6 +490,13 @@ private:
             else if (kb2[SDL_SCANCODE_W]) stone_filter = 2;  // white only
         }
 
+        // Compute drag end from current mouse position
+        int box_r2 = box_drag_r1, box_f2 = box_drag_f1;
+        if (box_drag_active) {
+            BoardView tmpview; renderer->get_board_view(tmpview);
+            screen_to_board_clamped(tmpview, cx, cy, box_r2, box_f2);
+        }
+
         return Renderer::DrawState{
             game,
             analysis.get(),
@@ -508,10 +522,18 @@ private:
             tp ? tp->correct     : false,
             stone_filter,
             cx, cy, cursor_type,
+            show_move_numbers,
+            sgf.moves,
+            sgf.colors,
+            game_index,
+            analysis_num_grid,
+            analysis_col_grid,
             quit_confirm,
-            box_sel_pending, box_sel_active,
-            box_sel_r1, box_sel_f1,
-            box_sel_r2, box_sel_f2,
+            box_sel_pts,
+            box_sel_count,
+            box_drag_active,
+            box_drag_r1, box_drag_f1,
+            box_r2, box_f2,
             thumb_valid,
             thumb_valid ? thumb_open  : nullptr,
             thumb_valid ? thumb_final : nullptr,
@@ -519,6 +541,13 @@ private:
     }
 
     void draw_board() {
+        if (catalog.active) {
+            // Lazy-load display names for visible entries not in the game index
+            if (!catalog.search_mode && !catalog.virtual_year_mode)
+                catalog.ensure_names_loaded(catalog.scroll, 80);
+            // Refresh virtual year list once the background index finishes
+            catalog.tick();
+        }
         auto ds = make_draw_state();
         renderer->draw_board(ds);
     }
@@ -639,6 +668,10 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
             analysis->reset_to_base();
             game.liberty_count = 0;
             game.selected_group_count = 0;
+            memset(analysis_num_grid, 0, sizeof(analysis_num_grid));
+            memset(analysis_col_grid, 0, sizeof(analysis_col_grid));
+            analysis_move_num = 0;
+            clear_box_sel();
             draw_board();
             return;
         }
@@ -652,7 +685,7 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
     }
     if (key == SDLK_ESCAPE) {
         if (quit_confirm) { quit_confirm = false; draw_board(); return; }
-        if (box_sel_pending || box_sel_active) { clear_box_sel(); draw_board(); return; }
+        if (box_sel_count > 0 || box_drag_active) { clear_box_sel(); draw_board(); return; }
         show_help = !show_help;
         draw_board();
         return;
@@ -710,6 +743,12 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         return;
     }
 
+    if (key == SDLK_1) {
+        show_move_numbers = !show_move_numbers;
+        draw_board();
+        return;
+    }
+
     if (key == SDLK_x && in_analysis()) {
         memset(analysis->board, 0, sizeof(analysis->board));
         analysis->black_prisoners = 0;
@@ -751,7 +790,6 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
 }
 
 void App::handle_analysis_lclick(const BoardView& view, int mx, int my, const Uint8* kb) {
-    if (handle_box_sel_click(view, mx, my)) return;
     int r = -1, f = -1;
     if (!renderer->screen_to_board(view, mx, my, r, f)) return;
     if (!analysis) return;
@@ -775,6 +813,8 @@ void App::handle_analysis_lclick(const BoardView& view, int mx, int my, const Ui
     if (kb[SDL_SCANCODE_W]) forced_color = 0;
     int stone_color = (forced_color != -1) ? forced_color : analysis->turn_is_black;
     if (analysis->place_stone(r, f, stone_color)) {
+        analysis_num_grid[r][f] = ++analysis_move_num;
+        analysis_col_grid[r][f] = stone_color;
         if (forced_color == -1)
             analysis->turn_is_black = !analysis->turn_is_black;
         analysis->liberty_count        = 0;
@@ -799,7 +839,6 @@ void App::handle_analysis_rclick(const BoardView& view, int mx, int my) {
 }
 
 void App::handle_playback_lclick(const BoardView& view, int mx, int my) {
-    if (handle_box_sel_click(view, mx, my)) return;
     int r = -1, f = -1;
     if (!renderer->screen_to_board(view, mx, my, r, f)) return;
     if (game.board[r][f] == 0) return;
@@ -882,6 +921,7 @@ bool App::play_current_game() {
     game.reset();
     game_index = 0;
     nav_request = NAV_NONE;
+    clear_box_sel();
     if (territory_drill_active) exit_territory_drill();
     if (game_mode) exit_game_mode();
     else if (in_analysis()) exit_analysis();
@@ -912,6 +952,11 @@ bool App::play_current_game() {
         if (speed_message_until > 0 && speed_message_until > now)
             wait_ms = std::min(wait_ms, (int)(speed_message_until - now));
 
+        // Wake periodically while the game index is loading so the UI refreshes
+        // when the background thread finishes (shows names / enables search).
+        if (catalog.active && catalog.game_index.is_loading())
+            wait_ms = std::min(wait_ms, 250);
+
         // In playback: wake when the next move is due or the game-over pause ends
         if (!in_analysis() && !guess_mode && !territory_drill_active && !catalog.active) {
             if (game_index < sgf.move_count) {
@@ -936,7 +981,15 @@ bool App::play_current_game() {
                     if (e.type == SDL_KEYDOWN) {
                         SDL_Keycode key = e.key.keysym.sym;
                         int total = (int)catalog.entries.size();
-                        if (key == SDLK_ESCAPE || key == SDLK_c) {
+                        if (key == SDLK_ESCAPE) {
+                            if (catalog.search_mode) {
+                                catalog.search_clear();
+                            } else {
+                                catalog.close();
+                                last_move_tick = SDL_GetTicks();
+                            }
+                        } else if (!catalog.search_mode && key == SDLK_c) {
+                            // 'c' closes catalog only when not typing a search query
                             catalog.close();
                             last_move_tick = SDL_GetTicks();
                         } else if (key == SDLK_UP && catalog.index > 0) {
@@ -956,6 +1009,15 @@ bool App::play_current_game() {
                                 nav_request  = NAV_SELECT;
                                 quit         = true;
                             }
+                        } else if (key == SDLK_BACKSPACE) {
+                            catalog.search_backspace();
+                        } else if (key >= SDLK_a && key <= SDLK_z) {
+                            // Letters: append lowercase (shift state ignored for search)
+                            catalog.search_append((char)(key - SDLK_a + 'a'));
+                        } else if (key >= SDLK_0 && key <= SDLK_9) {
+                            catalog.search_append((char)(key - SDLK_0 + '0'));
+                        } else if (key == SDLK_SPACE && catalog.search_mode) {
+                            catalog.search_append(' ');
                         }
                     }
                     continue;  // skip game-event handling; drain next event
@@ -966,21 +1028,47 @@ bool App::play_current_game() {
                 } else if (e.type == SDL_KEYDOWN) {
                     const Uint8* kb = SDL_GetKeyboardState(nullptr);
                     handle_key(e.key.keysym.sym, kb, quit);
+                } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                    const Uint8* kb = SDL_GetKeyboardState(nullptr);
+                    bool shift = (kb[SDL_SCANCODE_LSHIFT] || kb[SDL_SCANCODE_RSHIFT]);
+                    if (shift) {
+                        // Begin box-selection drag
+                        BoardView view; renderer->get_board_view(view);
+                        screen_to_board_clamped(view, e.button.x, e.button.y,
+                                                box_drag_r1, box_drag_f1);
+                        box_drag_active = true;
+                        draw_board();
+                    } else {
+                        // Clear any existing box selection on non-shift click
+                        if (box_sel_count > 0 || box_drag_active) {
+                            clear_box_sel();
+                            draw_board();
+                        }
+                        BoardView view; renderer->get_board_view(view);
+                        if (in_analysis()) {
+                            handle_analysis_lclick(view, e.button.x, e.button.y, kb);
+                        } else if (guess_mode) {
+                            handle_guess_lclick(view, e.button.x, e.button.y, guess_pending, guess_r, guess_f);
+                        } else {
+                            handle_playback_lclick(view, e.button.x, e.button.y);
+                        }
+                    }
+                } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
+                    if (box_drag_active) {
+                        // Commit the dragged rectangle
+                        BoardView view; renderer->get_board_view(view);
+                        int r2, f2;
+                        screen_to_board_clamped(view, e.button.x, e.button.y, r2, f2);
+                        commit_box(box_drag_r1, box_drag_f1, r2, f2);
+                        box_drag_active = false;
+                        draw_board();
+                    }
+                } else if (e.type == SDL_MOUSEMOTION && box_drag_active) {
+                    draw_board();  // redraw to update dashed-rect preview
                 } else if (in_analysis() && e.type == SDL_MOUSEBUTTONDOWN) {
                     BoardView view; renderer->get_board_view(view);
-                    const Uint8* kb = SDL_GetKeyboardState(nullptr);
-                    if (e.button.button == SDL_BUTTON_LEFT)
-                        handle_analysis_lclick(view, e.button.x, e.button.y, kb);
-                    else if (e.button.button == SDL_BUTTON_RIGHT)
+                    if (e.button.button == SDL_BUTTON_RIGHT)
                         handle_analysis_rclick(view, e.button.x, e.button.y);
-                } else if (!in_analysis() && !guess_mode && e.type == SDL_MOUSEBUTTONDOWN &&
-                           e.button.button == SDL_BUTTON_LEFT) {
-                    BoardView view; renderer->get_board_view(view);
-                    handle_playback_lclick(view, e.button.x, e.button.y);
-                } else if (guess_mode && !in_analysis() && e.type == SDL_MOUSEBUTTONDOWN &&
-                           e.button.button == SDL_BUTTON_LEFT) {
-                    BoardView view; renderer->get_board_view(view);
-                    handle_guess_lclick(view, e.button.x, e.button.y, guess_pending, guess_r, guess_f);
                 }
             } while (!quit && SDL_PollEvent(&e));
         }
