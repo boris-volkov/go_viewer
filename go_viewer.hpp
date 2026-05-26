@@ -55,9 +55,10 @@ struct GameSnapshot {
 
 struct BoardView {
     int square   = 0;
-    int offset_x = 0, offset_y = 0;
+    int margin   = 0;  // padding between board background edge and first grid line
+    int offset_x = 0, offset_y = 0;  // pixel position of the top-left grid intersection
     int screen_w = 0, screen_h = 0;
-    int board_px = 0;
+    int board_px = 0;  // grid area in pixels (square * BOARD_SIZE)
 };
 
 struct Overlay {

@@ -75,11 +75,17 @@ void Renderer::get_board_view(BoardView& view) const {
     int w = SCREEN_SIZE, h = SCREEN_SIZE;
     SDL_GetRendererOutputSize(sdl, &w, &h);
     int min_dim  = (w < h) ? w : h;
-    view.square  = min_dim / BOARD_SIZE;
+    // Fit (BOARD_SIZE + 2) cells into min_dim: one cell of margin on each side.
+    // The background fills (BOARD_SIZE+2) cells; the grid is inset by one cell.
+    view.square   = min_dim / (BOARD_SIZE + 2);
     if (view.square < 1) view.square = 1;
+    view.margin   = view.square;
     view.board_px = view.square * BOARD_SIZE;
-    view.offset_x = (w - view.board_px) / 2;
-    view.offset_y = (h - view.board_px) / 2;
+    // Centre the full background (BOARD_SIZE+2 cells wide) on screen,
+    // then offset_x/offset_y point to the first grid intersection.
+    int bg_size   = view.square * (BOARD_SIZE + 2);
+    view.offset_x = (w - bg_size) / 2 + view.margin;
+    view.offset_y = (h - bg_size) / 2 + view.margin;
     view.screen_w = w;
     view.screen_h = h;
 }
@@ -192,13 +198,16 @@ void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_bla
 // Overlay helpers
 
 void Renderer::render_chain_connections(const BoardView& view, const char board[][BOARD_SIZE],
-                                        bool chain_mode) {
+                                        bool chain_mode, int stone_filter) {
     if (!chain_mode) return;
     int drawn[BOARD_SIZE][BOARD_SIZE][4] = {};
     for (int r = 0; r < BOARD_SIZE; r++) {
         for (int f = 0; f < BOARD_SIZE; f++) {
             if (board[r][f] == 0) continue;
             int color   = (board[r][f] == 1) ? 1 : 0;
+            // Skip connections for filtered-out colour
+            if (stone_filter == 1 && color == 0) continue;  // black only — hide white
+            if (stone_filter == 2 && color == 1) continue;  // white only — hide black
             int visited[BOARD_SIZE][BOARD_SIZE] = {};
             int gr[BOARD_SIZE * BOARD_SIZE], gf[BOARD_SIZE * BOARD_SIZE];
             int gc = 0;
@@ -293,10 +302,11 @@ void Renderer::render_mode_status(const BoardView& view,
     else if (guess_mode)      txt = "GUESS MODE";
     if (!txt) return;
     int scale  = (view.square >= 30) ? 3 : 2;
-    int margin = (view.square >= 30) ? 16 : 8;
+    int pad    = (view.square >= 30) ? 16 : 8;
     int tw = text_width_px(txt, scale);
-    int x  = view.offset_x - margin - tw;
-    int y  = view.offset_y + margin;
+    // Anchor to background left/top edge (one view.margin outside the grid)
+    int x  = view.offset_x - view.margin - pad - tw;
+    int y  = view.offset_y - view.margin + pad;
     draw_text(x, y, scale, txt, Palette::ACCENT);
 }
 
@@ -308,8 +318,10 @@ void Renderer::render_result_message(const BoardView& view, const DrawState& ds)
     int margin = (view.square >= 30) ? 16 : 8;
     int tw     = text_width_px(txt, scale);
     int th     = 7 * scale;
-    int x      = view.offset_x + view.board_px + margin;
-    int y      = view.offset_y + (view.board_px - th) / 2;
+    int bg_h   = view.board_px + 2 * view.margin;
+    // Anchor to background right/vertical-centre
+    int x      = view.offset_x + view.board_px + view.margin + margin;
+    int y      = view.offset_y - view.margin + (bg_h - th) / 2;
     (void)tw;
     draw_text(x, y, scale, txt, Palette::ACCENT);
 }
@@ -331,9 +343,11 @@ void Renderer::render_speed_label(const BoardView& view, int delay_ms, Uint32 un
     int margin = (view.square >= 30) ? 16 : 8;
     int tw     = text_width_px(buf, scale);
     int th     = 7 * scale;
-    int x      = view.offset_x + (view.board_px - tw) / 2;
-    if (x < view.offset_x + margin) x = view.offset_x + margin;
-    int y = view.offset_y + margin;
+    int bg_left = view.offset_x - view.margin;
+    int bg_size = view.board_px + 2 * view.margin;
+    int x      = bg_left + (bg_size - tw) / 2;
+    if (x < bg_left + margin) x = bg_left + margin;
+    int y = view.offset_y - view.margin + margin;
     int pad = (scale >= 3) ? 4 : 3;
     SDL_Rect bg = {x - pad, y - pad, tw + pad * 2, th + pad * 2};
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
@@ -352,14 +366,15 @@ void Renderer::render_guess_score(const BoardView& view, bool guess_mode, int sc
     int gap    = scale + 2;
     // Render just below the "GUESS MODE" label (same left-aligned x, one line down)
     int tw_mode = text_width_px("GUESS MODE", scale);
-    int x = view.offset_x - margin - tw_mode;
-    int y = view.offset_y + margin + th + gap;
+    int x = view.offset_x - view.margin - margin - tw_mode;
+    int y = view.offset_y - view.margin + margin + th + gap;
     draw_text(x, y, scale, buf, Palette::TEXT_SECONDARY);
 }
 
 void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) {
     int margin   = (view.square >= 30) ? 16 : 8;
-    int right_x0 = view.offset_x + view.board_px + margin;
+    // Anchor to background right edge (one view.margin outside the grid)
+    int right_x0 = view.offset_x + view.board_px + view.margin + margin;
     int right_x1 = view.screen_w - margin;
     if (right_x1 <= right_x0) return;
 
@@ -422,13 +437,14 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
     };
 
     // Black at the top — stone centered over the two-line text block
-    int top_y = view.offset_y + margin;
+    // Anchor to background top edge (one view.margin above the grid)
+    int top_y = view.offset_y - view.margin + margin;
     draw_stone(scx, top_y + block_h / 2, true);
     draw_text(tx, top_y,              scale, bn,    name_color);
     draw_text(tx, top_y + th + line_gap, scale, bpstr, prisoner_color);
 
-    // White at the bottom
-    int bot_y = view.offset_y + view.board_px - margin - 2 * th - line_gap;
+    // White at the bottom — anchor to background bottom edge
+    int bot_y = view.offset_y + view.board_px + view.margin - margin - 2 * th - line_gap;
     if (bot_y < top_y) bot_y = top_y;
     draw_stone(scx, bot_y + block_h / 2, false);
     draw_text(tx, bot_y,              scale, wn,    name_color);
@@ -444,13 +460,13 @@ void Renderer::render_game_date(const BoardView& view, const std::string& date) 
     int margin = (view.square >= 30) ? 16 : 8;
     int th     = 7 * scale;
     int tw     = text_width_px(year, scale);
-    // Primary: left of board, sitting comfortably above the bottom
-    int x = view.offset_x - margin - tw;
-    int y = view.offset_y + view.board_px - margin - th;
+    // Primary: left of background, sitting comfortably above the bottom edge
+    int x = view.offset_x - view.margin - margin - tw;
+    int y = view.offset_y + view.board_px + view.margin - margin - th;
     // Fallback: below the board left-aligned (only on non-widescreen layouts)
     if (x < 0) {
-        x = view.offset_x;
-        y = view.offset_y + view.board_px + margin / 2;
+        x = view.offset_x - view.margin;
+        y = view.offset_y + view.board_px + view.margin + margin / 2;
     }
     draw_text(x, y, scale, year, Palette::TEXT_DIM);
 }
@@ -493,7 +509,8 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
         {nullptr,      "CATALOG"},
         {"UP/DOWN",    "NAVIGATE"},
         {"ENTER",      "OPEN"},
-        {"ESC",        "CLOSE"},
+        {"TYPE",       "SEARCH"},
+        {"ESC",        "CLOSE / CLEAR SEARCH"},
     };
     int n = (int)(sizeof(rows) / sizeof(rows[0]));
 
@@ -613,7 +630,7 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int ty = pad;
 
     // --- Header ---
-    const char* title = cat.search_mode ? "CATALOG  (ESC to clear search)" : "CATALOG";
+    const char* title = cat.search_mode ? "CATALOG  (ESC to clear search)" : "CATALOG  (ESC to close)";
     draw_text(tx, ty, scale, title, Palette::ACCENT);
     ty += th + header_gap;
 
@@ -813,8 +830,8 @@ void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) 
         snprintf(buf, sizeof(buf), "%d", total);
         int scale  = (view.square >= 30) ? 3 : 2;
         int margin = (view.square >= 30) ? 16 : 8;
-        int tx = view.offset_x + view.board_px + margin;
-        int ty = view.offset_y + view.board_px / 2 - 7 * scale / 2;
+        int tx = view.offset_x + view.board_px + view.margin + margin;
+        int ty = view.offset_y - view.margin + (view.board_px + 2 * view.margin) / 2 - 7 * scale / 2;
         draw_text(tx, ty, scale, buf, Palette::ACCENT);
     }
 }
@@ -855,8 +872,8 @@ void Renderer::render_territory_overlay(const BoardView& view, const DrawState& 
     int margin = (view.square >= 30) ? 16 : 8;
     int th     = 7 * scale;
     int lh     = th + 4;
-    int tx     = view.offset_x + view.board_px + margin;
-    int ty     = view.offset_y + view.board_px / 2 - lh * 2;
+    int tx     = view.offset_x + view.board_px + view.margin + margin;
+    int ty     = view.offset_y - view.margin + (view.board_px + 2 * view.margin) / 2 - lh * 2;
 
     SDL_Color white  = Palette::SCORE_TEXT;
     SDL_Color yellow = Palette::ACCENT;
@@ -1007,7 +1024,9 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
         SDL_Color bc = Palette::BOARD;
         SDL_SetRenderDrawColor(sdl, bc.r, bc.g, bc.b, 255);
     }
-    SDL_Rect board_rect = {view.offset_x, view.offset_y, view.board_px, view.board_px};
+    // Background spans the full area including the margin on every side
+    int bg = view.board_px + 2 * view.margin;
+    SDL_Rect board_rect = {view.offset_x - view.margin, view.offset_y - view.margin, bg, bg};
     SDL_RenderFillRect(sdl, &board_rect);
 
     // Grid lines
@@ -1059,7 +1078,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                          : ds.analysis->liberty_count;
 
     // Chain connections (behind stones)
-    render_chain_connections(view, active_board, ds.chain_mode);
+    render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter);
 
     // Stones (stone_filter: 0=all, 1=black only, 2=white only)
     for (int r = 0; r < BOARD_SIZE; r++)

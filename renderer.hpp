@@ -43,12 +43,21 @@ public:
         int   cursor_x    = -1;
         int   cursor_y    = -1;
         int   cursor_type = 0;  // 0=hidden, 1=crosshair, 2=white stone, 3=black stone
+        bool  show_move_numbers = false;  // overlay move-order numbers on stones
+        // Playback: raw SGF arrays (renderer builds grid, independent of captures)
+        const char (*sgf_moves)[MOVE_TEXT_LEN] = nullptr;
+        const int*  sgf_colors     = nullptr;
+        int         sgf_game_index = 0;
+        // Analysis: persistent grids maintained by App, never modified on capture
+        const int (*analysis_num_grid)[BOARD_SIZE] = nullptr;  // 1-based move#
+        const int (*analysis_col_grid)[BOARD_SIZE] = nullptr;  // 1=black, 0=white
         bool  quit_confirm   = false;
-        // Box selection
-        bool  box_sel_pending = false;
-        bool  box_sel_active  = false;
-        int   box_sel_r1 = 0, box_sel_f1 = 0;
-        int   box_sel_r2 = 0, box_sel_f2 = 0;
+        // Box selection (shift+drag, additive)
+        const bool (*box_sel_pts)[BOARD_SIZE] = nullptr;  // committed points grid
+        int   box_sel_count  = 0;
+        bool  box_drag_active = false;
+        int   box_drag_r1 = 0, box_drag_f1 = 0;  // drag start
+        int   box_drag_r2 = 0, box_drag_f2 = 0;  // drag end (current mouse)
         // Catalog thumbnails: opening (first N moves) and final position
         bool        catalog_thumb_valid       = false;
         const char (*catalog_thumb_open) [BOARD_SIZE] = nullptr;
@@ -65,11 +74,12 @@ private:
     void render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds);
     void draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha);
     void draw_thick_line(int x1, int y1, int x2, int y2, int thickness, SDL_Color color);
+    void draw_dashed_line(int x1, int y1, int x2, int y2, int dash_len, int gap_len);
     int  text_width_px(const char* text, int scale) const;
     void draw_text(int x, int y, int scale, const char* text, SDL_Color color);
     void draw_color_swatch(int x, int y, int size, SDL_Color fill, SDL_Color outline);
 
-    void render_chain_connections(const BoardView& view, const char board[][BOARD_SIZE], bool chain_mode);
+    void render_chain_connections(const BoardView& view, const char board[][BOARD_SIZE], bool chain_mode, int stone_filter);
     void render_liberties(const BoardView& view, const int lib_r[], const int lib_f[], int lib_count);
     void render_player_labels(const BoardView& view, const DrawState& ds);
     void render_speed_label(const BoardView& view, int delay_ms, Uint32 until);

@@ -988,10 +988,6 @@ bool App::play_current_game() {
                                 catalog.close();
                                 last_move_tick = SDL_GetTicks();
                             }
-                        } else if (!catalog.search_mode && key == SDLK_c) {
-                            // 'c' closes catalog only when not typing a search query
-                            catalog.close();
-                            last_move_tick = SDL_GetTicks();
                         } else if (key == SDLK_UP && catalog.index > 0) {
                             catalog.index--;
                         } else if (key == SDLK_DOWN && catalog.index < total - 1) {
