@@ -543,7 +543,7 @@ private:
     void draw_board() {
         if (catalog.active) {
             // Lazy-load display names for visible entries not in the game index
-            if (!catalog.search_mode && !catalog.virtual_year_mode)
+            if (!catalog.search_mode && !catalog.virtual_year_mode && !catalog.virtual_player_mode)
                 catalog.ensure_names_loaded(catalog.scroll, 80);
             // Refresh virtual year list once the background index finishes
             catalog.tick();

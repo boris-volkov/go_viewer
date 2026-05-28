@@ -8,13 +8,15 @@
 //   1 = real sub-directory
 //   2 = parent ".."
 //   3 = virtual year directory  (name = year string e.g. "2024")
-//   4 = [BY YEAR] meta-entry   (top of root listing)
+//   4 = [BY YEAR] meta-entry
+//   5 = virtual player directory (name = player name)
+//   6 = [BY DIRECTORY] meta-entry
 struct CatalogEntry {
-    std::string name;              // raw filename / directory name / year string
+    std::string name;              // raw filename / directory name / year/player string
     std::string display_name;      // rendered label (fallback for non-player entries)
     bool        name_loaded = false;
     int         type = 0;
-    std::string full_path;         // absolute path — set for search results and year-view files
+    std::string full_path;         // absolute path — set for search results and index-view files
     std::string player_black;      // PB name — if set, rendered as three yellow/white columns
     std::string player_white;      // PW name
 };
@@ -46,6 +48,11 @@ public:
     std::string virtual_year;       // empty = showing year list; non-empty = games for that year
     bool        year_needs_refresh = false; // reload year list once index finishes
 
+    // Virtual player browser state (default root view)
+    bool        virtual_player_mode  = false;
+    std::string virtual_player;       // empty = showing player list; non-empty = games for that player
+    bool        player_needs_refresh = false; // reload player list once index finishes
+
     // Open the file browser rooted at games_dir.
     void open(const std::string& games_dir);
     // Close without selecting.
@@ -54,7 +61,7 @@ public:
     void select();
 
     // Called every draw frame to handle deferred state transitions
-    // (e.g. refresh year list once the background index finishes loading).
+    // (e.g. refresh player/year list once the background index finishes loading).
     void tick();
 
     // Search: append a character, remove last character, or clear entirely.
@@ -81,6 +88,8 @@ private:
     bool load_entries();       // (re)populates entries from current_subdir on disk
     void load_year_list();     // populates entries with virtual year dirs
     void load_year_games(const std::string& year); // populates entries with games for a year
+    void load_player_list();   // populates entries with unique player names from index
+    void load_player_games(const std::string& player); // populates entries with games for a player
     void apply_search();       // populates entries from search_query via game_index
     static bool list_recursive(const std::string& dir, const std::string& base,
                                std::vector<std::string>& out);

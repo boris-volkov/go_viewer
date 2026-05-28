@@ -259,6 +259,105 @@ bool Catalog::load_entries() {
 }
 
 // ---------------------------------------------------------------------------
+// Virtual player browser (default root view)
+
+void Catalog::load_player_list() {
+    entries.clear();
+    player_needs_refresh = false;
+
+    // Navigation meta-entries at the top
+    CatalogEntry by_dir;
+    by_dir.name         = "[BY DIRECTORY]";
+    by_dir.display_name = "[BY DIRECTORY]";
+    by_dir.name_loaded  = true;
+    by_dir.type         = 6;
+    entries.push_back(by_dir);
+
+    CatalogEntry by_year;
+    by_year.name         = "[BY YEAR]";
+    by_year.display_name = "[BY YEAR]";
+    by_year.name_loaded  = true;
+    by_year.type         = 4;
+    entries.push_back(by_year);
+
+    if (!game_index.loaded()) {
+        CatalogEntry wait;
+        wait.name         = "";
+        wait.display_name = "Building index...";
+        wait.name_loaded  = true;
+        wait.type         = 0;
+        entries.push_back(wait);
+        player_needs_refresh = true;
+        return;
+    }
+
+    // Count games per unique player name
+    std::map<std::string, int> player_count;
+    for (const GameIndexEntry* ge : game_index.get_all()) {
+        if (!ge->black.empty()) player_count[ge->black]++;
+        if (!ge->white.empty()) player_count[ge->white]++;
+    }
+
+    // Sort alphabetically (case-insensitive)
+    std::vector<std::pair<std::string, int>> players(player_count.begin(), player_count.end());
+    std::sort(players.begin(), players.end(),
+              [](const std::pair<std::string,int>& a, const std::pair<std::string,int>& b) {
+                  if (a.second != b.second) return a.second > b.second;  // most games first
+#ifdef _WIN32
+                  return _stricmp(a.first.c_str(), b.first.c_str()) < 0;
+#else
+                  return strcasecmp(a.first.c_str(), b.first.c_str()) < 0;
+#endif
+              });
+
+    for (const auto& kv : players) {
+        CatalogEntry e;
+        e.name = kv.first;
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%s  (%d game%s)",
+                 kv.first.c_str(), kv.second, kv.second == 1 ? "" : "s");
+        e.display_name = buf;
+        e.name_loaded  = true;
+        e.type         = 5;
+        entries.push_back(e);
+    }
+}
+
+void Catalog::load_player_games(const std::string& player) {
+    entries.clear();
+    entries.push_back({"..", "..", true, 2});
+    if (!game_index.loaded()) return;
+
+    std::vector<const GameIndexEntry*> matches;
+    for (const GameIndexEntry* ge : game_index.get_all()) {
+        if (ge->black == player || ge->white == player)
+            matches.push_back(ge);
+    }
+
+    // Sort by date, then opponent name
+    std::sort(matches.begin(), matches.end(),
+              [&player](const GameIndexEntry* a, const GameIndexEntry* b) {
+                  if (a->date != b->date) return a->date < b->date;
+                  const std::string& oa = (a->black == player) ? a->white : a->black;
+                  const std::string& ob = (b->black == player) ? b->white : b->black;
+                  return oa < ob;
+              });
+
+    for (const GameIndexEntry* ge : matches) {
+        CatalogEntry e;
+        size_t sep = ge->rel_path.find_last_of("/\\");
+        e.name         = (sep == std::string::npos) ? ge->rel_path : ge->rel_path.substr(sep + 1);
+        e.display_name = make_display_name(e.name, ge->black, ge->white);
+        e.player_black = ge->black;
+        e.player_white = ge->white;
+        e.name_loaded  = true;
+        e.type         = 0;
+        e.full_path    = join_path(base_dir, ge->rel_path);
+        entries.push_back(e);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Virtual year browser
 
 void Catalog::load_year_list() {
@@ -343,7 +442,14 @@ void Catalog::load_year_games(const std::string& year) {
 }
 
 void Catalog::tick() {
-    // If the year list was shown before the index finished loading, refresh it now.
+    // If the player list or year list was shown before the index finished loading,
+    // refresh it now that the index is ready.
+    if (virtual_player_mode && virtual_player.empty() && player_needs_refresh
+        && game_index.loaded()) {
+        load_player_list();
+        index  = 0;
+        scroll = 0;
+    }
     if (virtual_year_mode && virtual_year.empty() && year_needs_refresh
         && game_index.loaded()) {
         load_year_list();
@@ -395,11 +501,14 @@ void Catalog::search_backspace() {
 
 void Catalog::search_clear() {
     search_query.clear();
-    search_mode       = false;
-    virtual_year_mode = false;
+    search_mode          = false;
+    virtual_year_mode    = false;
     virtual_year.clear();
-    year_needs_refresh = false;
-    load_entries();
+    year_needs_refresh   = false;
+    virtual_player_mode  = true;
+    virtual_player.clear();
+    player_needs_refresh = false;
+    load_player_list();
     index  = 0;
     scroll = 0;
 }
@@ -416,17 +525,17 @@ void Catalog::open(const std::string& games_dir) {
     selection_made = false;
     selected_path  = "";
     search_query.clear();
-    search_mode        = false;
-    virtual_year_mode  = false;
+    search_mode          = false;
+    virtual_year_mode    = false;
     virtual_year.clear();
-    year_needs_refresh = false;
+    year_needs_refresh   = false;
+    virtual_player_mode  = true;
+    virtual_player.clear();
+    player_needs_refresh = false;
     // Kick off background index load — returns immediately; catalog opens
     // right away while the index is built in parallel.
     game_index.load_async(games_dir);
-    if (!load_entries()) {
-        entries.clear();
-        return;
-    }
+    load_player_list();
     active = true;
 }
 
@@ -488,30 +597,69 @@ void Catalog::select() {
 
     // ".." navigation
     if (e.type == 2) {
+        if (virtual_player_mode) {
+            if (!virtual_player.empty()) {
+                // Back to player list
+                virtual_player.clear();
+                load_player_list();
+            }
+            // At the player list root there is no ".." — ESC closes
+            index = 0; scroll = 0;
+            return;
+        }
         if (virtual_year_mode) {
             if (!virtual_year.empty()) {
                 // Drill back to year list
                 virtual_year.clear();
                 load_year_list();
             } else {
-                // Exit year browser back to normal dir browse
-                virtual_year_mode = false;
-                load_entries();
+                // Exit year browser back to player list
+                virtual_year_mode    = false;
+                virtual_player_mode  = true;
+                virtual_player.clear();
+                player_needs_refresh = false;
+                load_player_list();
             }
             index = 0; scroll = 0;
             return;
         }
         dir_up();
-        load_entries();
+        if (current_subdir.empty()) {
+            // Back at root of directory tree — return to player list
+            virtual_player_mode  = true;
+            virtual_player.clear();
+            player_needs_refresh = false;
+            load_player_list();
+        } else {
+            load_entries();
+        }
         index = 0; scroll = 0;
         return;
     }
 
     // [BY YEAR] meta-entry — enter the virtual year browser
     if (e.type == 4) {
-        virtual_year_mode = true;
+        virtual_player_mode  = false;
+        virtual_year_mode    = true;
         virtual_year.clear();
         load_year_list();
+        index = 0; scroll = 0;
+        return;
+    }
+
+    // [BY DIRECTORY] meta-entry — enter the filesystem browser
+    if (e.type == 6) {
+        virtual_player_mode = false;
+        current_subdir      = "";
+        load_entries();
+        index = 0; scroll = 0;
+        return;
+    }
+
+    // Virtual player directory — enter the game list for that player
+    if (e.type == 5) {
+        virtual_player = e.name;
+        load_player_games(e.name);
         index = 0; scroll = 0;
         return;
     }
@@ -546,7 +694,7 @@ void Catalog::select() {
     }
 
     // Sequential mode only in real subdirectory browsing
-    sequential_dir   = (virtual_year_mode || current_subdir.empty())
+    sequential_dir   = (virtual_year_mode || virtual_player_mode || current_subdir.empty())
                        ? ""
                        : join_path(base_dir, current_subdir);
     sequential_index = 0;

@@ -630,7 +630,16 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int ty = pad;
 
     // --- Header ---
-    const char* title = cat.search_mode ? "CATALOG  (ESC to clear search)" : "CATALOG  (ESC to close)";
+    char title_buf[128];
+    const char* title;
+    if (cat.search_mode) {
+        title = "CATALOG  (ESC to clear search)";
+    } else if (cat.virtual_player_mode && !cat.virtual_player.empty()) {
+        snprintf(title_buf, sizeof(title_buf), "GAMES: %s  (ESC to close)", cat.virtual_player.c_str());
+        title = title_buf;
+    } else {
+        title = "CATALOG  (ESC to close)";
+    }
     draw_text(tx, ty, scale, title, Palette::ACCENT);
     ty += th + header_gap;
 
@@ -985,6 +994,8 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         mix8(uint8_t(ds.catalog.game_index.is_loading()));
         mix8(uint8_t(ds.catalog.virtual_year_mode));
         mix_str(ds.catalog.virtual_year);
+        mix8(uint8_t(ds.catalog.virtual_player_mode));
+        mix_str(ds.catalog.virtual_player);
         mix_str(ds.catalog.current_subdir);
         mix_str(ds.catalog.search_query);
         mix64(uint64_t(ds.catalog.entries.size()));
