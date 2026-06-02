@@ -6,7 +6,7 @@
 // Never touched while an AnalysisState is active.
 class GameState {
 public:
-    char  board[BOARD_SIZE][BOARD_SIZE] = {};
+    char  board[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
     Stone stones[MAX_MOVES]             = {};
     int   stone_count                   = 0;
     int   black_prisoners               = 0;
@@ -20,12 +20,12 @@ public:
     int          history_count = 0;
 
     // Liberty display state (playback mode stone-click)
-    int liberty_r[BOARD_SIZE * BOARD_SIZE] = {};
-    int liberty_f[BOARD_SIZE * BOARD_SIZE] = {};
+    int liberty_r[MAX_BOARD_SIZE * MAX_BOARD_SIZE] = {};
+    int liberty_f[MAX_BOARD_SIZE * MAX_BOARD_SIZE] = {};
     int liberty_count                      = 0;
     int liberty_display_r                  = -1;
     int liberty_display_f                  = -1;
-    int selected_group_stones[BOARD_SIZE * BOARD_SIZE][2] = {};
+    int selected_group_stones[MAX_BOARD_SIZE * MAX_BOARD_SIZE][2] = {};
     int selected_group_count               = 0;
 
     void reset();

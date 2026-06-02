@@ -71,23 +71,20 @@ const unsigned char* Renderer::get_glyph_rows(char c) {
 // ---------------------------------------------------------------------------
 // Board view / coordinate helpers
 
-void Renderer::get_board_view(BoardView& view) const {
+void Renderer::get_board_view(BoardView& view, int active_size) const {
     int w = SCREEN_SIZE, h = SCREEN_SIZE;
     SDL_GetRendererOutputSize(sdl, &w, &h);
-    int min_dim  = (w < h) ? w : h;
-    // Fit (BOARD_SIZE + 2) cells into min_dim: one cell of margin on each side.
-    // The background fills (BOARD_SIZE+2) cells; the grid is inset by one cell.
-    view.square   = min_dim / (BOARD_SIZE + 2);
+    int min_dim      = (w < h) ? w : h;
+    view.active_size = active_size;
+    view.square      = min_dim / (active_size + 2);
     if (view.square < 1) view.square = 1;
-    view.margin   = view.square;
-    view.board_px = view.square * BOARD_SIZE;
-    // Centre the full background (BOARD_SIZE+2 cells wide) on screen,
-    // then offset_x/offset_y point to the first grid intersection.
-    int bg_size   = view.square * (BOARD_SIZE + 2);
-    view.offset_x = (w - bg_size) / 2 + view.margin;
-    view.offset_y = (h - bg_size) / 2 + view.margin;
-    view.screen_w = w;
-    view.screen_h = h;
+    view.margin      = view.square;
+    view.board_px    = view.square * active_size;
+    int bg_size      = view.square * (active_size + 2);
+    view.offset_x    = (w - bg_size) / 2 + view.margin;
+    view.offset_y    = (h - bg_size) / 2 + view.margin;
+    view.screen_w    = w;
+    view.screen_h    = h;
 }
 
 void Renderer::board_to_screen(const BoardView& view, int br, int bf, int& x, int& y) const {
@@ -102,7 +99,7 @@ bool Renderer::screen_to_board(const BoardView& view, int mx, int my, int& r, in
     int rel_y = my - view.offset_y;
     int bf = rel_x / view.square;
     int br = rel_y / view.square;
-    if (br < 0 || br >= BOARD_SIZE || bf < 0 || bf >= BOARD_SIZE) return false;
+    if (br < 0 || br >= view.active_size || bf < 0 || bf >= view.active_size) return false;
     int inset   = view.square / 8;
     int local_x = rel_x - bf * view.square;
     int local_y = rel_y - br * view.square;
@@ -197,27 +194,27 @@ void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_bla
 // ---------------------------------------------------------------------------
 // Overlay helpers
 
-void Renderer::render_chain_connections(const BoardView& view, const char board[][BOARD_SIZE],
+void Renderer::render_chain_connections(const BoardView& view, const char board[][MAX_BOARD_SIZE],
                                         bool chain_mode, int stone_filter) {
     if (!chain_mode) return;
-    int drawn[BOARD_SIZE][BOARD_SIZE][4] = {};
-    for (int r = 0; r < BOARD_SIZE; r++) {
-        for (int f = 0; f < BOARD_SIZE; f++) {
+    int n = view.active_size;
+    int drawn[MAX_BOARD_SIZE][MAX_BOARD_SIZE][4] = {};
+    for (int r = 0; r < n; r++) {
+        for (int f = 0; f < n; f++) {
             if (board[r][f] == 0) continue;
             int color   = (board[r][f] == 1) ? 1 : 0;
-            // Skip connections for filtered-out colour
-            if (stone_filter == 1 && color == 0) continue;  // black only — hide white
-            if (stone_filter == 2 && color == 1) continue;  // white only — hide black
-            int visited[BOARD_SIZE][BOARD_SIZE] = {};
-            int gr[BOARD_SIZE * BOARD_SIZE], gf[BOARD_SIZE * BOARD_SIZE];
+            if (stone_filter == 1 && color == 0) continue;
+            if (stone_filter == 2 && color == 1) continue;
+            int visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+            int gr[MAX_BOARD_SIZE * MAX_BOARD_SIZE], gf[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
             int gc = 0;
-            GoRules::get_group(board, r, f, color, visited, &gc, gr, gf);
+            GoRules::get_group(board, r, f, color, visited, &gc, gr, gf, n);
             for (int i = 0; i < gc; i++) {
                 int sr = gr[i], sf = gf[i];
                 int adj[4][2] = {{sr-1,sf},{sr,sf+1},{sr+1,sf},{sr,sf-1}};
                 for (int dir = 0; dir < 4; dir++) {
                     int ar = adj[dir][0], af = adj[dir][1];
-                    if (ar < 0 || ar >= BOARD_SIZE || af < 0 || af >= BOARD_SIZE) continue;
+                    if (ar < 0 || ar >= n || af < 0 || af >= n) continue;
                     if (board[ar][af] == 0 || board[ar][af] != board[sr][sf]) continue;
                     int rev = (dir + 2) % 4;
                     if (drawn[sr][sf][dir] || drawn[ar][af][rev]) continue;
@@ -268,29 +265,6 @@ const char* Renderer::format_result_message(const char* r) {
     return buf;
 }
 
-void Renderer::render_turn_indicator(const BoardView& view, int is_black) {
-    int radius = view.square / 2 - 2;
-    int cx     = view.offset_x - radius - 6 - view.square;
-    int cy     = view.offset_y + view.board_px / 2;
-    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
-    SDL_SetRenderDrawColor(sdl,
-        is_black ? 30  : 240,
-        is_black ? 30  : 240,
-        is_black ? 30  : 240,
-        255);
-    for (int dy = -radius; dy <= radius; dy++)
-        for (int dx = -radius; dx <= radius; dx++)
-            if (dx*dx + dy*dy <= radius*radius)
-                SDL_RenderDrawPoint(sdl, cx + dx, cy + dy);
-    // thin outline so white stone is visible against light backgrounds
-    SDL_SetRenderDrawColor(sdl, is_black ? 80 : 120, is_black ? 80 : 120, is_black ? 80 : 120, 255);
-    for (int angle = 0; angle < 360; angle++) {
-        float rad = angle * 3.14159f / 180.0f;
-        int ox = cx + (int)((radius) * cosf(rad));
-        int oy = cy + (int)((radius) * sinf(rad));
-        SDL_RenderDrawPoint(sdl, ox, oy);
-    }
-}
 
 void Renderer::render_mode_status(const BoardView& view,
                                   bool analysis_mode, bool game_mode, bool guess_mode,
@@ -486,6 +460,7 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
         {"N",          "NEXT GAME"},
         {"R",          "RESTART"},
         {"C",          "CATALOG"},
+        {"S",          "SAVE POSITION"},
         {"ESC",        "TOGGLE HELP"},
         {"",           ""},
         {nullptr,      "PLAYBACK"},
@@ -499,6 +474,7 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
         {"P",          "PLAY (2 PLAYERS)"},
         {"T",          "TERRITORY DRILL"},
         {"U",          "CHAIN MODE"},
+        {"F",          "FREE MODE"},
         {"",           ""},
         {nullptr,      "ANALYSIS MODE"},
         {"CLICK",      "PLACE STONE"},
@@ -788,8 +764,8 @@ void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) 
     if (has_committed) {
         SDL_SetRenderDrawColor(sdl, Palette::BOX_SELECT.r, Palette::BOX_SELECT.g,
                                Palette::BOX_SELECT.b, Palette::BOX_SELECT.a);
-        for (int r = 0; r < BOARD_SIZE; r++) {
-            for (int f = 0; f < BOARD_SIZE; f++) {
+        for (int r = 0; r < view.active_size; r++) {
+            for (int f = 0; f < view.active_size; f++) {
                 if (!ds.box_sel_pts[r][f]) continue;
                 int x, y;
                 board_to_screen(view, r, f, x, y);
@@ -843,6 +819,151 @@ void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) 
         int ty = view.offset_y - view.margin + (view.board_px + 2 * view.margin) / 2 - 7 * scale / 2;
         draw_text(tx, ty, scale, buf, Palette::ACCENT);
     }
+}
+
+void Renderer::render_game_comment(const BoardView& view, const DrawState& ds) {
+    if (ds.game_comment.empty() || ds.catalog.active) return;
+
+    int scale    = 2;
+    int th       = 7 * scale;
+    int line_gap = scale + 2;
+    int lh       = th + line_gap;
+    int pad      = 10;
+
+    // Space to the left of the board background
+    int right_x = view.offset_x - view.margin - pad;
+    int left_x  = pad;
+    int avail_w = right_x - left_x;
+    if (avail_w < text_width_px("XXXX", scale)) return;  // too narrow to be useful
+
+    // Word-wrap the comment into lines that fit avail_w
+    std::vector<std::string> lines;
+    {
+        std::string current, word;
+        auto flush_word = [&]() {
+            if (word.empty()) return;
+            std::string candidate = current.empty() ? word : current + " " + word;
+            if (text_width_px(candidate.c_str(), scale) <= avail_w) {
+                current = std::move(candidate);
+            } else {
+                if (!current.empty()) lines.push_back(current);
+                current = word;
+            }
+            word.clear();
+        };
+        for (char c : ds.game_comment) {
+            if (c == ' ' || c == '\t') {
+                flush_word();
+            } else if (c == '\n' || c == '\r') {
+                flush_word();
+                lines.push_back(current);
+                current.clear();
+            } else {
+                // If a single word is wider than the column, break it mid-word
+                word += c;
+                if (text_width_px(word.c_str(), scale) > avail_w && word.size() > 1) {
+                    word.pop_back();
+                    lines.push_back(word);
+                    word.clear();
+                    word += c;
+                }
+            }
+        }
+        flush_word();
+        if (!current.empty()) lines.push_back(current);
+    }
+    if (lines.empty()) return;
+
+    // Vertically centre the block in the board background area
+    int bg_top    = view.offset_y - view.margin;
+    int bg_bottom = view.offset_y + view.board_px + view.margin;
+    int total_h   = (int)lines.size() * lh - line_gap;
+    int ty        = bg_top + (bg_bottom - bg_top - total_h) / 2;
+
+    for (const auto& line : lines) {
+        draw_text(left_x, ty, scale, line.c_str(), Palette::TEXT_DIM);
+        ty += lh;
+    }
+}
+
+void Renderer::render_save_input(const BoardView& view, const DrawState& ds) {
+    if (ds.save_input_step == 0) return;
+
+    int scale    = (view.square >= 30) ? 3 : 2;
+    int th       = 7 * scale;
+    int line_gap = scale + 2;
+    int lh       = th + line_gap;
+    int pad      = (scale >= 3) ? 16 : 10;
+
+    // Lines to display
+    const char* title   = "SAVE POSITION";
+    const char* prompt  = (ds.save_input_step == 1) ? "Name:" : "Note:";
+    const char* hint1   = "ENTER to continue";
+    const char* hint2   = "ESC to cancel";
+    if (ds.save_input_step == 2) hint1 = "ENTER to save";
+
+    // Cursor-appended input text
+    std::string input_display = ds.save_input_buf + "_";
+
+    // Measure
+    int max_w = text_width_px(title, scale);
+    auto mw = [&](const char* s) { int w = text_width_px(s, scale); if (w > max_w) max_w = w; };
+    mw(hint1); mw(hint2);
+    {
+        // "Name: text_" or "Note: text_"
+        std::string full = std::string(prompt) + " " + input_display;
+        mw(full.c_str());
+    }
+
+    int bw = max_w + pad * 2;
+    // Layout: title, blank, prompt+input, blank, hint1, hint2
+    // Each "blank" is one lh advance; hint2 ends with th (no trailing gap).
+    int bh = lh * 5 + th + pad * 2;
+    int bx = (view.screen_w - bw) / 2;
+    int by = (view.screen_h - bh) / 2;
+
+    SDL_Rect bg = {bx, by, bw, bh};
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(sdl, Palette::OVERLAY_DARK.r, Palette::OVERLAY_DARK.g,
+                           Palette::OVERLAY_DARK.b, Palette::OVERLAY_DARK.a);
+    SDL_RenderFillRect(sdl, &bg);
+
+    int tx = bx + pad;
+    int ty = by + pad;
+    draw_text(tx, ty, scale, title, Palette::ACCENT);
+    ty += lh * 2;  // blank line after title
+
+    // "Name: typed_text_"
+    draw_text(tx, ty, scale, prompt, Palette::TEXT_WHITE);
+    int prompt_w = text_width_px(prompt, scale) + scale * 2;
+    draw_text(tx + prompt_w, ty, scale, input_display.c_str(), Palette::ACCENT);
+    ty += lh * 2;  // blank line
+
+    draw_text(tx, ty, scale, hint1, Palette::TEXT_DIM);
+    ty += lh;
+    draw_text(tx, ty, scale, hint2, Palette::TEXT_DIM);
+}
+
+void Renderer::render_flash_message(const BoardView& view, const DrawState& ds) {
+    if (ds.flash_message.empty() || ds.flash_message_until == 0) return;
+    Uint32 now = SDL_GetTicks();
+    if (now >= ds.flash_message_until) return;
+
+    const char* txt = ds.flash_message.c_str();
+    int scale = (view.square >= 30) ? 3 : 2;
+    int tw    = text_width_px(txt, scale);
+    int th    = 7 * scale;
+    int pad   = (scale >= 3) ? 10 : 7;
+    int bw    = tw + pad * 2;
+    int bh    = th + pad * 2;
+    int bx    = (view.screen_w - bw) / 2;
+    int by    = view.screen_h - bh - pad * 2;
+
+    SDL_Rect bg = {bx, by, bw, bh};
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(sdl, 20, 90, 20, 220);
+    SDL_RenderFillRect(sdl, &bg);
+    draw_text(bx + pad, by + pad, scale, txt, Palette::TEXT_WHITE);
 }
 
 void Renderer::render_quit_confirm(const BoardView& view) {
@@ -912,7 +1033,7 @@ void Renderer::render_territory_overlay(const BoardView& view, const DrawState& 
 
 void Renderer::draw_board(const DrawState& ds) {
     BoardView view;
-    get_board_view(view);
+    get_board_view(view, ds.active_board_size);
     render_board(view, nullptr, ds);
 }
 
@@ -934,11 +1055,11 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     };
 
     // Active board array
-    const char (*board)[BOARD_SIZE] =
+    const char (*board)[MAX_BOARD_SIZE] =
         ds.territory_board ? ds.territory_board :
         (ds.analysis_mode && ds.analysis ? ds.analysis->board : ds.game.board);
-    for (int r = 0; r < BOARD_SIZE; r++)
-        for (int f = 0; f < BOARD_SIZE; f++)
+    for (int r = 0; r < ds.active_board_size; r++)
+        for (int f = 0; f < ds.active_board_size; f++)
             mix8(uint8_t(board[r][f]));
 
     // Stone filter
@@ -968,6 +1089,8 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix8(uint8_t(ds.game_mode));
     mix8(uint8_t(ds.guess_mode));
     mix8(uint8_t(ds.chain_mode));
+    mix8(uint8_t(ds.free_mode));
+    mix64(uint64_t(ds.active_board_size));
     mix8(uint8_t(ds.show_help));
     mix8(uint8_t(ds.territory_drill));
     mix64(uint64_t(ds.guess_score));
@@ -1006,12 +1129,22 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix_str(ds.white_name);
     mix_str(ds.result_message);
     mix_str(ds.game_date);
+    mix_str(ds.game_comment);
 
     // Speed message: hash whether it is currently visible (and the delay value)
     Uint32 now = SDL_GetTicks();
     bool speed_on = ds.speed_message_until > 0 && now < ds.speed_message_until;
     mix8(uint8_t(speed_on));
     if (speed_on) mix64(uint64_t(ds.move_delay_ms));
+
+    // Flash message
+    bool flash_on = ds.flash_message_until > 0 && now < ds.flash_message_until;
+    mix8(uint8_t(flash_on));
+    if (flash_on) mix_str(ds.flash_message);
+
+    // Save input overlay
+    mix8(uint8_t(ds.save_input_step));
+    if (ds.save_input_step) mix_str(ds.save_input_buf);
 
     // Territory drill answer state
     if (ds.territory_drill) {
@@ -1042,9 +1175,10 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
 
     // Grid lines
     SDL_Color grid_color = Palette::GRID;
+    int n          = view.active_size;
     int normal_t   = (view.square >= 30) ? 2 : 1;
     int boundary_t = normal_t * 2;
-    int boundary_idx[2] = {0, BOARD_SIZE - 1};
+    int boundary_idx[2] = {0, n - 1};
     for (int bi = 0; bi < 2; bi++) {
         int i = boundary_idx[bi];
         int y = view.offset_y + i * view.square + view.square / 2;
@@ -1056,30 +1190,52 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                         x, view.offset_y + view.board_px - boundary_t/2,
                         boundary_t, grid_color);
     }
-    for (int i = 1; i < BOARD_SIZE - 1; i++) {
+    for (int i = 1; i < n - 1; i++) {
         int y  = view.offset_y + i * view.square + view.square / 2;
         int x0 = view.offset_x + view.square / 2;
-        int x1 = view.offset_x + (BOARD_SIZE - 1) * view.square + view.square / 2;
+        int x1 = view.offset_x + (n - 1) * view.square + view.square / 2;
         draw_thick_line(x0, y, x1, y, normal_t, grid_color);
         int x  = view.offset_x + i * view.square + view.square / 2;
         int y0 = view.offset_y + view.square / 2;
-        int y1 = view.offset_y + (BOARD_SIZE - 1) * view.square + view.square / 2;
+        int y1 = view.offset_y + (n - 1) * view.square + view.square / 2;
         draw_thick_line(x, y0, x, y1, normal_t, grid_color);
     }
 
-    // Star points (hoshi)
-    int stars[9][2] = {{3,3},{3,9},{3,15},{9,3},{9,9},{9,15},{15,3},{15,9},{15,15}};
-    int star_r = (view.square >= 30) ? 4 : 3;
-    SDL_SetRenderDrawColor(sdl, 0, 0, 0, 255);
-    for (auto& s : stars) {
-        int x = view.offset_x + s[1] * view.square + view.square / 2;
-        int y = view.offset_y + s[0] * view.square + view.square / 2;
-        SDL_Rect sr = {x - star_r, y - star_r, star_r * 2, star_r * 2};
-        SDL_RenderFillRect(sdl, &sr);
+    // Star points (hoshi) — computed for the active board size
+    {
+        int star_r = (view.square >= 30) ? 4 : 3;
+        SDL_SetRenderDrawColor(sdl, 0, 0, 0, 255);
+        // offset from edge (0-indexed); also used for mid-edge and tengen
+        int ho   = (n >= 13) ? 3 : 2;
+        int ctr  = n / 2;
+        // Build the set of hoshi positions
+        int pts[9][2]; int npts = 0;
+        if (n >= 7) {
+            // Four corner hoshi
+            pts[npts][0] = ho;      pts[npts][1] = ho;      npts++;
+            pts[npts][0] = ho;      pts[npts][1] = n-1-ho;  npts++;
+            pts[npts][0] = n-1-ho;  pts[npts][1] = ho;      npts++;
+            pts[npts][0] = n-1-ho;  pts[npts][1] = n-1-ho;  npts++;
+            // Tengen (centre) if n is odd
+            if (n % 2 == 1) { pts[npts][0] = ctr; pts[npts][1] = ctr; npts++; }
+        }
+        // For 19×19 and 13×13: mid-edge hoshi
+        if (n == 19) {
+            pts[npts][0] = ho;  pts[npts][1] = ctr;  npts++;
+            pts[npts][0] = n-1-ho; pts[npts][1] = ctr; npts++;
+            pts[npts][0] = ctr; pts[npts][1] = ho;   npts++;
+            pts[npts][0] = ctr; pts[npts][1] = n-1-ho; npts++;
+        }
+        for (int i = 0; i < npts; i++) {
+            int x = view.offset_x + pts[i][1] * view.square + view.square / 2;
+            int y = view.offset_y + pts[i][0] * view.square + view.square / 2;
+            SDL_Rect sr = {x - star_r, y - star_r, star_r * 2, star_r * 2};
+            SDL_RenderFillRect(sdl, &sr);
+        }
     }
 
     // Choose board array and liberty state depending on mode
-    const char (*active_board)[BOARD_SIZE] =
+    const char (*active_board)[MAX_BOARD_SIZE] =
         ds.territory_board ? ds.territory_board :
         (ds.analysis_mode && ds.analysis ? ds.analysis->board : ds.game.board);
     const int* lib_r   = ds.analysis_mode && ds.analysis ? ds.analysis->liberty_r  : ds.game.liberty_r;
@@ -1092,8 +1248,8 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter);
 
     // Stones (stone_filter: 0=all, 1=black only, 2=white only)
-    for (int r = 0; r < BOARD_SIZE; r++)
-        for (int f = 0; f < BOARD_SIZE; f++) {
+    for (int r = 0; r < n; r++)
+        for (int f = 0; f < n; f++) {
             int cell = active_board[r][f];
             if (cell == 0) continue;
             int is_black = (cell == 1);
@@ -1107,12 +1263,12 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
         // Build num/col grids from the appropriate source:
         //   analysis mode → App's persistent grids (never touched by captures)
         //   playback      → raw SGF arrays (position-based, also capture-immune)
-        int num_grid[BOARD_SIZE][BOARD_SIZE] = {};
-        int col_grid[BOARD_SIZE][BOARD_SIZE] = {};
+        int num_grid[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+        int col_grid[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
 
         if (ds.analysis_mode && ds.analysis_num_grid && ds.analysis_col_grid) {
-            for (int r = 0; r < BOARD_SIZE; r++)
-                for (int f = 0; f < BOARD_SIZE; f++) {
+            for (int r = 0; r < n; r++)
+                for (int f = 0; f < n; f++) {
                     num_grid[r][f] = ds.analysis_num_grid[r][f];
                     col_grid[r][f] = ds.analysis_col_grid[r][f];
                 }
@@ -1132,8 +1288,8 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
 
         int half   = view.square / 2;
         int radius = view.square / 2 - 2;
-        for (int r = 0; r < BOARD_SIZE; r++) {
-            for (int f = 0; f < BOARD_SIZE; f++) {
+        for (int r = 0; r < n; r++) {
+            for (int f = 0; f < n; f++) {
                 if (num_grid[r][f] == 0) continue;
                 int  num      = num_grid[r][f];
                 int  is_black = col_grid[r][f];
@@ -1176,24 +1332,23 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
             draw_stone_circle(view, r, f, overlay->is_black, 128);
     }
 
-    if (!ds.territory_drill) {
+    if (!ds.territory_drill && !ds.free_mode) {
+        render_game_comment(view, ds);
         render_player_labels(view, ds);
         render_speed_label(view, ds.move_delay_ms, ds.speed_message_until);
         render_guess_score(view, ds.guess_mode, ds.guess_score);
         render_result_message(view, ds);
         render_game_date(view, ds.game_date);
     }
-    render_mode_status(view, ds.analysis_mode, ds.game_mode, ds.guess_mode, ds.territory_drill, false);
+    if (!ds.free_mode)
+        render_mode_status(view, ds.analysis_mode, ds.game_mode, ds.guess_mode, ds.territory_drill, false);
     render_territory_overlay(view, ds);
 
-    // TODO: turn indicator disabled — cursor color now conveys whose turn it is (consider deleting)
-    // if (ds.analysis_mode || ds.game_mode || ds.guess_mode) {
-    //     int is_black = ds.analysis ? ds.analysis->turn_is_black : ds.game.turn_is_black;
-    //     render_turn_indicator(view, is_black);
-    // }
     render_box_selection(view, ds);
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds);
+    render_save_input(view, ds);
+    render_flash_message(view, ds);
     if (ds.quit_confirm) render_quit_confirm(view);
 }
 

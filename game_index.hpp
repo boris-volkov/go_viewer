@@ -31,6 +31,11 @@ public:
     // Safe to call multiple times — only starts the thread once.
     void load_async(const std::string& base_dir);
 
+    // Insert or update a single entry in the in-memory index and rewrite the
+    // index file.  No-op if the index hasn't finished loading yet (the next
+    // full rebuild will pick up the new file anyway).
+    void insert_entry(const GameIndexEntry& e);
+
     // True once the background load has finished.
     bool loaded()    const { return loaded_.load(); }
     // True while the background thread is still running.
@@ -56,10 +61,11 @@ public:
 
 private:
     mutable std::mutex          mutex_;
-    std::vector<GameIndexEntry> entries_;   // protected by mutex_
+    std::vector<GameIndexEntry> entries_;   // protected by mutex_; kept sorted by rel_path
     std::atomic<bool>           loaded_{false};
     std::atomic<bool>           loading_{false};
     std::thread                 thread_;
+    std::string                 base_dir_;  // set by load_async before thread starts
 
     // Thread body — called with a copy of base_dir
     void do_load(std::string base_dir);

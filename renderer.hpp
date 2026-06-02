@@ -20,19 +20,22 @@ public:
         bool  game_mode      = false;
         bool  guess_mode     = false;
         int   guess_score    = 0;
-        bool  chain_mode     = false;
+        bool  chain_mode         = false;
+        bool  free_mode          = false;   // demo mode: board only, no HUD labels
+        int   active_board_size  = BOARD_SIZE;  // passed to get_board_view
         bool  show_help      = false;
         const Catalog&        catalog;
         const std::string&    black_name;
         const std::string&    white_name;
         const std::string&    result_message;
         const std::string&    game_date;
+        const std::string&    game_comment;
         int   move_delay_ms          = MOVE_DELAY_MS;
         Uint32 speed_message_until   = 0;
         bool  suppress_present       = false;
         // Territory estimation drill
         bool  territory_drill    = false;
-        const char (*territory_board)[BOARD_SIZE] = nullptr;
+        const char (*territory_board)[MAX_BOARD_SIZE] = nullptr;
         int   territory_b_score  = 0;
         int   territory_w_score  = 0;
         bool  territory_answered = false;
@@ -49,11 +52,11 @@ public:
         const int*  sgf_colors     = nullptr;
         int         sgf_game_index = 0;
         // Analysis: persistent grids maintained by App, never modified on capture
-        const int (*analysis_num_grid)[BOARD_SIZE] = nullptr;  // 1-based move#
-        const int (*analysis_col_grid)[BOARD_SIZE] = nullptr;  // 1=black, 0=white
+        const int (*analysis_num_grid)[MAX_BOARD_SIZE] = nullptr;
+        const int (*analysis_col_grid)[MAX_BOARD_SIZE] = nullptr;
         bool  quit_confirm   = false;
         // Box selection (shift+drag, additive)
-        const bool (*box_sel_pts)[BOARD_SIZE] = nullptr;  // committed points grid
+        const bool (*box_sel_pts)[MAX_BOARD_SIZE] = nullptr;
         int   box_sel_count  = 0;
         bool  box_drag_active = false;
         int   box_drag_r1 = 0, box_drag_f1 = 0;  // drag start
@@ -62,9 +65,15 @@ public:
         bool        catalog_thumb_valid       = false;
         const char (*catalog_thumb_open) [BOARD_SIZE] = nullptr;
         const char (*catalog_thumb_final)[BOARD_SIZE] = nullptr;
+        // Transient flash notification (e.g. save confirmation)
+        const std::string& flash_message;
+        Uint32 flash_message_until = 0;
+        // Save-position text input (0=off, 1=name, 2=note)
+        int                save_input_step = 0;
+        const std::string& save_input_buf;
     };
 
-    void get_board_view(BoardView& view) const;
+    void get_board_view(BoardView& view, int active_size = BOARD_SIZE) const;
     bool screen_to_board(const BoardView& view, int mx, int my, int& r, int& f) const;
     void board_to_screen(const BoardView& view, int br, int bf, int& x, int& y) const;
 
@@ -79,12 +88,11 @@ private:
     void draw_text(int x, int y, int scale, const char* text, SDL_Color color);
     void draw_color_swatch(int x, int y, int size, SDL_Color fill, SDL_Color outline);
 
-    void render_chain_connections(const BoardView& view, const char board[][BOARD_SIZE], bool chain_mode, int stone_filter);
+    void render_chain_connections(const BoardView& view, const char board[][MAX_BOARD_SIZE], bool chain_mode, int stone_filter);
     void render_liberties(const BoardView& view, const int lib_r[], const int lib_f[], int lib_count);
     void render_player_labels(const BoardView& view, const DrawState& ds);
     void render_speed_label(const BoardView& view, int delay_ms, Uint32 until);
     void render_guess_score(const BoardView& view, bool guess_mode, int score);
-    void render_turn_indicator(const BoardView& view, int is_black);
     void render_mode_status(const BoardView& view, bool analysis_mode, bool game_mode, bool guess_mode, bool territory_drill, bool paused);
     void render_territory_overlay(const BoardView& view, const DrawState& ds);
     void render_result_message(const BoardView& view, const DrawState& ds);
@@ -95,6 +103,9 @@ private:
     void render_software_cursor(const BoardView& view, const DrawState& ds);
     void render_quit_confirm(const BoardView& view);
     void render_box_selection(const BoardView& view, const DrawState& ds);
+    void render_flash_message(const BoardView& view, const DrawState& ds);
+    void render_save_input(const BoardView& view, const DrawState& ds);
+    void render_game_comment(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
     void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set
 

@@ -274,10 +274,33 @@ void GameIndex::do_load(std::string base_dir) {
 void GameIndex::load_async(const std::string& base_dir) {
     // Only start once per session
     if (loaded_.load() || loading_.load()) return;
+    base_dir_ = base_dir;   // store before thread starts so insert_entry can use it
     loading_.store(true);
     // Join any previous (finished) thread before spawning a new one
     if (thread_.joinable()) thread_.join();
     thread_ = std::thread(&GameIndex::do_load, this, base_dir);
+}
+
+void GameIndex::insert_entry(const GameIndexEntry& e) {
+    // If the index hasn't loaded yet, skip — the next full rebuild will find the file.
+    if (!loaded_.load()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Sorted insert / update (entries_ is kept sorted by rel_path)
+        auto it = std::lower_bound(entries_.begin(), entries_.end(), e.rel_path,
+            [](const GameIndexEntry& a, const std::string& key) {
+                return a.rel_path < key;
+            });
+        if (it != entries_.end() && it->rel_path == e.rel_path)
+            *it = e;   // update existing
+        else
+            entries_.insert(it, e);  // insert in sorted position
+
+        // Rewrite the index file so the fast path is used on the next catalog open.
+        if (!base_dir_.empty())
+            write_index(index_file_path(base_dir_), entries_);
+    }
 }
 
 // ---------------------------------------------------------------------------

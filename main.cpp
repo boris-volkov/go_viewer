@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 
 // ---------------------------------------------------------------------------
 // SGF parser (self-contained, no global state)
@@ -27,6 +31,12 @@ struct SgfGame {
     char  white_name[NAME_LEN]            = "White";
     char  result[RESULT_LEN]              = {};
     char  date[32]                        = {};
+    // Root-level comment C[] (game annotation or saved-position note)
+    char  comment[1024]                   = {};
+    // Setup position from AB[]/AW[] properties (used by saved-position SGFs)
+    char  initial_board[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    int   initial_turn_is_black                 = 1;  // from PL[]
+    bool  has_setup                             = false;
 };
 
 static bool parse_sgf_move(const char* move_str, int& out_r, int& out_f) {
@@ -41,14 +51,19 @@ static bool parse_sgf_move(const char* move_str, int& out_r, int& out_f) {
 static bool load_sgf(const std::string& path, SgfGame& g) {
     FILE* fp = fopen(path.c_str(), "r");
     if (!fp) return false;
-    g.move_count   = 0;
-    g.black_name[0] = '\0';
-    g.white_name[0] = '\0';
-    g.result[0]    = '\0';
-    g.date[0]      = '\0';
+    g.move_count            = 0;
+    g.black_name[0]         = '\0';
+    g.white_name[0]         = '\0';
+    g.result[0]             = '\0';
+    g.date[0]               = '\0';
+    g.comment[0]            = '\0';
+    g.has_setup             = false;
+    g.initial_turn_is_black = 1;
+    memset(g.initial_board, 0, sizeof(g.initial_board));
+
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
-        // Moves
+        // Regular moves: ;B[xx] and ;W[xx]
         const char* p = line;
         while (*p) {
             if (*p == ';' && *(p+1) == 'B' && *(p+2) == '[') {
@@ -76,7 +91,33 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
             }
             p++;
         }
-        // Properties
+        // Setup stones: AB[xx][xx]... and AW[xx][xx]...
+        const char* setup_tags[2] = {"AB[", "AW["};
+        int         setup_col[2]  = {1, 2};
+        for (int ti = 0; ti < 2; ti++) {
+            const char* sp = line;
+            while ((sp = strstr(sp, setup_tags[ti])) != nullptr) {
+                sp += 3;  // skip "AB[" or "AW["
+                for (;;) {
+                    if (sp[0] >= 'a' && sp[0] <= 's' && sp[1] >= 'a' && sp[1] <= 's') {
+                        int f = sp[0] - 'a', r = sp[1] - 'a';
+                        g.initial_board[r][f] = (char)setup_col[ti];
+                        g.has_setup = true;
+                    }
+                    const char* end = strchr(sp, ']');
+                    if (!end) break;
+                    sp = end + 1;
+                    if (*sp != '[') break;
+                    sp++;  // opening '[' of next value in the same property
+                }
+            }
+        }
+        // PL[] — initial player to move
+        {
+            const char* sp = strstr(line, "PL[");
+            if (sp) g.initial_turn_is_black = (sp[3] == 'B' || sp[3] == 'b') ? 1 : 0;
+        }
+        // Named properties
         auto extract = [&](const char* tag, char* dst, size_t dsz) {
             const char* s = strstr(line, tag);
             if (!s) return;
@@ -98,7 +139,42 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     fclose(fp);
     if (g.black_name[0] == '\0') strcpy(g.black_name, "Black");
     if (g.white_name[0] == '\0') strcpy(g.white_name, "White");
-    return g.move_count > 0;
+
+    // Extract root-level comment C[...] — must appear before the first move.
+    // Re-read the header in one pass so we can handle multi-line comments.
+    {
+        FILE* fp2 = fopen(path.c_str(), "rb");
+        if (fp2) {
+            char buf[8192];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, fp2);
+            fclose(fp2);
+            buf[n] = '\0';
+
+            // Restrict search to the region before the first ;B[ or ;W[ move
+            const char* fence = nullptr;
+            const char* fb = strstr(buf, ";B[");
+            const char* fw = strstr(buf, ";W[");
+            if (fb && fw) fence = (fb < fw) ? fb : fw;
+            else          fence = fb ? fb : fw;
+
+            const char* cp = strstr(buf, "C[");
+            if (cp && (!fence || cp < fence)) {
+                cp += 2;  // skip "C["
+                size_t ci = 0;
+                bool esc = false;
+                while (*cp && ci < sizeof(g.comment) - 1) {
+                    if (esc) { g.comment[ci++] = *cp; esc = false; }
+                    else if (*cp == '\\') { esc = true; }
+                    else if (*cp == ']') { break; }
+                    else { g.comment[ci++] = *cp; }
+                    cp++;
+                }
+                g.comment[ci] = '\0';
+            }
+        }
+    }
+
+    return g.move_count > 0 || g.has_setup;
 }
 
 // Play up to max_moves moves from an SGF and write the resulting board.
@@ -110,7 +186,7 @@ static bool sgf_board_at(const std::string& path,
     SgfGame g;
     if (!load_sgf(path, g)) return false;
     int limit = (max_moves < 0 || max_moves > g.move_count) ? g.move_count : max_moves;
-    char board[BOARD_SIZE][BOARD_SIZE] = {};
+    char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
     for (int i = 0; i < limit; i++) {
         int r, f;
         if (!parse_sgf_move(g.moves[i], r, f)) continue;
@@ -132,7 +208,7 @@ static constexpr int THUMB_OPENING_MOVES = 16;
 // Territory estimation drill
 
 struct TerritoryProblem {
-    char board[BOARD_SIZE][BOARD_SIZE] = {};
+    char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
     int  black_score = 0;
     int  white_score = 0;
     bool answered    = false;
@@ -313,27 +389,38 @@ private:
     int    guess_score         = 0;
     bool   territory_drill_active = false;
     std::unique_ptr<TerritoryProblem> territory_problem;
-    bool   chain_mode          = false;
+    bool   chain_mode          = true;
+    bool   free_mode           = false;
+    int    free_board_size     = BOARD_SIZE;  // board size used in free mode (2..MAX_BOARD_SIZE)
     bool   show_help           = false;
     bool   cursor_visible      = true;
     Uint32 last_mouse_activity = 0;
-    Uint32 speed_message_until = 0;
-    bool   suppress_present    = false;
+    Uint32 speed_message_until  = 0;
+    std::string flash_message;
+    Uint32 flash_message_until  = 0;
+    bool   suppress_present     = false;
+
+    // Save-position text input state
+    int  save_input_step = 0;   // 0=off, 1=entering name, 2=entering note
+    std::string save_input_buf;
+    std::string save_pending_name;
+    char save_pending_board[BOARD_SIZE][BOARD_SIZE] = {};
+    int  save_pending_turn = 1;
     std::string result_message;
     std::string game_date;
+    std::string game_comment;
     std::string black_name, white_name;
     std::string games_dir;
     std::string forced_path;  // set by catalog selection
     bool quit_confirm      = false; // waiting for second Q to confirm quit
     bool show_move_numbers = false; // overlay move numbers on stones (toggle with 1)
-    // Persistent analysis number grid — updated on placement, never on capture.
-    int  analysis_num_grid[BOARD_SIZE][BOARD_SIZE] = {};  // 1-based move#, 0=none
-    int  analysis_col_grid[BOARD_SIZE][BOARD_SIZE] = {};  // 1=black, 0=white
+    int  analysis_num_grid[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    int  analysis_col_grid[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
     int  analysis_move_num = 0;
 
 
     // Box selection: shift+drag to select rectangles, additive across drags
-    bool box_sel_pts[BOARD_SIZE][BOARD_SIZE] = {};  // accumulated committed points
+    bool box_sel_pts[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
     int  box_sel_count  = 0;
     bool box_drag_active = false;   // drag in progress
     int  box_drag_r1 = 0, box_drag_f1 = 0;  // drag start (board coords)
@@ -356,8 +443,8 @@ private:
     void screen_to_board_clamped(const BoardView& view, int mx, int my, int& r, int& f) {
         r = (my - view.offset_y) / view.square;
         f = (mx - view.offset_x) / view.square;
-        r = std::max(0, std::min(BOARD_SIZE - 1, r));
-        f = std::max(0, std::min(BOARD_SIZE - 1, f));
+        r = std::max(0, std::min(view.active_size - 1, r));
+        f = std::max(0, std::min(view.active_size - 1, f));
     }
 
     // Catalog thumbnails: opening (first N moves) and final position.
@@ -372,13 +459,15 @@ private:
 
     // Helpers
     bool in_analysis() const { return analysis != nullptr; }
+    int  active_size()  const {
+        return (free_mode && analysis) ? analysis->board_size : BOARD_SIZE;
+    }
 
     void enter_analysis() {
         // Take a clean snapshot of game state and give it to AnalysisState.
         // GameState is never touched again until exit_analysis().
         analysis = std::make_unique<AnalysisState>(game.take_snapshot());
-        // Analysis always starts with black's turn in the C original; replicate that.
-        analysis->turn_is_black = 1;
+        // turn_is_black is inherited from the snapshot (i.e. whoever's turn it is in the game).
         memset(analysis_num_grid, 0, sizeof(analysis_num_grid));
         memset(analysis_col_grid, 0, sizeof(analysis_col_grid));
         analysis_move_num = 0;
@@ -387,15 +476,16 @@ private:
     }
 
     void exit_analysis() {
-        // Simply destroy the analysis state.  The game board is exactly as it was.
         analysis.reset();
         game.liberty_count = 0;
         game.selected_group_count = 0;
+        free_mode = false;
     }
 
     void enter_game_mode() {
         if (in_analysis()) exit_analysis();
         guess_mode = false;
+        free_mode  = false;
         GameSnapshot empty{};          // blank board, black goes first
         analysis = std::make_unique<AnalysisState>(empty);
         analysis->turn_is_black = 1;
@@ -404,6 +494,30 @@ private:
         game_mode   = true;
         black_name  = "Black";
         white_name  = "White";
+    }
+
+    void enter_free_mode() {
+        if (territory_drill_active) exit_territory_drill();
+        if (game_mode) exit_game_mode();
+        else if (in_analysis()) exit_analysis();
+        guess_mode = false; guess_score = 0;
+        GameSnapshot empty{};
+        analysis = std::make_unique<AnalysisState>(empty, free_board_size);
+        memset(analysis_num_grid, 0, sizeof(analysis_num_grid));
+        memset(analysis_col_grid, 0, sizeof(analysis_col_grid));
+        analysis_move_num = 0;
+        game.liberty_count = 0;
+        game.selected_group_count = 0;
+        free_mode = true;
+    }
+
+    void exit_free_mode() {
+        analysis.reset();
+        game.liberty_count = 0;
+        game.selected_group_count = 0;
+        free_mode      = false;
+        black_name     = sgf.black_name;
+        white_name     = sgf.white_name;
     }
 
     void enter_territory_drill() {
@@ -424,6 +538,7 @@ private:
         game.liberty_count = 0;
         game.selected_group_count = 0;
         game_mode  = false;
+        free_mode  = false;
         black_name = sgf.black_name;
         white_name = sgf.white_name;
     }
@@ -443,6 +558,8 @@ private:
                              bool& guess_pending, int& guess_r, int& guess_f);
 
     bool animate_move(int r, int f, int is_black);
+    void save_position();
+    void do_save(const std::string& name, const std::string& note);
 
     int  adjust_move_delay(int delta_ms, Uint32 now);
     void set_cursor_visible(bool v);
@@ -505,12 +622,15 @@ private:
             guess_mode,
             guess_score,
             chain_mode,
+            free_mode,
+            active_size(),
             show_help,
             catalog,
             black_name,
             white_name,
             result_message,
             game_date,
+            game_comment,
             move_delay_ms,
             speed_message_until,
             suppress_present,
@@ -537,6 +657,10 @@ private:
             thumb_valid,
             thumb_valid ? thumb_open  : nullptr,
             thumb_valid ? thumb_final : nullptr,
+            flash_message,
+            flash_message_until,
+            save_input_step,
+            save_input_buf,
         };
     }
 
@@ -627,6 +751,10 @@ bool App::animate_move(int r, int f, int is_black) {
 // Input handlers
 
 void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
+    // Save dialog intercepts all events in the event loop; this guard covers
+    // any path that might call handle_key directly while the dialog is open.
+    if (save_input_step != 0) return;
+
     Uint32 now = SDL_GetTicks();
 
     if (key == SDLK_q) {
@@ -734,6 +862,40 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         else
             enter_game_mode();
         draw_board();
+        return;
+    }
+
+    if (key == SDLK_f) {
+        if (free_mode) exit_free_mode();
+        else           enter_free_mode();
+        set_cursor_visible(true);
+        draw_board();
+        return;
+    }
+
+    if (free_mode && (key == SDLK_EQUALS || key == SDLK_PLUS || key == SDLK_KP_PLUS)) {
+        // + = zoom in = fewer intersections
+        int ns = free_board_size - 1;
+        if (ns >= 2) {
+            free_board_size = ns;
+            analysis->board_size = ns;
+        }
+        draw_board();
+        return;
+    }
+    if (free_mode && (key == SDLK_MINUS || key == SDLK_KP_MINUS)) {
+        // - = zoom out = more intersections
+        int ns = free_board_size + 1;
+        if (ns <= MAX_BOARD_SIZE) {
+            free_board_size = ns;
+            analysis->board_size = ns;
+        }
+        draw_board();
+        return;
+    }
+
+    if (key == SDLK_s) {
+        save_position();
         return;
     }
 
@@ -910,15 +1072,144 @@ std::string App::pick_next_file(NavRequest req) {
 }
 
 // ---------------------------------------------------------------------------
+// Save position to SGF
+
+// Escape SGF text values: ] and \ must be backslash-escaped.
+static std::string sgf_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\' || c == ']') out += '\\';
+        out += c;
+    }
+    return out;
+}
+
+// Sanitise a user-supplied name into a safe filename component.
+static std::string sanitise_filename(const std::string& name) {
+    std::string out;
+    for (char c : name) {
+        if (c == ' ' || c == '\t') out += '_';
+        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')
+            out += c;
+        // other characters silently dropped
+    }
+    if (out.size() > 40) out.resize(40);
+    return out;
+}
+
+// Capture current board and enter the name-entry prompt.
+void App::save_position() {
+    const char (*b)[MAX_BOARD_SIZE] = analysis ? analysis->board : game.board;
+    memcpy(save_pending_board, b, sizeof(save_pending_board));
+    save_pending_turn = analysis ? analysis->turn_is_black : game.turn_is_black;
+    save_pending_name.clear();
+    save_input_buf.clear();
+    save_input_step = 1;
+    draw_board();
+}
+
+// Write the SGF once name + note are collected.
+void App::do_save(const std::string& name, const std::string& note) {
+    // Create the saved/ subdirectory if needed
+    std::string save_dir = Catalog::join_path(games_dir, "saved");
+#ifdef _WIN32
+    CreateDirectoryA(save_dir.c_str(), nullptr);
+#else
+    mkdir(save_dir.c_str(), 0755);
+#endif
+
+    // Build filename: [name_]YYYYMMDD_HHMMSS.sgf
+    time_t t = time(nullptr);
+    struct tm* tm_info = localtime(&t);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm_info);
+    std::string safe = sanitise_filename(name);
+    std::string filename = (safe.empty() ? "" : safe + "_") + ts + ".sgf";
+    std::string path     = Catalog::join_path(save_dir, filename);
+
+    FILE* fp = fopen(path.c_str(), "w");
+    if (!fp) {
+        flash_message       = "Save failed!";
+        flash_message_until = SDL_GetTicks() + 2500;
+        draw_board();
+        return;
+    }
+
+    fprintf(fp, "(;GM[1]FF[4]SZ[19]\n");
+    if (!name.empty())         fprintf(fp, "GN[%s]\n", sgf_escape(name).c_str());
+    if (black_name != "Black") fprintf(fp, "PB[%s]\n", black_name.c_str());
+    if (white_name != "White") fprintf(fp, "PW[%s]\n", white_name.c_str());
+    if (!game_date.empty())    fprintf(fp, "DT[%s]\n", game_date.c_str());
+    if (!note.empty())         fprintf(fp, "C[%s]\n",  sgf_escape(note).c_str());
+    fprintf(fp, "PL[%c]\n", save_pending_turn ? 'B' : 'W');
+
+    // Black setup stones
+    bool any = false;
+    for (int r = 0; r < BOARD_SIZE; r++)
+        for (int f = 0; f < BOARD_SIZE; f++)
+            if (save_pending_board[r][f] == 1) {
+                if (!any) { fprintf(fp, "AB"); any = true; }
+                fprintf(fp, "[%c%c]", 'a' + f, 'a' + r);
+            }
+    if (any) fprintf(fp, "\n");
+
+    // White setup stones
+    any = false;
+    for (int r = 0; r < BOARD_SIZE; r++)
+        for (int f = 0; f < BOARD_SIZE; f++)
+            if (save_pending_board[r][f] == 2) {
+                if (!any) { fprintf(fp, "AW"); any = true; }
+                fprintf(fp, "[%c%c]", 'a' + f, 'a' + r);
+            }
+    if (any) fprintf(fp, "\n");
+
+    fprintf(fp, ")\n");
+    fclose(fp);
+
+    // Insert into the in-memory index immediately so the catalog reflects this
+    // file on the next open without needing a full rebuild.
+    {
+        std::string rel = Catalog::join_path("saved", filename);
+        GameIndexEntry ge;
+        ge.rel_path = rel;
+        ge.black    = (black_name != "Black") ? black_name : "";
+        ge.white    = (white_name != "White") ? white_name : "";
+        ge.date     = game_date;
+        catalog.game_index.insert_entry(ge);
+
+        // If the catalog is open in a list view, flag it for an immediate refresh.
+        if (catalog.active) {
+            if (catalog.virtual_player_mode && catalog.virtual_player.empty())
+                catalog.player_needs_refresh = true;
+            if (catalog.virtual_year_mode && catalog.virtual_year.empty())
+                catalog.year_needs_refresh = true;
+        }
+    }
+
+    std::string lbl = name.empty() ? filename : "\"" + name + "\"";
+    flash_message       = "Saved: " + lbl;
+    flash_message_until = SDL_GetTicks() + 2500;
+    draw_board();
+}
+
+// ---------------------------------------------------------------------------
 // Main game loop
 
 bool App::play_current_game() {
     result_message = sgf.result;
     game_date      = sgf.date;
+    game_comment   = sgf.comment;
     black_name     = sgf.black_name;
     white_name     = sgf.white_name;
 
     game.reset();
+    // Apply setup position from AB[]/AW[] if present (saved-position SGFs)
+    if (sgf.has_setup) {
+        memcpy(game.board, sgf.initial_board, sizeof(game.board));
+        game.turn_is_black = sgf.initial_turn_is_black;
+    }
     game_index = 0;
     nav_request = NAV_NONE;
     clear_box_sel();
@@ -927,6 +1218,11 @@ bool App::play_current_game() {
     else if (in_analysis()) exit_analysis();
     guess_mode  = false;
     guess_score = 0;
+    free_mode   = false;
+    // Pump pending events so the window is fully mapped before the first draw.
+    // On Linux/Wayland the compositor may not have set the real window size yet;
+    // this gives it a chance to fire SDL_WINDOWEVENT_SIZE_CHANGED first.
+    SDL_PumpEvents();
     draw_board();
 
     bool quit          = false;
@@ -948,9 +1244,11 @@ bool App::play_current_game() {
         // so cursor tracking is always smooth with near-zero CPU when idle.
         int wait_ms = 1000;
 
-        // Wake when the speed-change label should disappear
+        // Wake when the speed-change label or flash message should disappear
         if (speed_message_until > 0 && speed_message_until > now)
             wait_ms = std::min(wait_ms, (int)(speed_message_until - now));
+        if (flash_message_until > 0 && flash_message_until > now)
+            wait_ms = std::min(wait_ms, (int)(flash_message_until - now));
 
         // Wake periodically while the game index is loading so the UI refreshes
         // when the background thread finishes (shows names / enables search).
@@ -975,6 +1273,57 @@ bool App::play_current_game() {
             // Process this event then drain any others that queued up
             do {
                 note_mouse_activity_event(e);
+
+                // Save-input mode: intercept ALL events.
+                // Character collection is done via KEYDOWN (not SDL_TEXTINPUT) so
+                // that (a) the 's' keypress that opened the dialog is already
+                // consumed before save_input_step becomes non-zero, and (b) every
+                // game-key KEYDOWN is swallowed here and never reaches handle_key.
+                if (save_input_step != 0) {
+                    if (e.type == SDL_KEYDOWN) {
+                        SDL_Keycode k = e.key.keysym.sym;
+                        if (k == SDLK_BACKSPACE) {
+                            if (!save_input_buf.empty()) {
+                                save_input_buf.pop_back();
+                                draw_board();
+                            }
+                        } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                            if (save_input_step == 1) {
+                                save_pending_name = save_input_buf;
+                                save_input_buf.clear();
+                                save_input_step = 2;
+                                draw_board();
+                            } else {
+                                std::string note = save_input_buf;
+                                save_input_step  = 0;
+                                save_input_buf.clear();
+                                do_save(save_pending_name, note);
+                            }
+                        } else if (k == SDLK_ESCAPE) {
+                            save_input_step = 0;
+                            save_input_buf.clear();
+                            draw_board();
+                        } else {
+                            // Map keycode to a printable character (US layout)
+                            bool shift = (SDL_GetModState() & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+                            char c = 0;
+                            if (k >= SDLK_a && k <= SDLK_z)
+                                c = shift ? (char)('A' + (k - SDLK_a)) : (char)('a' + (k - SDLK_a));
+                            else if (k >= SDLK_0 && k <= SDLK_9)
+                                c = (char)('0' + (k - SDLK_0));
+                            else if (k == SDLK_SPACE)      c = ' ';
+                            else if (k == SDLK_MINUS)      c = shift ? '_' : '-';
+                            else if (k == SDLK_PERIOD)     c = '.';
+                            else if (k == SDLK_COMMA)      c = ',';
+                            else if (k == SDLK_QUOTE)      c = shift ? '"' : '\'';
+                            else if (k == SDLK_SLASH)      c = shift ? '?' : '/';
+                            else if (k == SDLK_SEMICOLON)  c = shift ? ':' : ';';
+                            if (c) { save_input_buf += c; draw_board(); }
+                        }
+                    }
+                    // Always consume — never let events through to game handlers
+                    continue;
+                }
 
                 // Catalog intercepts all input
                 if (catalog.active) {
@@ -1019,7 +1368,20 @@ bool App::play_current_game() {
                     continue;  // skip game-event handling; drain next event
                 }
 
-                if (e.type == SDL_QUIT) {
+                if (e.type == SDL_WINDOWEVENT) {
+                    // On Linux/Wayland the compositor sets the real window size
+                    // asynchronously; redraw whenever the window is shown, resized,
+                    // or needs repainting so the board is never stretched.
+                    switch (e.window.event) {
+                        case SDL_WINDOWEVENT_SHOWN:
+                        case SDL_WINDOWEVENT_EXPOSED:
+                        case SDL_WINDOWEVENT_RESIZED:
+                        case SDL_WINDOWEVENT_SIZE_CHANGED:
+                            draw_board();
+                            break;
+                        default: break;
+                    }
+                } else if (e.type == SDL_QUIT) {
                     nav_request = NAV_NONE; quit = true;
                 } else if (e.type == SDL_KEYDOWN) {
                     const Uint8* kb = SDL_GetKeyboardState(nullptr);
@@ -1029,7 +1391,7 @@ bool App::play_current_game() {
                     bool shift = (kb[SDL_SCANCODE_LSHIFT] || kb[SDL_SCANCODE_RSHIFT]);
                     if (shift) {
                         // Begin box-selection drag
-                        BoardView view; renderer->get_board_view(view);
+                        BoardView view; renderer->get_board_view(view, active_size());
                         screen_to_board_clamped(view, e.button.x, e.button.y,
                                                 box_drag_r1, box_drag_f1);
                         box_drag_active = true;
@@ -1040,7 +1402,7 @@ bool App::play_current_game() {
                             clear_box_sel();
                             draw_board();
                         }
-                        BoardView view; renderer->get_board_view(view);
+                        BoardView view; renderer->get_board_view(view, active_size());
                         if (in_analysis()) {
                             handle_analysis_lclick(view, e.button.x, e.button.y, kb);
                         } else if (guess_mode) {
@@ -1052,7 +1414,7 @@ bool App::play_current_game() {
                 } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
                     if (box_drag_active) {
                         // Commit the dragged rectangle
-                        BoardView view; renderer->get_board_view(view);
+                        BoardView view; renderer->get_board_view(view, active_size());
                         int r2, f2;
                         screen_to_board_clamped(view, e.button.x, e.button.y, r2, f2);
                         commit_box(box_drag_r1, box_drag_f1, r2, f2);
@@ -1062,7 +1424,7 @@ bool App::play_current_game() {
                 } else if (e.type == SDL_MOUSEMOTION && box_drag_active) {
                     draw_board();  // redraw to update dashed-rect preview
                 } else if (in_analysis() && e.type == SDL_MOUSEBUTTONDOWN) {
-                    BoardView view; renderer->get_board_view(view);
+                    BoardView view; renderer->get_board_view(view, active_size());
                     if (e.button.button == SDL_BUTTON_RIGHT)
                         handle_analysis_rclick(view, e.button.x, e.button.y);
                 }

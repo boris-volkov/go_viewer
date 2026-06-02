@@ -1,7 +1,8 @@
 #include "analysis_state.hpp"
 #include <cstring>
 
-AnalysisState::AnalysisState(const GameSnapshot& base) : base_snapshot(base) {
+AnalysisState::AnalysisState(const GameSnapshot& base, int bs)
+    : base_snapshot(base), board_size(bs) {
     memcpy(board, base.board, sizeof(board));
     turn_is_black        = base.turn_is_black;
     black_prisoners      = base.black_prisoners;
@@ -15,7 +16,8 @@ AnalysisState::AnalysisState(const GameSnapshot& base) : base_snapshot(base) {
 
 void AnalysisState::reset_to_base() {
     memcpy(board, base_snapshot.board, sizeof(board));
-    turn_is_black        = 1;  // analysis always restarts with black to play
+    turn_is_black        = base_snapshot.turn_is_black;
+    // board_size is intentionally preserved — reset_to_base() keeps the same grid size
     black_prisoners      = base_snapshot.black_prisoners;
     white_prisoners      = base_snapshot.white_prisoners;
     analysis_stone_count = 0;
@@ -26,16 +28,16 @@ void AnalysisState::reset_to_base() {
 }
 
 bool AnalysisState::place_stone(int r, int f, int is_black) {
-    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE) return false;
+    if (r < 0 || r >= board_size || f < 0 || f >= board_size) return false;
     if (board[r][f] != 0) return false;
-    if (GoRules::would_be_suicide(board, r, f, is_black)) return false;
+    if (GoRules::would_be_suicide(board, r, f, is_black, board_size)) return false;
 
     board[r][f] = is_black ? 1 : 2;
     if (analysis_stone_count < MAX_MOVES)
         analysis_stones[analysis_stone_count++] = {r, f, is_black};
 
-    int cap_r[BOARD_SIZE * BOARD_SIZE], cap_f[BOARD_SIZE * BOARD_SIZE], cap_count = 0;
-    GoRules::find_captured(board, is_black, r, f, cap_r, cap_f, cap_count);
+    int cap_r[MAX_BOARD_SIZE * MAX_BOARD_SIZE], cap_f[MAX_BOARD_SIZE * MAX_BOARD_SIZE], cap_count = 0;
+    GoRules::find_captured(board, is_black, r, f, cap_r, cap_f, cap_count, board_size);
 
     for (int i = 0; i < cap_count; i++) {
         board[cap_r[i]][cap_f[i]] = 0;
@@ -49,7 +51,7 @@ bool AnalysisState::place_stone(int r, int f, int is_black) {
 }
 
 bool AnalysisState::remove_stone_at(int r, int f) {
-    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE) return false;
+    if (r < 0 || r >= board_size || f < 0 || f >= board_size) return false;
     if (board[r][f] == 0) return false;
     board[r][f] = 0;
     remove_from_analysis_list(r, f);
@@ -71,17 +73,17 @@ void AnalysisState::calculate_chain_liberties(int r, int f) {
     liberty_count = 0;
     if (board[r][f] == 0) return;
     int color = (board[r][f] == 1) ? 1 : 0;
-    int visited[BOARD_SIZE][BOARD_SIZE] = {};
-    GoRules::get_liberties(board, r, f, color, visited, liberty_r, liberty_f, liberty_count);
+    int visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    GoRules::get_liberties(board, r, f, color, visited, liberty_r, liberty_f, liberty_count, board_size);
 }
 
 void AnalysisState::store_selected_group(int r, int f) {
     if (board[r][f] == 0) { selected_group_count = 0; return; }
     int color = (board[r][f] == 1) ? 1 : 0;
-    int visited[BOARD_SIZE][BOARD_SIZE] = {};
-    int gr[BOARD_SIZE * BOARD_SIZE], gf[BOARD_SIZE * BOARD_SIZE];
+    int visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    int gr[MAX_BOARD_SIZE * MAX_BOARD_SIZE], gf[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
     int gc = 0;
-    GoRules::get_group(board, r, f, color, visited, &gc, gr, gf);
+    GoRules::get_group(board, r, f, color, visited, &gc, gr, gf, board_size);
     selected_group_count = gc;
     for (int i = 0; i < gc; i++) {
         selected_group_stones[i][0] = gr[i];

@@ -11,7 +11,8 @@
 #include <cstddef>
 #include <cstdio>
 
-static constexpr int BOARD_SIZE         = 19;
+static constexpr int BOARD_SIZE         = 19;   // standard game size
+static constexpr int MAX_BOARD_SIZE     = 30;   // largest board free mode can use
 static constexpr int SCREEN_SIZE        = 800;
 static constexpr int MAX_MOVES          = 1000;
 static constexpr int MOVE_TEXT_LEN      = 8;
@@ -45,20 +46,21 @@ struct MoveNumCell {
 
 // Complete snapshot of board + stone-tracking arrays (used for history / analysis init)
 struct GameSnapshot {
-    char  board[BOARD_SIZE][BOARD_SIZE] = {};
-    Stone stones[MAX_MOVES]             = {};
-    int   stone_count                   = 0;
-    int   black_prisoners               = 0;
-    int   white_prisoners               = 0;
-    int   turn_is_black                 = 1;
+    char  board[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    Stone stones[MAX_MOVES]                    = {};
+    int   stone_count                          = 0;
+    int   black_prisoners                      = 0;
+    int   white_prisoners                      = 0;
+    int   turn_is_black                        = 1;
 };
 
 struct BoardView {
+    int active_size = BOARD_SIZE;  // actual grid size being used (19 for games, variable in free mode)
     int square   = 0;
     int margin   = 0;  // padding between board background edge and first grid line
     int offset_x = 0, offset_y = 0;  // pixel position of the top-left grid intersection
     int screen_w = 0, screen_h = 0;
-    int board_px = 0;  // grid area in pixels (square * BOARD_SIZE)
+    int board_px = 0;  // grid area in pixels (square * active_size)
 };
 
 struct Overlay {
