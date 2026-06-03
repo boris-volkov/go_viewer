@@ -198,7 +198,11 @@ static bool sgf_board_at(const std::string& path,
         GoRules::find_captured(board, is_black, r, f, cap_r, cap_f, cap_count);
         for (int j = 0; j < cap_count; j++) board[cap_r[j]][cap_f[j]] = 0;
     }
-    memcpy(board_out, board, sizeof(board));
+    // Copy only the 19×19 portion — board_out has BOARD_SIZE stride, board has
+    // MAX_BOARD_SIZE stride, so a single memcpy would be wrong on both counts.
+    // SGF moves never exceed column/row 18 so the rest is always empty.
+    for (int r = 0; r < BOARD_SIZE; r++)
+        memcpy(board_out[r], board[r], BOARD_SIZE);
     return true;
 }
 
