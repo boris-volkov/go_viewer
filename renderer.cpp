@@ -181,21 +181,135 @@ void Renderer::fill_circle(int cx, int cy, int radius) {
     }
 }
 
-void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha) {
+void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha, bool shadow_pass) {
     int cx     = view.offset_x + f * view.square + view.square / 2;
     int cy     = view.offset_y + r * view.square + view.square / 2;
     int radius = view.square / 2 - 2;
-    SDL_SetRenderDrawBlendMode(sdl, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
-    Uint8 v = is_black ? 30 : 240;
-    SDL_SetRenderDrawColor(sdl, v, v, v, alpha);
+    if (radius < 2) radius = 2;
+    shade_stone(cx, cy, radius, is_black, alpha, shadow_pass);
+}
+
+// ---------------------------------------------------------------------------
+// Shared stone colour palette — edit here to reskin both stones and chain links.
+
+Renderer::StoneColors Renderer::stone_colors(int is_black) {
+    if (is_black)
+        //        base                lit overlay          dark edge            a1      a2      a3
+        return { {30, 32, 38, 255}, {95, 88, 78, 255}, {20, 22, 27, 255}, 0.14f, 0.00f, 0.10f };
+    else
+        return { {210, 214, 220, 255}, {255, 252, 240, 255}, {178, 182, 190, 255}, 0.35f, 0.28f, 0.20f };
+}
+
+void Renderer::shade_stone(int cx, int cy, int radius, int is_black, Uint8 alpha, bool shadow_pass) {
+    if (shadow_pass) {
+        // Only the cast shadow — two soft dark circles offset lower-right.
+        // Blend mode is set by the caller (render_all_shadows uses max-alpha blend).
+        if (radius >= 4) {
+            int sox = radius / 5 + 1, soy = sox;
+            SDL_SetRenderDrawColor(sdl, 0, 0, 0, (Uint8)(alpha * 0.18f));
+            fill_circle(cx + sox + 1, cy + soy + 1, radius + 2);
+            SDL_SetRenderDrawColor(sdl, 0, 0, 0, (Uint8)(alpha * 0.30f));
+            fill_circle(cx + sox,     cy + soy,     radius + 1);
+        }
+        return;
+    }
+
+    // Stone fill + shading
+    auto c = stone_colors(is_black);
+    int h1x = cx - radius / 6,  h1y = cy - radius / 6;  // broad
+    int h2x = cx - radius / 5,  h2y = cy - radius / 5;  // mid
+    int h3x = cx - radius / 4,  h3y = cy - radius / 4;  // tight
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, c.base.r, c.base.g, c.base.b, alpha);
     fill_circle(cx, cy, radius);
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+    if (c.alpha1 > 0.f) {
+        SDL_SetRenderDrawColor(sdl, c.lit.r, c.lit.g, c.lit.b, (Uint8)(alpha * c.alpha1));
+        fill_circle(h1x, h1y, radius * 5 / 6);
+    }
+    if (c.alpha2 > 0.f) {
+        SDL_SetRenderDrawColor(sdl, c.lit.r, c.lit.g, c.lit.b, (Uint8)(alpha * c.alpha2));
+        fill_circle(h2x, h2y, radius * 2 / 3);
+    }
+    if (c.alpha3 > 0.f) {
+        SDL_SetRenderDrawColor(sdl, c.lit.r, c.lit.g, c.lit.b, (Uint8)(alpha * c.alpha3));
+        fill_circle(h3x, h3y, radius / 2);
+    }
+}
+
+// Draw a chain link as a shaded cylinder.
+// shadow_pass=true  → only the soft dark shadow quad (drawn first, over all board lines)
+// shadow_pass=false → only the lit cylinder (drawn second, on top of all shadows)
+void Renderer::draw_stone_link(int x1, int y1, int x2, int y2, int thickness, int is_black, bool shadow_pass) {
+    if (thickness < 1) thickness = 1;
+
+    float fdx = (float)(x2 - x1), fdy = (float)(y2 - y1);
+    float len  = sqrtf(fdx * fdx + fdy * fdy);
+    if (len < 1.f) return;
+
+    float nx = fdy / len, ny = -fdx / len;
+
+    if (shadow_pass) {
+        // Two soft dark quads offset lower-right — same scale as shade_stone.
+        // Blend mode is set by the caller (render_all_shadows uses max-alpha blend).
+        if (thickness < 4) return;
+        int shx = thickness / 5 + 1, shy = shx;
+        for (int p = 0; p < 2; p++) {
+            float offx = (float)(p == 0 ? shx + 1 : shx);
+            float offy = (float)(p == 0 ? shy + 1 : shy);
+            float ht   = (p == 0 ? thickness + 2 : thickness + 1) * 0.5f;
+            Uint8 sa   = (p == 0) ? (Uint8)(255 * 0.18f) : (Uint8)(255 * 0.30f);
+            SDL_Color sc = {0, 0, 0, sa};
+            float pox = nx * ht, poy = ny * ht;
+            SDL_Vertex sv[4] = {
+                {{(float)x1 - pox + offx, (float)y1 - poy + offy}, sc, {0,0}},
+                {{(float)x1 + pox + offx, (float)y1 + poy + offy}, sc, {0,0}},
+                {{(float)x2 + pox + offx, (float)y2 + poy + offy}, sc, {0,0}},
+                {{(float)x2 - pox + offx, (float)y2 - poy + offy}, sc, {0,0}},
+            };
+            int si[6] = {0,1,2, 0,2,3};
+            SDL_RenderGeometry(sdl, nullptr, sv, 4, si, 6);
+        }
+        return;
+    }
+
+    // Cylinder pass — lit edge → base axis → shadow edge
+    auto c = stone_colors(is_black);
+    float ea = 1.f - (1.f - c.alpha1) * (1.f - c.alpha2) * (1.f - c.alpha3);
+    SDL_Color lit_v = {
+        (Uint8)(c.base.r + ea * (c.lit.r - c.base.r)),
+        (Uint8)(c.base.g + ea * (c.lit.g - c.base.g)),
+        (Uint8)(c.base.b + ea * (c.lit.b - c.base.b)),
+        255
+    };
+
+    float half = (float)thickness * 0.5f;
+    float ox = nx * half, oy = ny * half;
+
+    bool flip = (nx * (-0.707f) + ny * (-0.707f)) < 0.f;
+    float lox = flip ? -ox : ox,  loy = flip ? -oy : oy;
+    float sox = flip ?  ox : -ox, soy = flip ?  oy : -oy;
+
+    SDL_Vertex v[6];
+    v[0] = {{(float)x1+lox, (float)y1+loy}, lit_v,  {0,0}};
+    v[1] = {{(float)x1,     (float)y1     }, c.base, {0,0}};
+    v[2] = {{(float)x1+sox, (float)y1+soy}, c.dark, {0,0}};
+    v[3] = {{(float)x2+sox, (float)y2+soy}, c.dark, {0,0}};
+    v[4] = {{(float)x2,     (float)y2     }, c.base, {0,0}};
+    v[5] = {{(float)x2+lox, (float)y2+loy}, lit_v,  {0,0}};
+
+    int idx[12] = {0,1,4, 0,4,5, 1,2,3, 1,3,4};
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_RenderGeometry(sdl, nullptr, v, 6, idx, 12);
 }
 
 // ---------------------------------------------------------------------------
 // Overlay helpers
 
 void Renderer::render_chain_connections(const BoardView& view, const char board[][MAX_BOARD_SIZE],
-                                        bool chain_mode, int stone_filter) {
+                                        bool chain_mode, int stone_filter, bool shadows_only) {
     if (!chain_mode) return;
     int n = view.active_size;
     int drawn[MAX_BOARD_SIZE][MAX_BOARD_SIZE][4] = {};
@@ -223,9 +337,8 @@ void Renderer::render_chain_connections(const BoardView& view, const char board[
                     int y1 = view.offset_y + sr * view.square + view.square / 2;
                     int x2 = view.offset_x + af * view.square + view.square / 2;
                     int y2 = view.offset_y + ar * view.square + view.square / 2;
-                    SDL_Color lc = color ? SDL_Color{30,30,30,255} : SDL_Color{240,240,240,255};
                     int thick = (view.square - 4) / 2;
-                    draw_thick_line(x1, y1, x2, y2, thick, lc);
+                    draw_stone_link(x1, y1, x2, y2, thick, color, shadows_only);
                 }
             }
         }
@@ -1157,20 +1270,62 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     return h;
 }
 
+// Render all cast shadows (stones + chain bars) into a temporary texture using
+// max-alpha blending, then composite once onto the current render target.
+// This prevents shadows from stacking darker at intersections.
+void Renderer::render_all_shadows(const BoardView& view,
+                                   const char board[][MAX_BOARD_SIZE],
+                                   bool chain_mode, int stone_filter, int n) {
+    int w, h;
+    SDL_GetRendererOutputSize(sdl, &w, &h);
+
+    SDL_Texture* prev_target = SDL_GetRenderTarget(sdl);
+
+    SDL_Texture* shadow_tex = SDL_CreateTexture(sdl, SDL_PIXELFORMAT_ARGB8888,
+                                                SDL_TEXTUREACCESS_TARGET, w, h);
+    if (!shadow_tex) return;
+    SDL_SetTextureBlendMode(shadow_tex, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderTarget(sdl, shadow_tex);
+    SDL_SetRenderDrawColor(sdl, 0, 0, 0, 0);
+    SDL_RenderClear(sdl);
+
+    // Max-alpha blend: overlapping shadows take the maximum darkness, not the sum.
+    SDL_BlendMode max_blend = SDL_ComposeCustomBlendMode(
+        SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_MAXIMUM,
+        SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_MAXIMUM);
+    SDL_SetRenderDrawBlendMode(sdl, max_blend);
+
+    // Stone shadows
+    for (int r = 0; r < n; r++)
+        for (int f = 0; f < n; f++) {
+            int cell = board[r][f];
+            if (cell == 0) continue;
+            int is_black = (cell == 1);
+            if (stone_filter == 1 && !is_black) continue;
+            if (stone_filter == 2 &&  is_black) continue;
+            draw_stone_circle(view, r, f, is_black, 255, /*shadow_pass=*/true);
+        }
+
+    // Link shadows (blend mode already set; draw_stone_link shadow pass won't override it)
+    render_chain_connections(view, board, chain_mode, stone_filter, /*shadows_only=*/true);
+
+    // Composite shadow texture onto board with standard BLEND (darkens board by shadow alpha)
+    SDL_SetRenderTarget(sdl, prev_target);
+    SDL_RenderCopy(sdl, shadow_tex, nullptr, nullptr);
+    SDL_DestroyTexture(shadow_tex);
+}
+
 // Draws board+HUD to whatever render target is currently active.
 // Does NOT draw the software cursor or call SDL_RenderPresent.
 void Renderer::render_board_content(const BoardView& view, const Overlay* overlay, const DrawState& ds) {
     SDL_SetRenderDrawColor(sdl, Palette::BACKGROUND.r, Palette::BACKGROUND.g, Palette::BACKGROUND.b, 255);
     SDL_RenderClear(sdl);
 
-    // Board background colour varies by mode
-    {
-        SDL_Color bc = Palette::BOARD;
-        SDL_SetRenderDrawColor(sdl, bc.r, bc.g, bc.b, 255);
-    }
-    // Background spans the full area including the margin on every side
+    // Board background
     int bg = view.board_px + 2 * view.margin;
     SDL_Rect board_rect = {view.offset_x - view.margin, view.offset_y - view.margin, bg, bg};
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::BOARD.r, Palette::BOARD.g, Palette::BOARD.b, 255);
     SDL_RenderFillRect(sdl, &board_rect);
 
     // Grid lines
@@ -1244,10 +1399,10 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                          ? (ds.territory_drill ? 0 : ds.game.liberty_count)
                          : ds.analysis->liberty_count;
 
-    // Chain connections (behind stones)
-    render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter);
-
-    // Stones (stone_filter: 0=all, 1=black only, 2=white only)
+    // Layered render — all shadows composited once (no additive stacking),
+    // then cylinders, then stone fills on top.
+    render_all_shadows(view, active_board, ds.chain_mode, ds.stone_filter, n);
+    render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter, /*shadows_only=*/false);
     for (int r = 0; r < n; r++)
         for (int f = 0; f < n; f++) {
             int cell = active_board[r][f];
@@ -1255,7 +1410,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
             int is_black = (cell == 1);
             if (ds.stone_filter == 1 && !is_black) continue;
             if (ds.stone_filter == 2 &&  is_black) continue;
-            draw_stone_circle(view, r, f, is_black, 255);
+            draw_stone_circle(view, r, f, is_black, 255, /*shadow_pass=*/false);
         }
 
     // Move-number overlay
@@ -1386,10 +1541,7 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
 // Software cursor (drawn directly in renderer — no OS scaling involved)
 
 void Renderer::draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha) {
-    SDL_SetRenderDrawBlendMode(sdl, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
-    Uint8 v = is_black ? 30 : 240;
-    SDL_SetRenderDrawColor(sdl, v, v, v, alpha);
-    fill_circle(cx, cy, radius);
+    shade_stone(cx, cy, radius, is_black, alpha);
 }
 
 void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds) {

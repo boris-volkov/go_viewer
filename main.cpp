@@ -438,9 +438,11 @@ private:
     void commit_box(int r1, int f1, int r2, int f2) {
         int rmin = std::min(r1,r2), rmax = std::max(r1,r2);
         int fmin = std::min(f1,f2), fmax = std::max(f1,f2);
+        const auto& board = analysis ? analysis->board : game.board;
         for (int r = rmin; r <= rmax; r++)
             for (int f = fmin; f <= fmax; f++)
-                if (!box_sel_pts[r][f]) { box_sel_pts[r][f] = true; box_sel_count++; }
+                if (!box_sel_pts[r][f] && board[r][f] == 0)
+                    { box_sel_pts[r][f] = true; box_sel_count++; }
     }
 
     // Clamp a screen position to the nearest board intersection.

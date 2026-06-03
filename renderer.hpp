@@ -81,14 +81,15 @@ public:
 
 private:
     void render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds);
-    void draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha);
+    void draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha, bool shadow_pass = false);
     void draw_thick_line(int x1, int y1, int x2, int y2, int thickness, SDL_Color color);
     void draw_dashed_line(int x1, int y1, int x2, int y2, int dash_len, int gap_len);
     int  text_width_px(const char* text, int scale) const;
     void draw_text(int x, int y, int scale, const char* text, SDL_Color color);
     void draw_color_swatch(int x, int y, int size, SDL_Color fill, SDL_Color outline);
 
-    void render_chain_connections(const BoardView& view, const char board[][MAX_BOARD_SIZE], bool chain_mode, int stone_filter);
+    void render_chain_connections(const BoardView& view, const char board[][MAX_BOARD_SIZE], bool chain_mode, int stone_filter, bool shadows_only = false);
+    void render_all_shadows(const BoardView& view, const char board[][MAX_BOARD_SIZE], bool chain_mode, int stone_filter, int n);
     void render_liberties(const BoardView& view, const int lib_r[], const int lib_f[], int lib_count);
     void render_player_labels(const BoardView& view, const DrawState& ds);
     void render_speed_label(const BoardView& view, int delay_ms, Uint32 until);
@@ -107,6 +108,19 @@ private:
     void render_save_input(const BoardView& view, const DrawState& ds);
     void render_game_comment(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
+    void shade_stone(int cx, int cy, int radius, int is_black, Uint8 alpha, bool shadow_pass = false);
+    void draw_stone_link(int x1, int y1, int x2, int y2, int thickness, int is_black, bool shadow_pass = false);
+
+    // Shared palette so stones and chain links always shade consistently.
+    struct StoneColors {
+        SDL_Color base;    // shadow tone — drawn solid as the stone base
+        SDL_Color lit;     // overlay colour applied at low alpha in shade_stone
+        SDL_Color dark;    // cylinder shadow-edge only (slightly darker than base)
+        float     alpha1;  // broad layer alpha
+        float     alpha2;  // mid layer alpha  (0 = skip)
+        float     alpha3;  // tight layer alpha
+    };
+    static StoneColors stone_colors(int is_black);
     void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set
 
     // Board cache: the board+HUD are rendered to a texture and only rebuilt when
