@@ -1183,19 +1183,8 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix64(uint64_t(ds.sgf_game_index));
     mix8(uint8_t(ds.quit_confirm));
 
-    // Box selection
-    mix64(uint64_t(ds.box_sel_count));
-    mix8(uint8_t(ds.box_drag_active));
-    if (ds.box_drag_active) {
-        mix64(uint64_t(ds.box_drag_r1)); mix64(uint64_t(ds.box_drag_f1));
-        mix64(uint64_t(ds.box_drag_r2)); mix64(uint64_t(ds.box_drag_f2));
-    }
-    // Hash the committed points grid (only if non-empty to save time)
-    if (ds.box_sel_pts && ds.box_sel_count > 0) {
-        for (int r = 0; r < BOARD_SIZE; r++)
-            for (int f = 0; f < BOARD_SIZE; f++)
-                mix8(uint8_t(ds.box_sel_pts[r][f]));
-    }
+    // Box selection is drawn outside the cache (like the cursor), so none of its
+    // state goes into the hash — dragging never triggers a cache rebuild.
 
     // Mode flags
     mix8(uint8_t(ds.analysis_mode));
@@ -1499,7 +1488,6 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
         render_mode_status(view, ds.analysis_mode, ds.game_mode, ds.guess_mode, ds.territory_drill, false);
     render_territory_overlay(view, ds);
 
-    render_box_selection(view, ds);
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds);
     render_save_input(view, ds);
@@ -1530,8 +1518,10 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
         cache_hash_ = h;
     }
 
-    // Blit cached board, then draw the cursor on top (always, every frame)
+    // Blit cached board, then draw drag-overlay + cursor on top (always, every frame,
+    // without touching the cache — so dragging never triggers a cache rebuild)
     SDL_RenderCopy(sdl, board_cache_, nullptr, nullptr);
+    render_box_selection(view, ds);
     render_software_cursor(view, ds);
     if (!ds.suppress_present)
         SDL_RenderPresent(sdl);
