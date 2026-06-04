@@ -181,6 +181,23 @@ void Renderer::fill_circle(int cx, int cy, int radius) {
     }
 }
 
+// Scanline fill of a rotated ellipse.
+// ra = semi-axis along (ux,uy),  rb = semi-axis along the perpendicular (-uy,ux).
+// Iterates over integer steps in the perpendicular direction.
+void Renderer::fill_ellipse_rotated(int cx, int cy, float ux, float uy, int ra, int rb) {
+    if (ra < 1 || rb < 1) return;
+    float px = -uy, py = ux;   // perpendicular unit vector
+    for (int t = -rb; t <= rb; t++) {
+        float frac = (float)t / rb;
+        float span = ra * sqrtf(std::max(0.f, 1.f - frac * frac));
+        int   ispan = (int)span;
+        float ox = px * t, oy = py * t;
+        SDL_RenderDrawLine(sdl,
+            cx + (int)(ox - ux * ispan), cy + (int)(oy - uy * ispan),
+            cx + (int)(ox + ux * ispan), cy + (int)(oy + uy * ispan));
+    }
+}
+
 void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha, bool shadow_pass) {
     int cx     = view.offset_x + f * view.square + view.square / 2;
     int cy     = view.offset_y + r * view.square + view.square / 2;
@@ -195,7 +212,7 @@ void Renderer::draw_stone_circle(const BoardView& view, int r, int f, int is_bla
 Renderer::StoneColors Renderer::stone_colors(int is_black) {
     if (is_black)
         //        base                lit overlay          dark edge            a1      a2      a3
-        return { {30, 32, 38, 255}, {95, 88, 78, 255}, {20, 22, 27, 255}, 0.14f, 0.00f, 0.10f };
+        return { {18, 20, 25, 255}, {72, 66, 58, 255}, {10, 12, 16, 255}, 0.14f, 0.22f, 0.16f };
     else
         return { {210, 214, 220, 255}, {255, 252, 240, 255}, {178, 182, 190, 255}, 0.35f, 0.28f, 0.20f };
 }
@@ -242,7 +259,7 @@ void Renderer::shade_stone(int cx, int cy, int radius, int is_black, Uint8 alpha
 // Draw a chain link as a shaded cylinder.
 // shadow_pass=true  → only the soft dark shadow quad (drawn first, over all board lines)
 // shadow_pass=false → only the lit cylinder (drawn second, on top of all shadows)
-void Renderer::draw_stone_link(int x1, int y1, int x2, int y2, int thickness, int is_black, bool shadow_pass) {
+void Renderer::draw_stone_link(int x1, int y1, int x2, int y2, int thickness, int is_black, bool shadow_pass, int stone_radius) {
     if (thickness < 1) thickness = 1;
 
     float fdx = (float)(x2 - x1), fdy = (float)(y2 - y1);
@@ -275,34 +292,116 @@ void Renderer::draw_stone_link(int x1, int y1, int x2, int y2, int thickness, in
         return;
     }
 
-    // Cylinder pass — lit edge → base axis → shadow edge
+    // Cylinder pass — discrete layered shading matching the stone:
+    //   base fill (solid c.base) + lit overlay strips narrower and shifted toward the lit side,
+    //   using the same alpha1/2/3 fractions as shade_stone.
     auto c = stone_colors(is_black);
-    float ea = 1.f - (1.f - c.alpha1) * (1.f - c.alpha2) * (1.f - c.alpha3);
-    SDL_Color lit_v = {
-        (Uint8)(c.base.r + ea * (c.lit.r - c.base.r)),
-        (Uint8)(c.base.g + ea * (c.lit.g - c.base.g)),
-        (Uint8)(c.base.b + ea * (c.lit.b - c.base.b)),
-        255
+
+    float ux = fdx / len, uy = fdy / len;  // unit vector A→B
+
+    float overlap = thickness * 0.08f + 1.f;
+    float shorten = std::max(0.f, stone_radius - overlap);
+    float sx = x1 + ux * shorten, sy = y1 + uy * shorten;
+    float ex = x2 - ux * shorten, ey = y2 - uy * shorten;
+
+    float half = thickness * 0.5f;
+    float bx = nx * half, by = ny * half;   // full half-width perpendicular vectors
+
+    // Determine which perpendicular side faces the upper-left light
+    bool flip = (nx * (-0.707f) + ny * (-0.707f)) < 0.f;
+    float lit_nx = flip ? -nx : nx, lit_ny = flip ? -ny : ny;  // lit-side unit vector
+
+    // Layer descriptors.  off_frac is centre offset toward lit side as a fraction of
+    // half-thickness; w_frac is half-width as the same fraction.  Strips are painted
+    // outermost first (col1) then progressively narrower ones on top, with BLENDMODE_NONE,
+    // so they don't interact.
+    //
+    // The broad first strip (off=0.25, w=0.75) extends 0.5*half into the DARK side — just
+    // like the stone's large lit circle which covers ~83% of the sphere and leaves only a
+    // thin dark rim.  This means ~75% of the bar has at least col1 brightness, matching the
+    // stone's proportions and making all three tones clearly visible at any board size.
+    struct Layer { float off_frac; float w_frac; float alpha; };
+    const Layer layers[] = {
+        { 0.25f, 0.75f, c.alpha1 },   // broad:  ~75% of bar (extends into dark side)
+        { 0.55f, 0.45f, c.alpha2 },   // medium: lit side of centre
+        { 0.80f, 0.20f, c.alpha3 },   // tight:  near lit edge
     };
 
-    float half = (float)thickness * 0.5f;
-    float ox = nx * half, oy = ny * half;
-
-    bool flip = (nx * (-0.707f) + ny * (-0.707f)) < 0.f;
-    float lox = flip ? -ox : ox,  loy = flip ? -oy : oy;
-    float sox = flip ?  ox : -ox, soy = flip ?  oy : -oy;
-
-    SDL_Vertex v[6];
-    v[0] = {{(float)x1+lox, (float)y1+loy}, lit_v,  {0,0}};
-    v[1] = {{(float)x1,     (float)y1     }, c.base, {0,0}};
-    v[2] = {{(float)x1+sox, (float)y1+soy}, c.dark, {0,0}};
-    v[3] = {{(float)x2+sox, (float)y2+soy}, c.dark, {0,0}};
-    v[4] = {{(float)x2,     (float)y2     }, c.base, {0,0}};
-    v[5] = {{(float)x2+lox, (float)y2+loy}, lit_v,  {0,0}};
-
-    int idx[12] = {0,1,4, 0,4,5, 1,2,3, 1,3,4};
+    // 1. Base fill — solid c.base rectangle
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
-    SDL_RenderGeometry(sdl, nullptr, v, 6, idx, 12);
+    {
+        SDL_Color col = { c.base.r, c.base.g, c.base.b, 255 };
+        SDL_Vertex v[4] = {
+            {{sx - bx, sy - by}, col, {0,0}},
+            {{sx + bx, sy + by}, col, {0,0}},
+            {{ex + bx, ey + by}, col, {0,0}},
+            {{ex - bx, ey - by}, col, {0,0}},
+        };
+        int idx[6] = {0,1,2, 0,2,3};
+        SDL_RenderGeometry(sdl, nullptr, v, 4, idx, 6);
+    }
+
+    // Pre-compute compounded opaque colors for each layer — same compound as shade_stone
+    // uses with BLENDMODE_BLEND, but expressed as flat opaque values so no triangle-edge
+    // double-compositing can create stripe artefacts.
+    auto compose = [](SDL_Color base, SDL_Color lit, float alpha) -> SDL_Color {
+        return { (Uint8)(base.r + (lit.r - base.r) * alpha),
+                 (Uint8)(base.g + (lit.g - base.g) * alpha),
+                 (Uint8)(base.b + (lit.b - base.b) * alpha), 255 };
+    };
+    SDL_Color col1 = compose(c.base, c.lit, c.alpha1);
+    SDL_Color col2 = compose(col1,   c.lit, c.alpha2);   // compound: layer2 on top of layer1
+    SDL_Color col3 = compose(col2,   c.lit, c.alpha3);   // compound: layer3 on top of both
+    const SDL_Color layer_cols[3] = { col1, col2, col3 };
+
+    // 2. Lit overlay strips — narrower, shifted toward lit side, drawn opaque outermost→innermost
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    for (int i = 0; i < 3; i++) {
+        const Layer& L = layers[i];
+        if (L.alpha <= 0.f) continue;
+        float perp_off = half * L.off_frac;
+        float lhalf    = thickness * L.w_frac * 0.5f;
+        float lbx = nx * lhalf, lby = ny * lhalf;
+        float ox2 = lit_nx * perp_off, oy2 = lit_ny * perp_off;
+        SDL_Vertex v[4] = {
+            {{sx + ox2 - lbx, sy + oy2 - lby}, layer_cols[i], {0,0}},
+            {{sx + ox2 + lbx, sy + oy2 + lby}, layer_cols[i], {0,0}},
+            {{ex + ox2 + lbx, ey + oy2 + lby}, layer_cols[i], {0,0}},
+            {{ex + ox2 - lbx, ey + oy2 - lby}, layer_cols[i], {0,0}},
+        };
+        int idx[6] = {0,1,2, 0,2,3};
+        SDL_RenderGeometry(sdl, nullptr, v, 4, idx, 6);
+    }
+
+    // 3. End caps — ellipses at bar endpoints, shaded with the same discrete layers.
+    // ra = semi-axis along the bar direction (controls roundness; small = flat disc).
+    // rb = half-width of the bar (perpendicular to bar).
+    // Using BLENDMODE_NONE + pre-computed flat colors avoids any per-scanline gradient
+    // banding (that was the old ribbing cause).
+    {
+        int cap_rb = (int)half;                            // full bar half-width
+        int cap_ra = std::max(1, (int)(half * 0.35f));    // roundness along bar axis
+
+        auto draw_cap = [&](float cx, float cy) {
+            // Base disc
+            SDL_SetRenderDrawColor(sdl, c.base.r, c.base.g, c.base.b, 255);
+            fill_ellipse_rotated((int)cx, (int)cy, ux, uy, cap_ra, cap_rb);
+            // Lit overlay ellipses — same perpendicular offsets/widths as bar strips
+            for (int i = 0; i < 3; i++) {
+                const Layer& L = layers[i];
+                if (L.alpha <= 0.f) continue;
+                float perp_off = half * L.off_frac;
+                int lrb = std::max(1, (int)(half * L.w_frac));
+                float ocx = cx + lit_nx * perp_off;
+                float ocy = cy + lit_ny * perp_off;
+                SDL_SetRenderDrawColor(sdl, layer_cols[i].r, layer_cols[i].g, layer_cols[i].b, 255);
+                fill_ellipse_rotated((int)ocx, (int)ocy, ux, uy, cap_ra, lrb);
+            }
+        };
+
+        draw_cap(sx, sy);
+        draw_cap(ex, ey);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,8 +436,9 @@ void Renderer::render_chain_connections(const BoardView& view, const char board[
                     int y1 = view.offset_y + sr * view.square + view.square / 2;
                     int x2 = view.offset_x + af * view.square + view.square / 2;
                     int y2 = view.offset_y + ar * view.square + view.square / 2;
-                    int thick = (view.square - 4) / 2;
-                    draw_stone_link(x1, y1, x2, y2, thick, color, shadows_only);
+                    int thick    = (view.square - 4) / 2;
+                    int stone_r  = view.square / 2 - 2;
+                    draw_stone_link(x1, y1, x2, y2, thick, color, shadows_only, stone_r);
                 }
             }
         }
@@ -1388,10 +1488,12 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                          ? (ds.territory_drill ? 0 : ds.game.liberty_count)
                          : ds.analysis->liberty_count;
 
-    // Layered render — all shadows composited once (no additive stacking),
-    // then cylinders, then stone fills on top.
+    // Layered render:
+    //   1. All shadows (max-alpha composite — no stacking)
+    //   2. Stone fills
+    //   3. Link cylinders with elliptical caps on top (bars drawn over stones,
+    //      shortened to stone edge so caps give cylinder-meets-sphere illusion)
     render_all_shadows(view, active_board, ds.chain_mode, ds.stone_filter, n);
-    render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter, /*shadows_only=*/false);
     for (int r = 0; r < n; r++)
         for (int f = 0; f < n; f++) {
             int cell = active_board[r][f];
@@ -1401,6 +1503,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
             if (ds.stone_filter == 2 &&  is_black) continue;
             draw_stone_circle(view, r, f, is_black, 255, /*shadow_pass=*/false);
         }
+    render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter, /*shadows_only=*/false);
 
     // Move-number overlay
     if (ds.show_move_numbers) {

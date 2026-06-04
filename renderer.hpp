@@ -109,7 +109,7 @@ private:
     void render_game_comment(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
     void shade_stone(int cx, int cy, int radius, int is_black, Uint8 alpha, bool shadow_pass = false);
-    void draw_stone_link(int x1, int y1, int x2, int y2, int thickness, int is_black, bool shadow_pass = false);
+    void draw_stone_link(int x1, int y1, int x2, int y2, int thickness, int is_black, bool shadow_pass = false, int stone_radius = 0);
 
     // Shared palette so stones and chain links always shade consistently.
     struct StoneColors {
@@ -122,6 +122,8 @@ private:
     };
     static StoneColors stone_colors(int is_black);
     void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set
+    // Scanline fill of a rotated ellipse. ra = semi-axis along (ux,uy), rb = semi-axis along perpendicular.
+    void fill_ellipse_rotated(int cx, int cy, float ux, float uy, int ra, int rb);
 
     // Board cache: the board+HUD are rendered to a texture and only rebuilt when
     // board state changes.  Cursor is composited on top each frame for free.
