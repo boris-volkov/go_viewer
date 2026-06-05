@@ -49,8 +49,6 @@ static bool parse_sgf_move(const char* move_str, int& out_r, int& out_f) {
 }
 
 static bool load_sgf(const std::string& path, SgfGame& g) {
-    FILE* fp = fopen(path.c_str(), "r");
-    if (!fp) return false;
     g.move_count            = 0;
     g.black_name[0]         = '\0';
     g.white_name[0]         = '\0';
@@ -61,118 +59,185 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     g.initial_turn_is_black = 1;
     memset(g.initial_board, 0, sizeof(g.initial_board));
 
-    char line[1024];
-    while (fgets(line, sizeof(line), fp)) {
-        // Regular moves: ;B[xx] and ;W[xx]
-        const char* p = line;
-        while (*p) {
-            if (*p == ';' && *(p+1) == 'B' && *(p+2) == '[') {
-                p += 3;
-                const char* end = strchr(p, ']');
-                if (end && g.move_count < MAX_MOVES) {
-                    size_t len = (size_t)(end - p);
-                    if (len >= MOVE_TEXT_LEN) len = MOVE_TEXT_LEN - 1;
-                    memcpy(g.moves[g.move_count], p, len);
-                    g.moves[g.move_count][len] = '\0';
-                    g.colors[g.move_count] = 1;
-                    g.move_count++;
-                }
-            } else if (*p == ';' && *(p+1) == 'W' && *(p+2) == '[') {
-                p += 3;
-                const char* end = strchr(p, ']');
-                if (end && g.move_count < MAX_MOVES) {
-                    size_t len = (size_t)(end - p);
-                    if (len >= MOVE_TEXT_LEN) len = MOVE_TEXT_LEN - 1;
-                    memcpy(g.moves[g.move_count], p, len);
-                    g.moves[g.move_count][len] = '\0';
-                    g.colors[g.move_count] = 0;
-                    g.move_count++;
-                }
-            }
-            p++;
-        }
-        // Setup stones: AB[xx][xx]... and AW[xx][xx]...
-        const char* setup_tags[2] = {"AB[", "AW["};
-        int         setup_col[2]  = {1, 2};
-        for (int ti = 0; ti < 2; ti++) {
-            const char* sp = line;
-            while ((sp = strstr(sp, setup_tags[ti])) != nullptr) {
-                sp += 3;  // skip "AB[" or "AW["
-                for (;;) {
-                    if (sp[0] >= 'a' && sp[0] <= 's' && sp[1] >= 'a' && sp[1] <= 's') {
-                        int f = sp[0] - 'a', r = sp[1] - 'a';
-                        g.initial_board[r][f] = (char)setup_col[ti];
-                        g.has_setup = true;
-                    }
-                    const char* end = strchr(sp, ']');
-                    if (!end) break;
-                    sp = end + 1;
-                    if (*sp != '[') break;
-                    sp++;  // opening '[' of next value in the same property
-                }
-            }
-        }
-        // PL[] — initial player to move
-        {
-            const char* sp = strstr(line, "PL[");
-            if (sp) g.initial_turn_is_black = (sp[3] == 'B' || sp[3] == 'b') ? 1 : 0;
-        }
-        // Named properties
-        auto extract = [&](const char* tag, char* dst, size_t dsz) {
-            const char* s = strstr(line, tag);
-            if (!s) return;
-            s += strlen(tag);
-            const char* e = strchr(s, ']');
-            if (!e) return;
-            size_t len = (size_t)(e - s);
-            while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\r'||s[len-1]=='\n')) len--;
-            while (len > 0 && (*s==' '||*s=='\t')) { s++; len--; }
-            if (len >= dsz) len = dsz - 1;
-            if (len > 0) { memcpy(dst, s, len); dst[len] = '\0'; }
-        };
-        extract("PB[", g.black_name, sizeof(g.black_name));
-        extract("PW[", g.white_name, sizeof(g.white_name));
-        if (!strstr(line, "PW[")) extract("pw[", g.white_name, sizeof(g.white_name));
-        extract("RE[", g.result, sizeof(g.result));
-        extract("DT[", g.date,   sizeof(g.date));
-    }
+    // Read the whole file at once so we can track parenthesis depth properly.
+    // This is necessary to skip variation branches (depth >= 2) which would
+    // otherwise be mixed into the main move sequence and cause playback freezes
+    // when a variation move tries to land on an already-occupied intersection.
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) return false;
+    fseek(fp, 0, SEEK_END);
+    long fsz = ftell(fp);
+    rewind(fp);
+    if (fsz <= 0 || fsz > 8 * 1024 * 1024) { fclose(fp); return false; }
+    std::vector<char> buf((size_t)fsz + 1);
+    size_t nread = fread(buf.data(), 1, (size_t)fsz, fp);
     fclose(fp);
+    buf[nread] = '\0';
+
+    // Helper: read a property value starting at src (pointing just past '['),
+    // write into dst (null-terminated, trimmed), return pointer to char after ']'.
+    auto read_val = [](const char* src, char* dst, size_t dsz) -> const char* {
+        size_t i = 0;
+        while (*src && *src != ']') {
+            if (*src == '\\') { src++; if (!*src) break; }
+            if (i < dsz - 1) dst[i++] = *src;
+            src++;
+        }
+        while (i > 0 && (dst[i-1]==' '||dst[i-1]=='\t'||dst[i-1]=='\r'||dst[i-1]=='\n')) i--;
+        dst[i] = '\0';
+        return (*src == ']') ? src + 1 : src;
+    };
+
+    const char* p = buf.data();
+    int  depth     = 0;     // ( / ) nesting; 1 = main game line, 2+ = variation
+    bool in_prop   = false; // currently inside [...] property value
+    bool prev_alpha= false; // previous non-space char was a letter (detects multi-char prop names)
+
+    while (*p) {
+        // --- Inside a property value: advance until ']', respecting '\' escapes ---
+        if (in_prop) {
+            if (*p == '\\') { p += 2; continue; }
+            if (*p == ']')  { in_prop = false; }
+            if (*p && !isspace((unsigned char)*p)) prev_alpha = (isalpha((unsigned char)*p) != 0);
+            p++;
+            continue;
+        }
+
+        // --- Structural characters (only valid outside property values) ---
+        if (*p == '(') { depth++; prev_alpha = false; p++; continue; }
+        if (*p == ')') { depth--; prev_alpha = false; p++; continue; }
+        // Unknown/unhandled property: consume value so we don't mistake its content
+        if (*p == '[') { in_prop = true; prev_alpha = false; p++; continue; }
+
+        // --- Only parse game content at depth 1 (main game sequence) ---
+        if (depth != 1) {
+            if (*p && !isspace((unsigned char)*p)) prev_alpha = (isalpha((unsigned char)*p) != 0);
+            p++;
+            continue;
+        }
+
+        // ---- Main game line (depth == 1) ----
+
+        // B[move] — black move.  Guard !prev_alpha avoids matching the 'B' in "PB[", "AB[", etc.
+        if (*p == 'B' && *(p+1) == '[' && !prev_alpha) {
+            p += 2;
+            const char* start = p;
+            while (*p && *p != ']') { if (*p == '\\') p++; if (*p) p++; }
+            if (g.move_count < MAX_MOVES) {
+                size_t len = (size_t)(p - start);
+                if (len >= MOVE_TEXT_LEN) len = MOVE_TEXT_LEN - 1;
+                memcpy(g.moves[g.move_count], start, len);
+                g.moves[g.move_count][len] = '\0';
+                g.colors[g.move_count] = 1;
+                g.move_count++;
+            }
+            if (*p == ']') p++;
+            prev_alpha = false;
+            continue;
+        }
+
+        // W[move] — white move
+        if (*p == 'W' && *(p+1) == '[' && !prev_alpha) {
+            p += 2;
+            const char* start = p;
+            while (*p && *p != ']') { if (*p == '\\') p++; if (*p) p++; }
+            if (g.move_count < MAX_MOVES) {
+                size_t len = (size_t)(p - start);
+                if (len >= MOVE_TEXT_LEN) len = MOVE_TEXT_LEN - 1;
+                memcpy(g.moves[g.move_count], start, len);
+                g.moves[g.move_count][len] = '\0';
+                g.colors[g.move_count] = 0;
+                g.move_count++;
+            }
+            if (*p == ']') p++;
+            prev_alpha = false;
+            continue;
+        }
+
+        // AB[xx][xx]... — add black setup stones (multi-value)
+        if (*p == 'A' && *(p+1) == 'B') {
+            p += 2;
+            while (*p == '[') {
+                p++;
+                if (p[0] >= 'a' && p[0] <= 's' && p[1] >= 'a' && p[1] <= 's') {
+                    g.initial_board[p[1]-'a'][p[0]-'a'] = 1;
+                    g.has_setup = true;
+                }
+                while (*p && *p != ']') { if (*p == '\\') p++; if (*p) p++; }
+                if (*p == ']') p++;
+            }
+            prev_alpha = false;
+            continue;
+        }
+
+        // AW[xx][xx]... — add white setup stones (multi-value)
+        if (*p == 'A' && *(p+1) == 'W') {
+            p += 2;
+            while (*p == '[') {
+                p++;
+                if (p[0] >= 'a' && p[0] <= 's' && p[1] >= 'a' && p[1] <= 's') {
+                    g.initial_board[p[1]-'a'][p[0]-'a'] = 2;
+                    g.has_setup = true;
+                }
+                while (*p && *p != ']') { if (*p == '\\') p++; if (*p) p++; }
+                if (*p == ']') p++;
+            }
+            prev_alpha = false;
+            continue;
+        }
+
+        // PL[B/W] — initial player to move
+        if (*p == 'P' && *(p+1) == 'L' && *(p+2) == '[') {
+            p += 3;
+            g.initial_turn_is_black = (*p == 'B' || *p == 'b') ? 1 : 0;
+            in_prop = true; prev_alpha = false; p++; continue;
+        }
+
+        // PB[...] — player black name
+        if (*p == 'P' && *(p+1) == 'B' && *(p+2) == '[') {
+            p += 3; p = read_val(p, g.black_name, sizeof(g.black_name));
+            prev_alpha = false; continue;
+        }
+
+        // PW[...] — player white name
+        if (*p == 'P' && *(p+1) == 'W' && *(p+2) == '[') {
+            p += 3; p = read_val(p, g.white_name, sizeof(g.white_name));
+            prev_alpha = false; continue;
+        }
+
+        // RE[...] — result
+        if (*p == 'R' && *(p+1) == 'E' && *(p+2) == '[') {
+            p += 3; p = read_val(p, g.result, sizeof(g.result));
+            prev_alpha = false; continue;
+        }
+
+        // DT[...] — date
+        if (*p == 'D' && *(p+1) == 'T' && *(p+2) == '[') {
+            p += 3; p = read_val(p, g.date, sizeof(g.date));
+            prev_alpha = false; continue;
+        }
+
+        // C[...] — root comment (only before any moves; !prev_alpha avoids CA[, GC[, etc.)
+        if (*p == 'C' && *(p+1) == '[' && !prev_alpha && g.move_count == 0) {
+            p += 2;
+            size_t ci = 0; bool esc = false;
+            while (*p && ci < sizeof(g.comment) - 1) {
+                if (esc)          { g.comment[ci++] = *p++; esc = false; }
+                else if (*p=='\\') { esc = true; p++; }
+                else if (*p==']')  { p++; break; }
+                else               { g.comment[ci++] = *p++; }
+            }
+            g.comment[ci] = '\0';
+            prev_alpha = false; continue;
+        }
+
+        // Default: update prev_alpha and advance
+        if (!isspace((unsigned char)*p)) prev_alpha = (isalpha((unsigned char)*p) != 0);
+        p++;
+    }
+
     if (g.black_name[0] == '\0') strcpy(g.black_name, "Black");
     if (g.white_name[0] == '\0') strcpy(g.white_name, "White");
-
-    // Extract root-level comment C[...] — must appear before the first move.
-    // Re-read the header in one pass so we can handle multi-line comments.
-    {
-        FILE* fp2 = fopen(path.c_str(), "rb");
-        if (fp2) {
-            char buf[8192];
-            size_t n = fread(buf, 1, sizeof(buf) - 1, fp2);
-            fclose(fp2);
-            buf[n] = '\0';
-
-            // Restrict search to the region before the first ;B[ or ;W[ move
-            const char* fence = nullptr;
-            const char* fb = strstr(buf, ";B[");
-            const char* fw = strstr(buf, ";W[");
-            if (fb && fw) fence = (fb < fw) ? fb : fw;
-            else          fence = fb ? fb : fw;
-
-            const char* cp = strstr(buf, "C[");
-            if (cp && (!fence || cp < fence)) {
-                cp += 2;  // skip "C["
-                size_t ci = 0;
-                bool esc = false;
-                while (*cp && ci < sizeof(g.comment) - 1) {
-                    if (esc) { g.comment[ci++] = *cp; esc = false; }
-                    else if (*cp == '\\') { esc = true; }
-                    else if (*cp == ']') { break; }
-                    else { g.comment[ci++] = *cp; }
-                    cp++;
-                }
-                g.comment[ci] = '\0';
-            }
-        }
-    }
 
     return g.move_count > 0 || g.has_setup;
 }
