@@ -834,8 +834,13 @@ void App::handle_key(SDL_Keycode key, const Uint8* /*kb*/, bool& quit) {
         draw_board();
         return;
     }
-    // Any other key (except Escape, which has its own handler below) cancels confirm
-    if (quit_confirm && key != SDLK_ESCAPE) { quit_confirm = false; draw_board(); }
+    // Any other key cancels quit confirm.  Escape is handled here immediately so that
+    // mode-specific blocks (territory drill, etc.) that return early can't swallow it.
+    if (quit_confirm) {
+        quit_confirm = false;
+        draw_board();
+        if (key == SDLK_ESCAPE) return;   // Escape: cancel only, don't fall through
+    }
 
     // Territory drill intercepts most keys
     if (territory_drill_active) {
@@ -1493,7 +1498,13 @@ bool App::play_current_game() {
                         draw_board();
                     }
                 } else if (e.type == SDL_MOUSEMOTION && box_drag_active) {
-                    draw_board();  // redraw to update dashed-rect preview
+                    // Only redraw for the last motion event in the current burst.
+                    // SDL can queue hundreds of MOUSEMOTION events between frames; calling
+                    // SDL_RenderPresent() for each one freezes the program on slow/software
+                    // renderers (each present is a full X11/Wayland buffer swap).
+                    SDL_Event peek;
+                    if (SDL_PeepEvents(&peek, 1, SDL_PEEKEVENT, SDL_MOUSEMOTION, SDL_MOUSEMOTION) == 0)
+                        draw_board();
                 } else if (in_analysis() && e.type == SDL_MOUSEBUTTONDOWN) {
                     BoardView view; renderer->get_board_view(view, active_size());
                     if (e.button.button == SDL_BUTTON_RIGHT)
