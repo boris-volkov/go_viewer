@@ -1,6 +1,6 @@
-^C:\USERS\BORIS\DOCUMENTS\GITHUB\CHESS_VIEWER\GO_VIEWER\BUILD\CMAKEFILES\8D2132C121578E6D0D03AE8B3AE9B2CC\GENERATE.STAMP.RULE
+^C:\USERS\BORIS\DOCUMENTS\GITHUB\GO_VIEWER\BUILD\CMAKEFILES\FC3276133FAAFB2E413CB296A49EAF57\GENERATE.STAMP.RULE
 setlocal
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/boris/Documents/GitHub/chess_viewer/go_viewer -BC:/Users/boris/Documents/GitHub/chess_viewer/go_viewer/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/boris/Documents/GitHub/chess_viewer/go_viewer/build/go_viewer.sln
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/boris/Documents/GitHub/go_viewer -BC:/Users/boris/Documents/GitHub/go_viewer/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/boris/Documents/GitHub/go_viewer/build/go_viewer.sln
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

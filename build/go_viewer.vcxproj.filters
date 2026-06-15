@@ -1,16 +1,34 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="C:\Users\boris\Documents\GitHub\chess_viewer\go_viewer\go_viewer.c">
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\go_rules.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\game_state.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\analysis_state.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\catalog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\game_index.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\boris\Documents\GitHub\go_viewer\renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="C:\Users\boris\Documents\GitHub\chess_viewer\go_viewer\CMakeLists.txt" />
+    <CustomBuild Include="C:\Users\boris\Documents\GitHub\go_viewer\CMakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Source Files">
-      <UniqueIdentifier>{907EA867-8F75-38EF-9F4A-1CEDF576B1D0}</UniqueIdentifier>
+      <UniqueIdentifier>{EB826B2C-5751-3EAD-9334-7D5952EC3364}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>
