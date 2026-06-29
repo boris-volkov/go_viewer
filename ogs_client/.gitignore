@@ -1,0 +1,5 @@
+# Credentials — never commit
+config.ini
+
+# Temp runtime files
+tmp_clock.txt

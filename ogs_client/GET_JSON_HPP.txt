@@ -1,0 +1,11 @@
+json.hpp is required — it is a single-file header from nlohmann/json.
+
+Download it with:
+  curl -L https://github.com/nlohmann/json/releases/latest/download/json.hpp -o json.hpp
+
+Or from MSYS2:
+  pacman -S mingw-w64-x86_64-nlohmann-json
+  # then find the header: /mingw64/include/nlohmann/json.hpp
+  # copy it here as json.hpp
+
+The file must be placed in this directory (ogs_client/).

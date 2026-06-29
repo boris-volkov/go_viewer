@@ -68,3 +68,7 @@ build_cpp/
 # Compiled executables (no extension = Linux/macOS binary)
 go_viewer
 go
+
+# Third-party reference repos (not part of this project)
+ogs_api-master/
+online-go.com-main/

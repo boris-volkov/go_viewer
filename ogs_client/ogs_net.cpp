@@ -1,0 +1,1165 @@
+#include "ogs_net.hpp"
+#include "json.hpp"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+#include <libwebsockets.h>
+#include <curl/curl.h>
+
+static FILE* g_log_file = nullptr;
+
+static void net_log(const char* msg) {
+    // Open a timestamped log file on first call
+    if (!g_log_file) {
+        time_t t = time(nullptr);
+        struct tm* tm = localtime(&t);
+        char name[64];
+        strftime(name, sizeof(name), "ogs_%Y%m%d_%H%M%S.log", tm);
+        g_log_file = fopen(name, "w");
+        if (g_log_file) {
+            char header[128];
+            strftime(header, sizeof(header), "=== OGS session %Y-%m-%d %H:%M:%S ===", tm);
+            fprintf(g_log_file, "%s\n", header);
+            fflush(g_log_file);
+        }
+    }
+    // Timestamp each line
+    time_t t = time(nullptr);
+    struct tm* tm = localtime(&t);
+    char ts[24];
+    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+    if (g_log_file) {
+        fprintf(g_log_file, "[%s] %s\n", ts, msg);
+        fflush(g_log_file);
+    }
+    fprintf(stderr, "[%s] %s\n", ts, msg);
+}
+
+static void lws_log_to_file(int level, const char* line) {
+    if (!line) return;
+    // Strip trailing newline for clean formatting
+    char buf[512];
+    int len = (int)strlen(line);
+    if (len > 0 && line[len-1] == '\n') len--;
+    if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+    net_log(buf);
+}
+
+#include <SDL2/SDL.h>
+
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <chrono>
+#include <random>
+#include <cstdlib>
+#include <cassert>
+#include <sstream>
+
+using json = nlohmann::json;
+
+// SDL custom event type — registered once in main(), read here.
+extern Uint32 g_net_event_type;
+
+// ── CURL helpers ─────────────────────────────────────────────────────────────
+
+// Resolve the CA bundle path relative to the running executable.
+static std::string find_ca_bundle() {
+#ifdef _WIN32
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    // Replace filename with ca-bundle.crt
+    char* last_sep = strrchr(exe, '\\');
+    if (!last_sep) last_sep = strrchr(exe, '/');
+    if (last_sep) {
+        strcpy(last_sep + 1, "ca-bundle.crt");
+        return exe;
+    }
+#endif
+    return "ca-bundle.crt";
+}
+
+static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* s = reinterpret_cast<std::string*>(userdata);
+    s->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+// GET (body empty) or POST. cookiejar: Netscape file for read/write; "" = no jar.
+// extra_hdr: optional extra header line e.g. "X-CSRFToken: abc"; "" = none.
+static bool curl_request(const std::string& url,
+                         const std::string& body,
+                         const std::string& cookiejar,
+                         const std::string& extra_hdr,
+                         std::string& response_out,
+                         long& http_code_out)
+{
+    CURL* c = curl_easy_init();
+    if (!c) return false;
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: application/json");
+    if (!extra_hdr.empty())
+        headers = curl_slist_append(headers, extra_hdr.c_str());
+
+    static std::string ca_bundle = find_ca_bundle();
+
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &response_out);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(c, CURLOPT_CAINFO, ca_bundle.c_str());
+
+    if (!cookiejar.empty()) {
+        curl_easy_setopt(c, CURLOPT_COOKIEJAR,  cookiejar.c_str());
+        curl_easy_setopt(c, CURLOPT_COOKIEFILE, cookiejar.c_str());
+    } else {
+        curl_easy_setopt(c, CURLOPT_COOKIEFILE, "");
+    }
+
+    if (!body.empty()) {
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    }
+
+    CURLcode res = curl_easy_perform(c);
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code_out);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(c);
+    return (res == CURLE_OK);
+}
+
+// Parse a Netscape-format cookie jar file and return the value of `name`.
+static std::string read_cookie(const std::string& jar_path, const std::string& name) {
+    FILE* f = fopen(jar_path.c_str(), "r");
+    if (!f) return "";
+    char line[4096];
+    std::string result;
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        // Fields: domain \t subdomain \t path \t secure \t expiry \t name \t value
+        char* fields[7] = {};
+        char* tok = strtok(line, "\t");
+        int i = 0;
+        while (tok && i < 7) { fields[i++] = tok; tok = strtok(nullptr, "\t"); }
+        if (i == 7 && fields[5] && name == fields[5]) {
+            result = fields[6] ? fields[6] : "";
+            while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+                result.pop_back();
+            break;
+        }
+    }
+    fclose(f);
+    return result;
+}
+
+void OgsNet::fetch_sgf(int game_id, const std::string& path) {
+    // curl_request always sends Accept: application/json which the /sgf/ endpoint
+    // rejects with 406. Do a bare GET with only the Authorization header.
+    std::string url = "https://online-go.com/api/v1/games/"
+                    + std::to_string(game_id) + "/sgf/";
+    std::string data;
+    long code = 0;
+
+    CURL* c = curl_easy_init();
+    if (!c) return;
+    static std::string ca = find_ca_bundle();
+    struct curl_slist* hdrs = nullptr;
+    hdrs = curl_slist_append(hdrs, ("Authorization: Bearer " + jwt_).c_str());
+    curl_easy_setopt(c, CURLOPT_URL,           url.c_str());
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,    hdrs);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,     &data);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION,1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,       15L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER,1L);
+    curl_easy_setopt(c, CURLOPT_CAINFO,        ca.c_str());
+    curl_easy_setopt(c, CURLOPT_COOKIEFILE,    "");
+    CURLcode res = curl_easy_perform(c);
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(c);
+
+    if (res != CURLE_OK || code != 200) {
+        net_log(("fetch_sgf: HTTP " + std::to_string(code) + " for game " +
+                 std::to_string(game_id)).c_str());
+        return;
+    }
+    FILE* fp = fopen(path.c_str(), "wb");
+    if (!fp) { net_log(("fetch_sgf: cannot write " + path).c_str()); return; }
+    fwrite(data.data(), 1, data.size(), fp);
+    fclose(fp);
+    net_log(("fetch_sgf: saved " + path).c_str());
+}
+
+// Base64url decode (for JWT payload).
+static std::string base64url_decode(const std::string& in) {
+    std::string s = in;
+    for (char& c : s) {
+        if (c == '-') c = '+';
+        else if (c == '_') c = '/';
+    }
+    while (s.size() % 4) s += '=';
+    std::string out;
+    int val = 0, valb = -8;
+    for (unsigned char c : s) {
+        if (c == '=') break;
+        int v;
+        if      (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+')             v = 62;
+        else if (c == '/')             v = 63;
+        else continue;
+        val = (val << 6) + v;
+        valb += 6;
+        if (valb >= 0) {
+            out += char((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
+// ── OgsNet lifecycle ─────────────────────────────────────────────────────────
+
+OgsNet::OgsNet() {}
+
+OgsNet::~OgsNet() {
+    stop();
+}
+
+bool OgsNet::start(const std::string& username, const std::string& password,
+                   const std::string& jwt_override) {
+    username_ = username;
+    password_ = password;
+    jwt_ = jwt_override;  // do_auth() uses this if non-empty, skips REST login
+    stop_flag_ = false;
+    thread_ = std::thread([this] { net_loop(); });
+    return true;
+}
+
+void OgsNet::stop() {
+    stop_flag_ = true;
+    if (ctx_) lws_cancel_service(ctx_);
+    if (thread_.joinable()) thread_.join();
+}
+
+// ── Thread-safe command API ───────────────────────────────────────────────────
+
+void OgsNet::cmd_find_match(const MatchPrefs& prefs) {
+    match_uuid_ = make_uuid();
+
+    static const char* size_strs[3]  = {"9x9", "13x13", "19x19"};
+    static const char* speed_strs[3] = {"blitz", "live", "rapid"};
+
+    json opts = json::array();
+    for (int si = 0; si < 3; si++) {
+        if (!prefs.sizes[si]) continue;
+        for (int sp = 0; sp < 3; sp++) {
+            if (!prefs.speeds[sp]) continue;
+            for (const char* sys : {"byoyomi", "fischer"})
+                opts.push_back({{"size", size_strs[si]}, {"speed", speed_strs[sp]}, {"system", sys}});
+        }
+    }
+    if (opts.empty()) {
+        // Fallback: 9x9 live if nothing selected
+        for (const char* sys : {"byoyomi", "fischer"})
+            opts.push_back({{"size","9x9"}, {"speed","live"}, {"system", sys}});
+    }
+
+    json payload = {
+        {"uuid",             match_uuid_},
+        {"lower_rank_diff",  0},
+        {"upper_rank_diff",  9},
+        {"rules",            {{"condition","required"},{"value","japanese"}}},
+        {"handicap",         {{"condition","preferred"},{"value","enabled"}}},
+        {"size_speed_options", opts}
+    };
+    std::string dump = payload.dump();
+    net_log(("automatch/find_match: " + dump).c_str());
+    enqueue_event("automatch/find_match", dump);
+}
+
+void OgsNet::cmd_cancel_match() {
+    if (match_uuid_.empty()) { net_log("cmd_cancel_match: no uuid (already cleared?)"); return; }
+    net_log(("automatch/cancel: uuid=" + match_uuid_).c_str());
+    json payload = {{"uuid", match_uuid_}};
+    enqueue_event("automatch/cancel", payload.dump());
+    match_uuid_.clear();
+}
+
+// OGS move encoding: two-character letter string, e.g. col=0,row=1 → "ab".
+// Pass (col=-1,row=-1) → "..". Matches the Python API's _num2char convention.
+static std::string encode_move(int col, int row) {
+    static const char* letters = "abcdefghijklmnopqrstuvwxyz";
+    char s[3] = { col >= 0 ? letters[col] : '.', row >= 0 ? letters[row] : '.', 0 };
+    return std::string(s, 2);
+}
+
+void OgsNet::cmd_send_move(int game_id, int col, int row) {
+    json payload = {{"game_id", game_id}, {"player_id", my_player_id},
+                    {"move", encode_move(col, row)}};
+    enqueue_event("game/move", payload.dump());
+}
+
+void OgsNet::cmd_send_pass(int game_id) {
+    json payload = {{"game_id", game_id}, {"player_id", my_player_id}, {"move", ".."}};
+    enqueue_event("game/move", payload.dump());
+}
+
+void OgsNet::cmd_send_resign(int game_id) {
+    json payload = {{"game_id", game_id}, {"player_id", my_player_id}};
+    enqueue_event("game/resign", payload.dump());
+}
+
+void OgsNet::cmd_accept_stones(int game_id) {
+    json payload = {
+        {"game_id",          game_id},
+        {"player_id",        my_player_id},
+        {"stones",           removed_stones_},
+        {"all_removed",      removed_stones_},
+        {"strict_seki_mode", false}
+    };
+    std::string dump = payload.dump();
+    net_log(("cmd_accept_stones: " + dump).c_str());
+    enqueue_event("game/removed_stones_accept", dump);
+}
+
+void OgsNet::cmd_accept_undo(int game_id, int move_number) {
+    json payload = {{"game_id", game_id}, {"move_number", move_number}};
+    std::string dump = payload.dump();
+    net_log(("cmd_accept_undo: " + dump).c_str());
+    enqueue_event("game/undo", dump);
+}
+
+void OgsNet::cmd_reject_undo(int game_id, int move_number) {
+    json payload = {{"game_id", game_id}, {"move_number", move_number}};
+    std::string dump = payload.dump();
+    net_log(("cmd_reject_undo: " + dump).c_str());
+    enqueue_event("game/undo_cancel", dump);
+}
+
+bool OgsNet::poll_msg(NetMsg& out) {
+    std::lock_guard<std::mutex> lock(inbound_mu_);
+    if (inbound_.empty()) return false;
+    out = std::move(inbound_.front());
+    inbound_.pop();
+    return true;
+}
+
+// ── Auth (runs on network thread before WebSocket opens) ─────────────────────
+
+bool OgsNet::do_auth() {
+    // Fast path: jwt= in config.ini — decode player info from token, skip REST.
+    if (!jwt_.empty()) {
+        auto dot1 = jwt_.find('.');
+        auto dot2 = dot1 != std::string::npos ? jwt_.find('.', dot1 + 1) : std::string::npos;
+        if (dot2 != std::string::npos) {
+            try {
+                std::string payload_json = base64url_decode(jwt_.substr(dot1 + 1, dot2 - dot1 - 1));
+                auto payload = json::parse(payload_json);
+                my_player_id = payload.at("id").get<int>();
+                my_username  = payload.value("username", username_);
+                // Fetch chat_auth from ui/config (needed for authenticate event)
+                std::string cfg_resp; long cfg_code = 0;
+                if (curl_request("https://online-go.com/api/v1/ui/config/", "",
+                                 "", "Authorization: Bearer " + jwt_,
+                                 cfg_resp, cfg_code) && cfg_code == 200) {
+                    try { chat_auth_ = json::parse(cfg_resp).value("chat_auth", ""); }
+                    catch (...) {}
+                }
+                return true;
+            } catch (const std::exception& e) {
+                (void)e;
+                jwt_.clear();
+            }
+        }
+    }
+
+    // Full session cookie login: CSRF → login → ui/config.
+    std::string cookiejar;
+    const char* tmp = getenv("TEMP");
+    if (!tmp) tmp = getenv("TMP");
+    if (!tmp) tmp = "/tmp";
+    cookiejar = std::string(tmp) + "/ogs_cookies.txt";
+    remove(cookiejar.c_str());
+
+    std::string resp;
+    long code = 0;
+
+    // Step 1: GET /api/v1/ to receive the csrftoken cookie.
+    if (!curl_request("https://online-go.com/api/v1/", "", cookiejar, "", resp, code))
+        return false;
+
+    std::string csrf = read_cookie(cookiejar, "csrftoken");
+    if (csrf.empty()) return false;
+
+    // Step 2: POST credentials with CSRF header.
+    json login_body = {{"username", username_}, {"password", password_}};
+    resp.clear();
+    if (!curl_request("https://online-go.com/api/v1/login/",
+                      login_body.dump(), cookiejar,
+                      "X-CSRFToken: " + csrf, resp, code))
+        return false;
+    if (code != 200) return false;
+
+    // Step 3: GET ui/config with session cookie → real user JWT.
+    resp.clear();
+    if (!curl_request("https://online-go.com/api/v1/ui/config/",
+                      "", cookiejar, "", resp, code))
+        return false;
+    if (code != 200) return false;
+
+    try {
+        auto cfg = json::parse(resp);
+        jwt_          = cfg.at("user_jwt").get<std::string>();
+        my_player_id  = cfg.at("user").at("id").get<int>();
+        my_username   = cfg.at("user").at("username").get<std::string>();
+        chat_auth_    = cfg.value("chat_auth", "");
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+// ── Socket.IO send helpers ────────────────────────────────────────────────────
+
+void OgsNet::enqueue_raw(const std::string& raw) {
+    {
+        std::lock_guard<std::mutex> lock(outbound_mu_);
+        outbound_.push(raw);
+    }
+    // lws_cancel_service is the only thread-safe way to wake the service loop
+    // from outside the LWS thread. lws_callback_on_writable is NOT safe here.
+    if (ctx_) lws_cancel_service(ctx_);
+}
+
+void OgsNet::enqueue_event(const std::string& name, const std::string& payload_json) {
+    // 42["event_name", payload]
+    std::string msg = "42[\"" + name + "\"," + payload_json + "]";
+    enqueue_raw(msg);
+}
+
+void OgsNet::push_msg(NetMsg msg) {
+    {
+        std::lock_guard<std::mutex> lock(inbound_mu_);
+        inbound_.push(std::move(msg));
+    }
+    // Wake the SDL main thread
+    SDL_Event ev;
+    SDL_memset(&ev, 0, sizeof(ev));
+    ev.type = g_net_event_type;
+    SDL_PushEvent(&ev);
+}
+
+// ── WebSocket callbacks ───────────────────────────────────────────────────────
+
+void OgsNet::on_ws_open() {
+    sio_connected_ = false;
+    authenticated_ = false;
+    recv_buf_.clear();
+    // Socket.IO v4 / EIO4: auth is embedded in the namespace connect packet,
+    // not sent as a separate "authenticate" event.  The server expects:
+    //   40{"auth":{"token":"<JWT>"}}
+    json connect_payload = {{"auth", {{"token", jwt_}}}};
+    std::string msg = "40" + connect_payload.dump();
+    enqueue_raw(msg);
+}
+
+void OgsNet::on_ws_data(const char* data, size_t len, bool final) {
+    recv_buf_.append(data, len);
+    if (!final) return;
+
+    std::string msg = std::move(recv_buf_);
+    recv_buf_.clear();
+    dispatch_sio(msg);
+}
+
+void OgsNet::on_ws_close() {
+    net_log("WebSocket closed");
+    sio_connected_ = false;
+    authenticated_ = false;
+    wsi_ = nullptr;
+
+    if (!stop_flag_) {
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = "Connection lost";
+        push_msg(std::move(m));
+    }
+}
+
+void OgsNet::do_write() {
+    std::string msg;
+    {
+        std::lock_guard<std::mutex> lock(outbound_mu_);
+        if (outbound_.empty()) return;
+        msg = outbound_.front();
+        outbound_.pop();
+    }
+
+    std::vector<unsigned char> buf(LWS_PRE + msg.size());
+    memcpy(buf.data() + LWS_PRE, msg.data(), msg.size());
+    int rc = lws_write(wsi_, buf.data() + LWS_PRE, msg.size(), LWS_WRITE_TEXT);
+    if (rc < 0) net_log("lws_write error");
+
+    // If more messages queued, request another writeable callback
+    {
+        std::lock_guard<std::mutex> lock(outbound_mu_);
+        if (!outbound_.empty())
+            lws_callback_on_writable(wsi_);
+    }
+}
+
+// ── Socket.IO / EIO3 protocol dispatch ───────────────────────────────────────
+
+void OgsNet::dispatch_sio(const std::string& msg) {
+    if (msg.empty()) return;
+
+    char eio = msg[0];
+
+    // Engine.IO PING from server → respond with PONG
+    if (eio == '2') {
+        net_log("EIO ping → pong");
+        enqueue_raw("3");
+        return;
+    }
+
+    // Engine.IO OPEN — parse pingInterval; '40' + authenticate already queued from on_ws_open()
+    if (eio == '0') {
+        try {
+            auto info = json::parse(msg.substr(1));
+            ping_interval_ms_ = info.value("pingInterval", 25000);
+            } catch (...) {}
+        return;
+    }
+
+    // Engine.IO MESSAGE (Socket.IO packet)
+    if (eio != '4' || msg.size() < 2) return;
+
+    char sio = msg[1];
+
+    // Log SIO type for anything we don't explicitly handle (helps catch server errors)
+    if (sio != '0' && sio != '2' && sio != '4') {
+        net_log(("SIO type=" + std::string(1, sio) + " msg=" + msg.substr(0, 120)).c_str());
+    }
+
+    // Socket.IO CONNECT acknowledged (SIOv4: payload contains {"sid":"..."})
+    // Receiving this means auth was accepted.
+    if (sio == '0') {
+        sio_connected_ = true;
+        if (!authenticated_) {
+            authenticated_ = true;
+            // Send OGS-level authenticate event (required even with EIO=4 JWT auth
+            // to fully register the session — without it the server closes after ~3 min)
+            if (!chat_auth_.empty()) {
+                json auth = {
+                    {"auth",      chat_auth_},
+                    {"player_id", my_player_id},
+                    {"username",  my_username},
+                    {"jwt",       jwt_}
+                };
+                net_log(("sending authenticate, chat_auth len=" + std::to_string(chat_auth_.size())).c_str());
+                enqueue_event("authenticate", auth.dump());
+                enqueue_event("automatch/list", "{}");
+            } else {
+                net_log("WARNING: no chat_auth, skipping authenticate event");
+            }
+            NetMsg m;
+            m.type = NetMsgType::AUTH_OK;
+            push_msg(std::move(m));
+        }
+        return;
+    }
+
+    // Socket.IO NAMESPACE ERROR (SIOv4: auth rejected → "44{"message":"..."}")
+    if (sio == '4') {
+        net_log(("SIO namespace error (auth rejected?): " + msg).c_str());
+        return;
+    }
+
+    // Socket.IO EVENT
+    if (sio == '2') {
+        // Remainder is a JSON array: ["event_name", payload]
+        std::string body = msg.substr(2);
+        try {
+            auto arr = json::parse(body);
+            if (!arr.is_array() || arr.size() < 1) return;
+            std::string name = arr[0].get<std::string>();
+            std::string payload = (arr.size() > 1) ? arr[1].dump() : "{}";
+            // Log more for automatch events so we can see the full payload format
+            size_t preview = (name.find("automatch") != std::string::npos) ? 2000
+                           : (name.find("clock")     != std::string::npos) ? 600
+                           : 80;
+            net_log(("event: " + name + " " + payload.substr(0, preview)).c_str());
+            on_event(name, payload);
+        } catch (const std::exception& e) {
+            net_log(("event parse error: " + std::string(e.what()) +
+                     "  msg=" + body.substr(0, 80)).c_str());
+        }
+        return;
+    }
+}
+
+// ── OGS event handlers ────────────────────────────────────────────────────────
+
+struct ClockInfo { int secs = -1; int periods = -1; int period_secs = -1; };
+
+static ClockInfo extract_clock(const json& time_obj) {
+    if (time_obj.is_null()) return {};
+    ClockInfo c;
+    // In byo-yomi OGS sends thinking_time = the full period duration (e.g. 30), not the
+    // remaining time. period_time_left is the actual seconds left in the current period.
+    // Prefer it so the countdown reflects reality rather than always starting from 30.
+    if (time_obj.contains("period_time_left") && !time_obj["period_time_left"].is_null())
+        c.secs = (int)time_obj["period_time_left"].get<double>();
+    else if (time_obj.contains("thinking_time"))
+        c.secs = (int)time_obj["thinking_time"].get<double>();
+    else if (time_obj.contains("time_left"))
+        c.secs = (int)time_obj["time_left"].get<double>();
+    if (time_obj.contains("periods"))
+        c.periods = time_obj["periods"].get<int>();
+    if (time_obj.contains("period_time"))
+        c.period_secs = (int)time_obj["period_time"].get<double>();
+    return c;
+
+// keep old name as wrapper so gamedata clock path still compiles
+}
+static int extract_clock_secs(const json& time_obj) { return extract_clock(time_obj).secs;
+}
+
+void OgsNet::on_event(const std::string& name, const std::string& payload_json) {
+    // ---------- authenticate response ----------
+    if (name == "authenticate") {
+        // Server echoes back player info confirming auth
+        try {
+            auto d = json::parse(payload_json);
+            // Some OGS versions send {"id":...} here; others send nothing useful.
+            // We already have my_player_id from the REST config, so just confirm.
+            (void)d;
+        } catch (...) {}
+        authenticated_ = true;
+        NetMsg m;
+        m.type = NetMsgType::AUTH_OK;
+        push_msg(std::move(m));
+        return;
+    }
+
+    // ---------- active_game: track stone removal acceptance ----------
+    if (name == "active_game" && in_stone_removal_) {
+        try {
+            auto d = json::parse(payload_json);
+            if (d.contains("black") && d.contains("white")) {
+                bool black_acc   = d["black"].value("accepted", false);
+                bool white_acc   = d["white"].value("accepted", false);
+                bool my_is_black = (d["black"].value("id", 0) == my_player_id);
+                NetMsg m;
+                m.type       = NetMsgType::ACCEPT_STATUS;
+                m.my_accepted  = my_is_black ? (black_acc ? 1 : 0) : (white_acc ? 1 : 0);
+                m.opp_accepted = my_is_black ? (white_acc ? 1 : 0) : (black_acc ? 1 : 0);
+                push_msg(std::move(m));
+            }
+        } catch (...) {}
+        return;
+    }
+
+    // ---------- automatch start ----------
+    if (name == "automatch/start") {
+        try {
+            auto d = json::parse(payload_json);
+            int gid = d.at("game_id").get<int>();
+            active_game_id_ = gid;
+            match_uuid_.clear();
+            removed_stones_.clear();
+            // Connect to the game immediately
+            json conn = {
+                {"game_id",   gid},
+                {"player_id", my_player_id},
+                {"chat",      false}
+            };
+            enqueue_event("game/connect", conn.dump());
+
+            NetMsg m;
+            m.type    = NetMsgType::MATCH_FOUND;
+            m.game_id = gid;
+            push_msg(std::move(m));
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[ogs_net] automatch/start parse: %s\n", e.what());
+        }
+        return;
+    }
+
+    // ---------- gamedata ----------
+    // Event name is "game/<id>/gamedata"
+    if (name.size() > 9 && name.substr(name.size() - 9) == "/gamedata") {
+        try {
+            auto d = json::parse(payload_json);
+            int gid = d.value("game_id", active_game_id_);
+
+            NetMsg m;
+            m.type    = NetMsgType::GAME_CONNECTED;
+            m.game_id = gid;
+
+            // Determine my colour
+            auto& players = d.at("players");
+            int black_id = players.at("black").at("id").get<int>();
+            int white_id = players.at("white").at("id").get<int>();
+            m.my_color      = (my_player_id == black_id) ? 1 : 0;
+            m.my_player_id  = my_player_id;
+            m.opp_player_id = (m.my_color == 1) ? white_id : black_id;
+
+            m.black_name = players.at("black").value("username", "Black");
+            m.white_name = players.at("white").value("username", "White");
+            // OGS sends rank as a number (1=29k, 30=1k, 31=1d ...) or sometimes a string
+            auto rank_str = [](const json& p) -> std::string {
+                if (!p.contains("rank")) return "?";
+                const auto& r = p["rank"];
+                if (r.is_string()) return r.get<std::string>();
+                if (r.is_number()) {
+                    int rn = (int)r.get<double>();
+                    if (rn <= 0) return "?";
+                    if (rn < 31) return std::to_string(31 - rn) + "k";
+                    return std::to_string(rn - 30) + "d";
+                }
+                return "?";
+            };
+            m.black_rank = rank_str(players.at("black"));
+            m.white_rank = rank_str(players.at("white"));
+
+            // Board size — OGS sends "width"/"height"; fall back to legacy "boardsize"
+            if (d.contains("width") && d["width"].is_number_integer())
+                m.board_size = d["width"].get<int>();
+            else if (d.contains("boardsize") && d["boardsize"].is_number_integer())
+                m.board_size = d["boardsize"].get<int>();
+            else
+                m.board_size = 19;
+            net_log(("gamedata boardsize=" + std::to_string(m.board_size)).c_str());
+
+            // Handicap handling
+            m.handicap      = d.value("handicap", 0);
+            m.free_handicap = d.value("free_handicap_placement", false);
+            // With pre-placed handicap stones white moves first; otherwise black does
+            m.initial_player = (m.handicap > 0 && !m.free_handicap) ? 0 : 1;
+
+            // Parse pre-placed stones from initial_state (non-free handicap)
+            if (!m.free_handicap && m.handicap > 0 && d.contains("initial_state")) {
+                const auto& st = d["initial_state"];
+                auto decode_pos = [&](const char* key) {
+                    if (!st.contains(key) || !st[key].is_string()) return;
+                    std::string s = st[key].get<std::string>();
+                    for (size_t i = 0; i + 1 < s.size(); i += 2) {
+                        int col = s[i] - 'a';
+                        int row = s[i+1] - 'a';
+                        m.initial_handicap_stones.push_back({col, row});
+                    }
+                };
+                decode_pos("black");  // white handicap stones are rare but handle both
+            }
+
+            // Existing moves: array of [col, row] or integer-encoded moves
+            if (d.contains("moves") && d["moves"].is_array()) {
+                int boardsize = m.board_size;
+                for (auto& mv : d["moves"]) {
+                    if (mv.is_array() && mv.size() >= 2) {
+                        int col = mv[0].get<int>();
+                        int row = mv[1].get<int>();
+                        m.initial_moves.push_back({col, row});
+                    } else if (mv.is_number_integer()) {
+                        int enc = mv.get<int>();
+                        int col = enc % boardsize;
+                        int row = enc / boardsize;
+                        m.initial_moves.push_back({col, row});
+                    }
+                }
+            }
+
+            // Clocks
+            if (d.contains("clock") && d["clock"].is_object()) {
+                auto& clk = d["clock"];
+                if (clk.contains("black_time"))
+                    m.black_secs = extract_clock_secs(clk["black_time"]);
+                if (clk.contains("white_time"))
+                    m.white_secs = extract_clock_secs(clk["white_time"]);
+            }
+
+            std::string phase = d.value("phase", "");
+            net_log(("gamedata phase=" + (phase.empty() ? "(none)" : phase)).c_str());
+
+            // Build a human-readable result string from outcome + winner
+            if (d.contains("outcome") && !d["outcome"].get<std::string>().empty()) {
+                std::string outcome = d["outcome"].get<std::string>();
+                int winner_id = d.value("winner", 0);
+                bool i_won = (winner_id == my_player_id);
+                // outcome is e.g. "Resignation", "5.5", "Timeout", etc.
+                game_result_ = (i_won ? "YOU WON by " : "YOU LOST by ") + outcome;
+                net_log(("gamedata result=" + game_result_).c_str());
+            }
+
+            push_msg(std::move(m));
+
+            // If the game is already finished (e.g. we reconnected after it ended)
+            if (phase == "finished") {
+                net_log("gamedata: phase=finished → firing GAME_OVER");
+                NetMsg gover;
+                gover.type    = NetMsgType::GAME_OVER;
+                gover.game_id = gid;
+                gover.text    = game_result_;
+                push_msg(std::move(gover));
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[ogs_net] gamedata parse: %s\n", e.what());
+        }
+        return;
+    }
+
+    // ---------- live move ----------
+    // Event name: "game/<id>/move"
+    if (name.size() > 5 && name.substr(name.size() - 5) == "/move") {
+        try {
+            auto d = json::parse(payload_json);
+            int gid = active_game_id_;
+            // Try to extract game_id from event name "game/<id>/move"
+            auto slash = name.find('/');
+            if (slash != std::string::npos) {
+                auto slash2 = name.find('/', slash + 1);
+                if (slash2 != std::string::npos)
+                    gid = std::stoi(name.substr(slash + 1, slash2 - slash - 1));
+            }
+
+            NetMsg m;
+            m.type        = NetMsgType::OPPONENT_MOVE;
+            m.game_id     = gid;
+            m.move_number = d.value("move_number", 0);
+
+            // Move can be [col,row] array or integer encoding
+            int boardsize = 19;
+            if (d.contains("move")) {
+                auto& mv = d["move"];
+                if (mv.is_array() && mv.size() >= 2) {
+                    m.col = mv[0].is_null() ? -1 : mv[0].get<int>();
+                    m.row = mv[1].is_null() ? -1 : mv[1].get<int>();
+                } else if (mv.is_number_integer()) {
+                    int enc = mv.get<int>();
+                    if (enc >= boardsize * boardsize) {
+                        m.col = m.row = -1;  // pass
+                    } else {
+                        m.col = enc % boardsize;
+                        m.row = enc / boardsize;
+                    }
+                }
+            }
+
+            // Clocks bundled with the move
+            if (d.contains("black_time"))
+                m.black_secs = extract_clock_secs(d["black_time"]);
+            if (d.contains("white_time"))
+                m.white_secs = extract_clock_secs(d["white_time"]);
+
+            push_msg(std::move(m));
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[ogs_net] move parse: %s\n", e.what());
+        }
+        return;
+    }
+
+    // ---------- clock update ----------
+    if (name.size() > 6 && name.substr(name.size() - 6) == "/clock") {
+        try {
+            auto d = json::parse(payload_json);
+            NetMsg m;
+            m.type    = NetMsgType::CLOCK_UPDATE;
+            m.game_id = active_game_id_;
+            if (d.contains("black_time")) {
+                auto c = extract_clock(d["black_time"]);
+                m.black_secs = c.secs; m.black_periods = c.periods; m.black_period_secs = c.period_secs;
+            }
+            if (d.contains("white_time")) {
+                auto c = extract_clock(d["white_time"]);
+                m.white_secs = c.secs; m.white_periods = c.periods; m.white_period_secs = c.period_secs;
+            }
+            push_msg(std::move(m));
+        } catch (...) {}
+        return;
+    }
+
+    // ---------- stone removal ----------
+    // Event name: "game/<id>/removed_stones"
+    if (name.size() > 15 && name.substr(name.size() - 15) == "/removed_stones") {
+        net_log(("removed_stones payload: " + payload_json.substr(0, 300)).c_str());
+        try {
+            auto d = json::parse(payload_json);
+            // Store the removed-stone positions so we can echo them in the accept command.
+            if (d.contains("all_removed") && d["all_removed"].is_string())
+                removed_stones_ = d["all_removed"].get<std::string>();
+            else
+                removed_stones_ = "";
+        } catch (...) {
+            removed_stones_ = "";
+        }
+        net_log(("removed_stones stored: '" + removed_stones_ + "'").c_str());
+        NetMsg m;
+        m.type           = NetMsgType::STONE_REMOVAL;
+        m.game_id        = active_game_id_;
+        m.text           = removed_stones_;
+        // Pass ownership array so the UI can shade territory
+        try {
+            auto d2 = json::parse(payload_json);
+            if (d2.contains("ownership") && d2["ownership"].is_array())
+                m.ownership_json = d2["ownership"].dump();
+        } catch (...) {}
+        push_msg(std::move(m));
+        return;
+    }
+
+    // ---------- phase change ----------
+    if (name.size() > 6 && name.substr(name.size() - 6) == "/phase") {
+        try {
+            auto d = json::parse(payload_json);
+            std::string phase = d.is_string() ? d.get<std::string>() : d.value("phase", "");
+            net_log(("/phase event: " + (phase.empty() ? "(empty)" : phase)).c_str());
+            if (phase == "finished") {
+                in_stone_removal_ = false;
+                net_log("/phase=finished → firing GAME_OVER");
+                NetMsg m;
+                m.type    = NetMsgType::GAME_OVER;
+                m.game_id = active_game_id_;
+                m.text    = game_result_;
+                push_msg(std::move(m));
+            } else if (phase == "stone removal") {
+                in_stone_removal_ = true;
+                // Fire STONE_REMOVAL immediately — /removed_stones may not arrive (e.g. no dead stones)
+                NetMsg m;
+                m.type    = NetMsgType::STONE_REMOVAL;
+                m.game_id = active_game_id_;
+                m.text    = removed_stones_;  // empty until /removed_stones arrives
+                push_msg(std::move(m));
+            } else if (phase == "play") {
+                in_stone_removal_ = false;
+                // Opponent (or us) cancelled stone removal — return to playing
+                NetMsg m;
+                m.type    = NetMsgType::RESUME_PLAY;
+                m.game_id = active_game_id_;
+                push_msg(std::move(m));
+            }
+            // /removed_stones event will re-fire STONE_REMOVAL with actual dead stone data.
+        } catch (...) {}
+        return;
+    }
+
+    // ---------- undo requested ----------
+    if (name.size() > 16 && name.substr(name.size() - 16) == "/undo_requested") {
+        try {
+            auto d = json::parse(payload_json);
+            int move_num     = d.value("move_number",  0);
+            int requested_by = d.value("requested_by", 0);
+            if (requested_by != my_player_id && move_num > 0) {
+                NetMsg m;
+                m.type             = NetMsgType::UNDO_REQUESTED;
+                m.game_id          = active_game_id_;
+                m.undo_move_number = move_num;
+                push_msg(std::move(m));
+            }
+        } catch (...) {}
+        return;
+    }
+}
+
+// ── libwebsockets callback ────────────────────────────────────────────────────
+
+int OgsNet::lws_cb(struct lws* wsi, enum lws_callback_reasons reason, void* /*user*/, void* in, size_t len) {
+    auto* self = reinterpret_cast<OgsNet*>(lws_context_user(lws_get_context(wsi)));
+    if (!self) return 0;
+
+    switch (reason) {
+    case LWS_CALLBACK_CLIENT_ESTABLISHED:
+        self->wsi_ = wsi;
+        self->on_ws_open();
+        break;
+
+    case LWS_CALLBACK_CLIENT_RECEIVE:
+        self->on_ws_data(reinterpret_cast<const char*>(in), len,
+                         lws_is_final_fragment(wsi) != 0);
+        break;
+
+    case LWS_CALLBACK_CLIENT_WRITEABLE:
+        self->do_write();
+        break;
+
+    case LWS_CALLBACK_CLIENT_CONNECTION_ERROR: {
+        const char* err = in ? reinterpret_cast<const char*>(in) : "(null)";
+        net_log(("WS connection error: " + std::string(err, err + (in ? strlen(err) : 0))).c_str());
+        self->on_ws_close();
+        break;
+    }
+
+    case LWS_CALLBACK_CLIENT_CLOSED:
+        if (in && len >= 2) {
+            auto* b = reinterpret_cast<const uint8_t*>(in);
+            uint16_t code = (uint16_t)((b[0] << 8) | b[1]);
+            std::string reason(len > 2 ? reinterpret_cast<const char*>(b + 2) : "", len > 2 ? len - 2 : 0);
+            net_log(("WS close code=" + std::to_string(code) + " reason=" + reason).c_str());
+        }
+        self->on_ws_close();
+        break;
+
+    default:
+        break;
+    }
+    return 0;
+}
+
+// ── Network thread main loop ──────────────────────────────────────────────────
+
+void OgsNet::net_loop() {
+    // Wrap entire loop so an unhandled exception causes a clean AUTH_FAIL
+    // instead of std::terminate() crashing the process.
+    try {
+    // libcurl requires global init before any easy handle is used.
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    if (!do_auth()) {
+        NetMsg m;
+        m.type = NetMsgType::AUTH_FAIL;
+        m.text = "Login failed — check username/password in config.ini";
+        push_msg(std::move(m));
+        curl_global_cleanup();
+        return;
+    }
+
+    // --- Phase 2: Open WebSocket ---
+    // Redirect LWS internal logs into our timestamped log file
+    lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE, lws_log_to_file);
+
+    static const struct lws_protocols protocols[] = {
+        {
+            "ogs-eio3",
+            &OgsNet::lws_cb,
+            0,       // per-session data size (we use context user data)
+            65536,   // rx buffer
+            0, nullptr, 0
+        },
+        LWS_PROTOCOL_LIST_TERM
+    };
+
+    struct lws_context_creation_info info;
+    memset(&info, 0, sizeof(info));
+    info.port      = CONTEXT_PORT_NO_LISTEN;
+    info.protocols = protocols;
+    info.options   = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+    info.user      = this;
+
+    ctx_ = lws_create_context(&info);
+    if (!ctx_) {
+        net_log("lws_create_context failed");
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = "Failed to create WebSocket context";
+        push_msg(std::move(m));
+        curl_global_cleanup();
+        return;
+    }
+    struct lws_client_connect_info conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.context  = ctx_;
+    conn.address  = "online-go.com";
+    conn.port     = 443;
+    conn.path     = "/socket.io/?EIO=4&transport=websocket";
+    conn.host     = "online-go.com";
+    conn.origin   = "https://online-go.com";
+    conn.protocol = nullptr;  // no Sec-WebSocket-Protocol header; Socket.IO doesn't use one
+    conn.ssl_connection = LCCSCF_USE_SSL;
+
+    wsi_ = lws_client_connect_via_info(&conn);
+    if (!wsi_) {
+        net_log("lws_client_connect_via_info failed");
+        lws_context_destroy(ctx_);
+        ctx_ = nullptr;
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = "Failed to initiate WebSocket connection";
+        push_msg(std::move(m));
+        return;
+    }
+
+    // --- Phase 3: Service loop ---
+    Uint32 last_ping_ms = 0;
+    while (!stop_flag_) {
+        int rc = lws_service(ctx_, 50);
+        if (rc < 0) break;
+        if (!wsi_) break;
+
+        // If main thread enqueued a message and called lws_cancel_service to
+        // wake us, request a writable callback now (safe: we're on the LWS thread).
+        {
+            std::lock_guard<std::mutex> lock(outbound_mu_);
+            if (!outbound_.empty())
+                lws_callback_on_writable(wsi_);
+        }
+
+        // Send net/ping every 10 seconds for OGS application-level keepalive.
+        if (sio_connected_) {
+            Uint32 now = SDL_GetTicks();
+            if (now - last_ping_ms >= 10000) {
+                last_ping_ms = now;
+                json ping = {{"client", (long long)now}, {"drift", 0}, {"latency", 0}};
+                enqueue_event("net/ping", ping.dump());
+            }
+        }
+    }
+    lws_context_destroy(ctx_);
+    ctx_ = nullptr;
+    wsi_ = nullptr;
+
+    curl_global_cleanup();
+
+    } catch (const std::exception& ex) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "net thread exception: %s", ex.what());
+        net_log(buf);
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = ex.what();
+        push_msg(std::move(m));
+    } catch (...) {
+        net_log("net thread unknown exception");
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = "Unknown error in network thread";
+        push_msg(std::move(m));
+    }
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+std::string OgsNet::make_uuid() {
+    // RFC 4122 v4 UUID using Windows BCryptGenRandom for full 32-bit entropy
+    std::random_device rd;
+    unsigned int r[4] = { rd(), rd(), rd(), rd() };
+    char buf[37];
+    snprintf(buf, sizeof(buf),
+             "%08x-%04x-4%03x-%04x-%08x%04x",
+             r[0],
+             (r[1] >> 16) & 0xFFFF,
+             r[1] & 0x0FFF,
+             ((r[2] >> 16) & 0x3FFF) | 0x8000,
+             r[3],
+             r[2] & 0xFFFF);
+    return buf;
+}
+
+std::string OgsNet::fmt_clock(int secs) {
+    if (secs < 0) return "--:--";
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d:%02d", secs / 60, secs % 60);
+    return buf;
+}
