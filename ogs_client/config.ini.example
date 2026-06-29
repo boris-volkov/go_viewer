@@ -1,0 +1,12 @@
+username=your-ogs-username
+password=your-ogs-password
+
+# Optional: paste a JWT token instead of (or in addition to) username/password.
+# Get it from browser devtools on online-go.com → Application → Local Storage → ogs_user_jwt
+# jwt=eyJ...
+
+# Optional: KataGo analysis engine. All three fields required to enable analysis.
+# katago_exe=C:\path\to\katago.exe
+# katago_model=C:\path\to\model.bin.gz
+# katago_config=C:\path\to\gtp_example.cfg
+# katago_model_9x9=C:\path\to\model_9x9.bin.gz
