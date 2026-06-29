@@ -40,7 +40,8 @@ bool Catalog::has_sgf_ext(const std::string& name) {
 // and handles both multi-line and single-line SGF formats.
 static bool sgf_player_names(const std::string& path,
                               std::string& black_out,
-                              std::string& white_out) {
+                              std::string& white_out,
+                              std::string& date_out) {
     FILE* fp = fopen(path.c_str(), "rb");
     if (!fp) return false;
     char buf[4096];
@@ -77,8 +78,10 @@ static bool sgf_player_names(const std::string& path,
 
     black_out.clear();
     white_out.clear();
+    date_out.clear();
     extract("PB[", "pb[", black_out);
     extract("PW[", "pw[", white_out);
+    extract("DT[", "dt[", date_out);
     return !black_out.empty() || !white_out.empty();
 }
 
@@ -247,6 +250,7 @@ bool Catalog::load_entries() {
             e.display_name = make_display_name(e.name, ge->black, ge->white);
             e.player_black = ge->black;
             e.player_white = ge->white;
+            e.date         = ge->date;
             e.name_loaded  = true;
         } else {
             // Fall back to lazy parsing via ensure_names_loaded()
@@ -350,6 +354,7 @@ void Catalog::load_player_games(const std::string& player) {
         e.display_name = make_display_name(e.name, ge->black, ge->white);
         e.player_black = ge->black;
         e.player_white = ge->white;
+        e.date         = ge->date;
         e.name_loaded  = true;
         e.type         = 0;
         e.full_path    = join_path(base_dir, ge->rel_path);
@@ -434,6 +439,7 @@ void Catalog::load_year_games(const std::string& year) {
         e.display_name = make_display_name(e.name, ge->black, ge->white);
         e.player_black = ge->black;
         e.player_white = ge->white;
+        e.date         = ge->date;
         e.name_loaded  = true;
         e.type         = 0;
         e.full_path    = join_path(base_dir, ge->rel_path);
@@ -476,6 +482,7 @@ void Catalog::apply_search() {
         e.display_name = make_display_name(e.name, ge->black, ge->white);
         e.player_black = ge->black;
         e.player_white = ge->white;
+        e.date         = ge->date;
         e.name_loaded  = true;
         e.type         = 0;
         e.full_path    = join_path(base_dir, ge->rel_path);
@@ -572,11 +579,12 @@ void Catalog::ensure_names_loaded(int from, int count) {
     for (int i = std::max(0, from); i < end; i++) {
         CatalogEntry& e = entries[i];
         if (e.name_loaded || e.type != 0) continue;
-        std::string bname, wname;
-        sgf_player_names(join_path(dir_path, e.name), bname, wname);
+        std::string bname, wname, dname;
+        sgf_player_names(join_path(dir_path, e.name), bname, wname, dname);
         e.display_name = make_display_name(e.name, bname, wname);
         e.player_black = bname;
         e.player_white = wname;
+        e.date         = dname;
         e.name_loaded  = true;
     }
 }

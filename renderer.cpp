@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "palette.hpp"
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,8 @@
 const Renderer::Glyph Renderer::font_glyphs[] = {
     {' ', {0x00,0x00,0x00,0x00,0x00,0x00,0x00}},
     {'-', {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}},
+    {'+', {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}},
+    {'%', {0x18,0x18,0x08,0x04,0x02,0x03,0x03}},
     {'.', {0x00,0x00,0x00,0x00,0x00,0x00,0x04}},
     {',', {0x00,0x00,0x00,0x00,0x00,0x04,0x08}},
     {'\'',{0x04,0x04,0x00,0x00,0x00,0x00,0x00}},
@@ -181,6 +184,37 @@ void Renderer::fill_circle(int cx, int cy, int radius) {
     }
 }
 
+void Renderer::draw_circle(int cx, int cy, int radius) {
+    if (radius < 0) return;
+    int x = radius, y = 0, err = 0;
+    while (x >= y) {
+        SDL_RenderDrawPoint(sdl, cx + x, cy + y);
+        SDL_RenderDrawPoint(sdl, cx + y, cy + x);
+        SDL_RenderDrawPoint(sdl, cx - y, cy + x);
+        SDL_RenderDrawPoint(sdl, cx - x, cy + y);
+        SDL_RenderDrawPoint(sdl, cx - x, cy - y);
+        SDL_RenderDrawPoint(sdl, cx - y, cy - x);
+        SDL_RenderDrawPoint(sdl, cx + y, cy - x);
+        SDL_RenderDrawPoint(sdl, cx + x, cy - y);
+        if (err <= 0) { y++; err += 2 * y + 1; }
+        if (err >  0) { x--; err -= 2 * x + 1; }
+    }
+}
+
+void Renderer::fill_ring(int cx, int cy, int r_outer, int r_inner) {
+    for (int dy = -r_outer; dy <= r_outer; dy++) {
+        int dx_o = (int)sqrtf(float(r_outer * r_outer - dy * dy));
+        int abs_dy = (dy < 0) ? -dy : dy;
+        if (abs_dy < r_inner) {
+            int dx_i = (int)sqrtf(float(r_inner * r_inner - dy * dy));
+            SDL_RenderDrawLine(sdl, cx - dx_o, cy + dy, cx - dx_i, cy + dy);
+            SDL_RenderDrawLine(sdl, cx + dx_i, cy + dy, cx + dx_o, cy + dy);
+        } else {
+            SDL_RenderDrawLine(sdl, cx - dx_o, cy + dy, cx + dx_o, cy + dy);
+        }
+    }
+}
+
 // Scanline fill of a rotated ellipse.
 // ra = semi-axis along (ux,uy),  rb = semi-axis along the perpendicular (-uy,ux).
 // Iterates over integer steps in the perpendicular direction.
@@ -241,18 +275,37 @@ void Renderer::shade_stone(int cx, int cy, int radius, int is_black, Uint8 alpha
     SDL_SetRenderDrawColor(sdl, c.base.r, c.base.g, c.base.b, alpha);
     fill_circle(cx, cy, radius);
 
+    // Highlight layers clipped to the stone boundary — h1's offset+radius exceeds the
+    // stone radius by ~7%, causing a lit halo outside the stone without this clipping.
+    auto clip_fill = [&](int hx, int hy, int hr) {
+        int r2 = radius * radius;
+        for (int dy = -hr; dy <= hr; dy++) {
+            int py = hy + dy;
+            int hdx = (int)sqrtf((float)(hr * hr - dy * dy));
+            int xl = hx - hdx, xr = hx + hdx;
+            // Intersect with stone circle row
+            int sdy = py - cy;
+            int sclip2 = r2 - sdy * sdy;
+            if (sclip2 < 0) continue;
+            int sdx = (int)sqrtf((float)sclip2);
+            xl = std::max(xl, cx - sdx);
+            xr = std::min(xr, cx + sdx);
+            if (xl <= xr) SDL_RenderDrawLine(sdl, xl, py, xr, py);
+        }
+    };
+
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
     if (c.alpha1 > 0.f) {
         SDL_SetRenderDrawColor(sdl, c.lit.r, c.lit.g, c.lit.b, (Uint8)(alpha * c.alpha1));
-        fill_circle(h1x, h1y, radius * 5 / 6);
+        clip_fill(h1x, h1y, radius * 5 / 6);
     }
     if (c.alpha2 > 0.f) {
         SDL_SetRenderDrawColor(sdl, c.lit.r, c.lit.g, c.lit.b, (Uint8)(alpha * c.alpha2));
-        fill_circle(h2x, h2y, radius * 2 / 3);
+        clip_fill(h2x, h2y, radius * 2 / 3);
     }
     if (c.alpha3 > 0.f) {
         SDL_SetRenderDrawColor(sdl, c.lit.r, c.lit.g, c.lit.b, (Uint8)(alpha * c.alpha3));
-        fill_circle(h3x, h3y, radius / 2);
+        clip_fill(h3x, h3y, radius / 2);
     }
 }
 
@@ -577,14 +630,43 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
     int wp = ds.analysis ? ds.analysis->white_prisoners : ds.game.white_prisoners;
 
     char bpstr[32], wpstr[32];
-    snprintf(bpstr, sizeof(bpstr), "Prisoners: %d", bp);
-    snprintf(wpstr, sizeof(wpstr), "Prisoners: %d", wp);
+    char b_pris[32], w_pris[32];
+    if (ds.live_mode) {
+        // Show clock on line 2; for byo-yomi show period info when main time is gone
+        auto fmt_clock = [](int secs, int periods, int period_secs, char* buf, size_t n) {
+            if (secs < 0) { snprintf(buf, n, "--:--"); return; }
+            if (secs > 0 || periods <= 0) {
+                // Main time remaining (or no period info)
+                snprintf(buf, n, "%d:%02d", secs / 60, secs % 60);
+                if (periods > 0)  // in byo-yomi but period countdown hasn't hit zero
+                    snprintf(buf + strlen(buf), n - strlen(buf), " x%d", periods);
+            } else {
+                // Main time exhausted, in byo-yomi
+                if (period_secs > 0)
+                    snprintf(buf, n, "%ds x%d", period_secs, periods);
+                else
+                    snprintf(buf, n, "BYO x%d", periods);
+            }
+        };
+        fmt_clock(ds.live_black_secs, ds.live_black_periods, ds.live_black_period_secs, bpstr, sizeof(bpstr));
+        fmt_clock(ds.live_white_secs, ds.live_white_periods, ds.live_white_period_secs, wpstr, sizeof(wpstr));
+        // Prisoners on their own line 3
+        snprintf(b_pris, sizeof(b_pris), "Prisoners: %d", bp);
+        snprintf(w_pris, sizeof(w_pris), "Prisoners: %d", wp);
+    } else {
+        snprintf(bpstr, sizeof(bpstr), "Prisoners: %d", bp);
+        snprintf(wpstr, sizeof(wpstr), "Prisoners: %d", wp);
+        b_pris[0] = '\0';
+        w_pris[0] = '\0';
+    }
 
     int scale = 3;
     int need_w = text_width_px(bn, scale);
     { int ww = text_width_px(wn, scale); if (ww > need_w) need_w = ww; }
     { int pw = text_width_px(bpstr, scale); if (pw > need_w) need_w = pw; }
     { int pw = text_width_px(wpstr, scale); if (pw > need_w) need_w = pw; }
+    if (b_pris[0]) { int pw = text_width_px(b_pris, scale); if (pw > need_w) need_w = pw; }
+    if (w_pris[0]) { int pw = text_width_px(w_pris, scale); if (pw > need_w) need_w = pw; }
 
     int avail = right_x1 - right_x0 - board_radius * 2 - gap;
     if (need_w > avail) {
@@ -593,12 +675,15 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
         { int ww = text_width_px(wn, scale); if (ww > need_w) need_w = ww; }
         { int pw = text_width_px(bpstr, scale); if (pw > need_w) need_w = pw; }
         { int pw = text_width_px(wpstr, scale); if (pw > need_w) need_w = pw; }
+        if (b_pris[0]) { int pw = text_width_px(b_pris, scale); if (pw > need_w) need_w = pw; }
+        if (w_pris[0]) { int pw = text_width_px(w_pris, scale); if (pw > need_w) need_w = pw; }
         if (need_w > avail) return;
     }
 
     int th       = 7 * scale;
     int line_gap = scale + 2;
-    int block_h  = 2 * th + line_gap;
+    int lines    = ds.live_mode ? 3 : 2;
+    int block_h  = lines * th + (lines - 1) * line_gap;
 
     // Cap radius to fit within the text block height; matches board size on smaller screens
     int radius    = std::min(board_radius, block_h / 2);
@@ -606,8 +691,19 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
     int tx        = right_x0 + stone_dim + gap;
     int scx       = right_x0 + radius;
 
-    SDL_Color name_color     = Palette::TEXT_PRIMARY;
+    // In live mode, highlight whichever player's turn it is.
+    SDL_Color black_name_color = (ds.live_mode && ds.game.turn_is_black == 1)
+                                 ? Palette::ACCENT : Palette::TEXT_PRIMARY;
+    SDL_Color white_name_color = (ds.live_mode && ds.game.turn_is_black == 0)
+                                 ? Palette::ACCENT : Palette::TEXT_PRIMARY;
     SDL_Color prisoner_color = Palette::TEXT_DIM;
+    auto byo_color = [&](int secs, int periods) -> SDL_Color {
+        return (ds.live_mode && secs <= 0 && periods > 0)
+               ? SDL_Color{220, 60, 60, 255}
+               : Palette::TEXT_DIM;
+    };
+    SDL_Color b_clock_color = byo_color(ds.live_black_secs, ds.live_black_periods);
+    SDL_Color w_clock_color = byo_color(ds.live_white_secs, ds.live_white_periods);
 
     // Helper: draw a filled circle for the player stone
     auto draw_stone = [&](int cx, int cy, bool is_black) {
@@ -623,19 +719,23 @@ void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) 
                     SDL_RenderDrawPoint(sdl, cx + dx, cy + dy);
     };
 
-    // Black at the top — stone centered over the two-line text block
+    // Black at the top — stone centered over the text block
     // Anchor to background top edge (one view.margin above the grid)
     int top_y = view.offset_y - view.margin + margin;
     draw_stone(scx, top_y + block_h / 2, true);
-    draw_text(tx, top_y,              scale, bn,    name_color);
-    draw_text(tx, top_y + th + line_gap, scale, bpstr, prisoner_color);
+    draw_text(tx, top_y,                      scale, bn,    black_name_color);
+    draw_text(tx, top_y + th + line_gap,      scale, bpstr, b_clock_color);
+    if (b_pris[0])
+        draw_text(tx, top_y + 2*(th+line_gap), scale, b_pris, prisoner_color);
 
     // White at the bottom — anchor to background bottom edge
-    int bot_y = view.offset_y + view.board_px + view.margin - margin - 2 * th - line_gap;
+    int bot_y = view.offset_y + view.board_px + view.margin - margin - block_h;
     if (bot_y < top_y) bot_y = top_y;
     draw_stone(scx, bot_y + block_h / 2, false);
-    draw_text(tx, bot_y,              scale, wn,    name_color);
-    draw_text(tx, bot_y + th + line_gap, scale, wpstr, prisoner_color);
+    draw_text(tx, bot_y,                      scale, wn,    white_name_color);
+    draw_text(tx, bot_y + th + line_gap,      scale, wpstr, w_clock_color);
+    if (w_pris[0])
+        draw_text(tx, bot_y + 2*(th+line_gap), scale, w_pris, prisoner_color);
 }
 
 void Renderer::render_game_date(const BoardView& view, const std::string& date) {
@@ -754,22 +854,22 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help) {
 }
 
 void Renderer::render_mini_board(int x, int y, int size,
-                                  const char board[][BOARD_SIZE]) {
+                                  const char board[][BOARD_SIZE], int board_size) {
     // Background
     SDL_Rect bg = {x, y, size, size};
     SDL_SetRenderDrawColor(sdl, Palette::BOARD.r, Palette::BOARD.g, Palette::BOARD.b, 255);
     SDL_RenderFillRect(sdl, &bg);
 
-    int sq  = size / BOARD_SIZE;                  // pixels per intersection
+    int sq  = size / board_size;                    // pixels per intersection
     if (sq < 1) sq = 1;
-    int margin = (size - BOARD_SIZE * sq) / 2;    // center the grid in the box
-    int px0 = x + margin + sq / 2;               // top-left intersection (x)
-    int py0 = y + margin + sq / 2;               // top-left intersection (y)
-    int span = (BOARD_SIZE - 1) * sq;
+    int margin = (size - board_size * sq) / 2;      // center the grid in the box
+    int px0 = x + margin + sq / 2;                 // top-left intersection (x)
+    int py0 = y + margin + sq / 2;                 // top-left intersection (y)
+    int span = (board_size - 1) * sq;
 
     // Grid lines
     SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
-    for (int i = 0; i < BOARD_SIZE; i++) {
+    for (int i = 0; i < board_size; i++) {
         SDL_RenderDrawLine(sdl, px0 + i * sq, py0, px0 + i * sq, py0 + span);
         SDL_RenderDrawLine(sdl, px0, py0 + i * sq, px0 + span, py0 + i * sq);
     }
@@ -781,8 +881,8 @@ void Renderer::render_mini_board(int x, int y, int size,
     // Stones
     int r_stone = sq / 2;
     if (r_stone < 1) r_stone = 1;
-    for (int row = 0; row < BOARD_SIZE; row++) {
-        for (int col = 0; col < BOARD_SIZE; col++) {
+    for (int row = 0; row < board_size; row++) {
+        for (int col = 0; col < board_size; col++) {
             int cell = board[row][col];
             if (cell == 0) continue;
             int cx = px0 + col * sq;
@@ -793,6 +893,74 @@ void Renderer::render_mini_board(int x, int y, int size,
             fill_circle(cx, cy, r_stone);
         }
     }
+}
+
+void Renderer::draw_match_menu(const MatchMenu& menu) {
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    // Full-screen panel (same background as catalog)
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
+    SDL_Rect bg = {0, 0, sw, sh};
+    SDL_RenderFillRect(sdl, &bg);
+
+    int scale    = (sw >= 900) ? 3 : 2;
+    int th       = 7 * scale;
+    int line_gap = (scale >= 3) ? 8 : 5;
+    int line_h   = th + line_gap;
+    int hpad     = 80;
+    int col_w    = (sw - hpad * 2) / 2;  // each column gets half the interior width
+
+    // Title
+    int ty = hpad / 2;
+    draw_text(hpad, ty, scale, "MATCH SETTINGS", Palette::ACCENT);
+    ty += th + line_gap * 3;
+
+    // Hint line
+    draw_text(hpad, ty, scale, "A=TOGGLE   DPAD=NAVIGATE   BACK=CLOSE   START=SEARCH", Palette::TEXT_DIM);
+    ty += th + line_gap * 4;
+
+    int col_ty[2] = {ty, ty};  // top of each column's item list
+
+    // Column headers
+    draw_text(hpad,          col_ty[0], scale, "BOARD SIZE",   Palette::ACCENT);
+    draw_text(hpad + col_w,  col_ty[1], scale, "TIME CONTROL", Palette::ACCENT);
+    col_ty[0] += line_h + line_gap;
+    col_ty[1] += line_h + line_gap;
+
+    static const char* size_labels[3]  = {"9x9", "13x13", "19x19"};
+    static const char* speed_labels[3] = {"BLITZ  (<3 min)", "LIVE   (3-15 min)", "RAPID  (15+ min)"};
+
+
+    auto draw_item = [&](int col, int row, const char* label, bool selected) {
+        int x    = hpad + col * col_w;
+        int y    = col_ty[col] + row * line_h;
+        bool focused = (menu.focus_col == col && menu.focus_row == row);
+
+        // Cursor arrow
+        SDL_Color arrow_c = focused ? Palette::ACCENT : Palette::TEXT_DIM;
+        draw_text(x, y, scale, focused ? ">" : " ", arrow_c);
+
+        // Checkbox
+        int cx = x + (scale >= 3 ? 14 : 10);
+        draw_text(cx, y, scale, selected ? "[X]" : "[ ]",
+                  selected ? Palette::ACCENT : Palette::TEXT_WHITE);
+
+        // Label
+        int lx = cx + text_width_px("[X]", scale) + scale * 3;
+        SDL_Color lc = focused ? Palette::ACCENT
+                     : selected ? Palette::TEXT_WHITE
+                     : Palette::TEXT_DIM;
+        draw_text(lx, y, scale, label, lc);
+    };
+
+    for (int i = 0; i < 3; i++)
+        draw_item(0, i, size_labels[i],  menu.size_sel[i]);
+    for (int i = 0; i < 3; i++)
+        draw_item(1, i, speed_labels[i], menu.speed_sel[i]);
+
+    SDL_RenderPresent(sdl);
 }
 
 void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds) {
@@ -864,17 +1032,19 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int col_gap  = scale * 6;   // pixel gap between columns
     int max_w       = text_width_px(title, scale);
     int max_black_w = 0;        // widest black-player name across all entries
+    int max_white_w = 0;        // widest white-player name across all entries
 
     for (int i = 0; i < total; i++) {
         const auto& e = cat.entries[i];
         int w;
         if (e.type == 0 && (!e.player_black.empty() || !e.player_white.empty())) {
-            // Three-column: black  vs  white
+            // Four-column: black  vs  white  date
             const char* bn = e.player_black.empty() ? "?" : e.player_black.c_str();
             const char* wn = e.player_white.empty() ? "?" : e.player_white.c_str();
             int bw = text_width_px(bn, scale);
             int ww = text_width_px(wn, scale);
             if (bw > max_black_w) max_black_w = bw;
+            if (ww > max_white_w) max_white_w = ww;
             w = bw + col_gap + vs_w + col_gap + ww;
         } else {
             if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.display_name.c_str());
@@ -885,6 +1055,8 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         }
         if (w > max_w) max_w = w;
     }
+    // Date column starts after the white name with extra gap
+    int date_col_x = tx + max_black_w + col_gap + vs_w + col_gap + max_white_w + col_gap * 3;
     int list_right = hpad + max_w;
 
     // --- Thumbnails ---
@@ -900,9 +1072,9 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
                      && ds.catalog_thumb_final != nullptr;
     if (has_thumb) {
         render_mini_board(thumb_x, thumb_y_top,
-                          thumb_size, ds.catalog_thumb_open);
+                          thumb_size, ds.catalog_thumb_open,  ds.catalog_thumb_board_size);
         render_mini_board(thumb_x, thumb_y_top + thumb_size + thumb_inner_gap,
-                          thumb_size, ds.catalog_thumb_final);
+                          thumb_size, ds.catalog_thumb_final, ds.catalog_thumb_board_size);
     }
 
     // --- Entry list ---
@@ -930,12 +1102,21 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
         }
 
         if (e.type == 0 && (!e.player_black.empty() || !e.player_white.empty())) {
-            // Three-column layout: [black ACCENT] [vs WHITE] [white ACCENT]
+            // Four-column layout: [black ACCENT] [vs WHITE] [white ACCENT] [date DIM]
             const char* bn = e.player_black.empty() ? "?" : e.player_black.c_str();
             const char* wn = e.player_white.empty() ? "?" : e.player_white.c_str();
-            draw_text(tx,                                    ty, scale, bn,   Palette::ACCENT);
-            draw_text(tx + max_black_w + col_gap,            ty, scale, "vs", Palette::TEXT_WHITE);
-            draw_text(tx + max_black_w + col_gap + vs_w + col_gap, ty, scale, wn, Palette::ACCENT);
+            draw_text(tx,                                         ty, scale, bn,   Palette::ACCENT);
+            draw_text(tx + max_black_w + col_gap,                 ty, scale, "vs", Palette::TEXT_WHITE);
+            draw_text(tx + max_black_w + col_gap + vs_w + col_gap, ty, scale, wn,  Palette::ACCENT);
+            if (!e.date.empty()) {
+                // Show first 10 chars (covers YYYY-MM-DD)
+                char dbuf[11];
+                int dlen = (int)e.date.size();
+                int show = dlen < 10 ? dlen : 10;
+                memcpy(dbuf, e.date.c_str(), show);
+                dbuf[show] = '\0';
+                draw_text(date_col_x, ty, scale, dbuf, Palette::TEXT_DIM);
+            }
         } else {
             if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.display_name.c_str());
             else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
@@ -1242,6 +1423,106 @@ void Renderer::render_territory_overlay(const BoardView& view, const DrawState& 
 }
 
 // ---------------------------------------------------------------------------
+// Analysis tree panel (post-game review, ogs_client only)
+
+void Renderer::render_analysis_tree(const BoardView& view, const DrawState& ds) {
+    if (!ds.live_analysis_tree || ds.live_analysis_tree_count == 0) return;
+
+    int avail_w = view.offset_x - view.margin;
+    if (avail_w < 60) return;
+
+    // Panel: 80% of left panel width, 60% of screen height, centered
+    int panel_w    = avail_w * 4 / 5;
+    int panel_h    = view.screen_h * 3 / 5;
+    int panel_left = (avail_w - panel_w) / 2;
+    int panel_top  = (view.screen_h - panel_h) / 2;
+
+    // Panel background — match board colour so black stones read clearly
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::BOARD.r, Palette::BOARD.g, Palette::BOARD.b, 255);
+    SDL_Rect panel_rect = {panel_left, panel_top, panel_w, panel_h};
+    SDL_RenderFillRect(sdl, &panel_rect);
+    SDL_SetRenderDrawColor(sdl, 55, 65, 80, 255);
+    SDL_RenderDrawRect(sdl, &panel_rect);
+
+    SDL_RenderSetClipRect(sdl, &panel_rect);
+
+    const int pad    = 10;
+    const int row_h  = 30;   // taller rows for bigger nodes
+    const int col_w  = 28;
+    const int r_node = 10;   // 2× the old radius
+
+    int inner_h    = panel_h - 2 * pad;
+    int visible_rows = inner_h / row_h;
+    int scroll     = std::max(0, ds.live_analysis_tree_cur_depth - visible_rows * 2 / 3);
+
+    // Column 0 x-centre
+    int x_origin = panel_left + pad + r_node;
+
+    auto node_x = [&](int col) { return x_origin + col * col_w; };
+    auto node_y = [&](int depth) {
+        return panel_top + pad + (depth - scroll) * row_h + row_h / 2;
+    };
+
+    int vis_top    = panel_top + pad - row_h;
+    int vis_bottom = panel_top + pad + visible_rows * row_h + row_h;
+
+    // Lines (bold, drawn before nodes so circles appear on top)
+    SDL_Color line_col = {55, 68, 88, 255};
+    for (int i = 0; i < ds.live_analysis_tree_count; i++) {
+        const auto& n = ds.live_analysis_tree[i];
+        if (n.parent_depth < 0) continue;
+
+        int ny = node_y(n.depth);
+        int py = node_y(n.parent_depth);
+        int nx = node_x(n.col);
+        int px = node_x(n.parent_col);
+
+        if (ny < vis_top && py < vis_top) continue;
+        if (ny > vis_bottom && py > vis_bottom) continue;
+
+        if (n.col == n.parent_col) {
+            draw_thick_line(nx, py, nx, ny, 2, line_col);
+        } else {
+            int bend_y = py + row_h / 2;
+            draw_thick_line(px, py, px, bend_y, 2, line_col);
+            draw_thick_line(px, bend_y, nx, bend_y, 2, line_col);
+            draw_thick_line(nx, bend_y, nx, ny, 2, line_col);
+        }
+    }
+
+    // Node circles
+    for (int i = 0; i < ds.live_analysis_tree_count; i++) {
+        const auto& n = ds.live_analysis_tree[i];
+        int ny = node_y(n.depth);
+        int nx = node_x(n.col);
+
+        if (ny < vis_top || ny > vis_bottom) continue;
+
+        if (n.current) {
+            SDL_SetRenderDrawColor(sdl, 255, 235, 80, 255);
+            fill_circle(nx, ny, r_node + 3);
+        }
+
+        if (n.move_color == 1) {
+            SDL_SetRenderDrawColor(sdl, 38, 38, 38, 255);
+            fill_circle(nx, ny, r_node);
+        } else if (n.move_color == 0) {
+            SDL_SetRenderDrawColor(sdl, 215, 215, 215, 255);
+            fill_circle(nx, ny, r_node);
+        } else {
+            // Root — hollow ring
+            SDL_SetRenderDrawColor(sdl, 85, 100, 120, 255);
+            fill_circle(nx, ny, r_node);
+            SDL_SetRenderDrawColor(sdl, Palette::BOARD.r, Palette::BOARD.g, Palette::BOARD.b, 255);
+            fill_circle(nx, ny, r_node - 3);
+        }
+    }
+
+    SDL_RenderSetClipRect(sdl, nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // Main draw entry points
 
 void Renderer::draw_board(const DrawState& ds) {
@@ -1354,6 +1635,52 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         mix64(uint64_t(ds.territory_w_score));
         mix8(uint8_t(ds.territory_answered));
         mix8(uint8_t(ds.territory_correct));
+    }
+
+    // Live game (clocks + status; cursor is drawn outside the cache)
+    mix8(uint8_t(ds.live_mode));
+    if (ds.live_mode) {
+        mix64(uint64_t(ds.live_black_secs));
+        mix64(uint64_t(ds.live_white_secs));
+        mix64(uint64_t(ds.live_black_periods));
+        mix64(uint64_t(ds.live_white_periods));
+        mix8(uint8_t(ds.live_my_turn));
+        mix8(uint8_t(ds.live_my_color));
+        if (ds.live_status) mix_str(ds.live_status);
+        // Stone removal overlay — must be hashed or cache won't rebuild when data arrives
+        int n = ds.active_board_size;
+        if (ds.live_dead_stones) {
+            for (int r = 0; r < n; r++)
+                for (int f = 0; f < n; f++)
+                    mix8(uint8_t(ds.live_dead_stones[r][f]));
+        }
+        if (ds.live_ownership) {
+            for (int r = 0; r < n; r++)
+                for (int f = 0; f < n; f++)
+                    mix8(uint8_t(ds.live_ownership[r][f]));
+        }
+        for (int i = 0; i < ds.live_suggestion_count; i++) {
+            mix8(uint8_t(ds.live_suggestions[i].row));
+            mix8(uint8_t(ds.live_suggestions[i].col));
+            mix8(uint8_t(int(ds.live_suggestions[i].score_lead * 10)));
+        }
+        mix8(uint8_t(ds.live_hovered_suggestion + 1));  // invalidate cache when hover changes
+        if (ds.live_kata_score_lead != FLT_MAX)
+            mix64(uint64_t(int(ds.live_kata_score_lead * 10)));
+        if (ds.live_actual_move_r >= 0) {
+            mix8(uint8_t(ds.live_actual_move_r));
+            mix8(uint8_t(ds.live_actual_move_f));
+            if (ds.live_actual_move_score != FLT_MAX)
+                mix64(uint64_t(int(ds.live_actual_move_score * 10)));
+        }
+        // Analysis tree (topology + current position)
+        mix64(uint64_t(ds.live_analysis_tree_count));
+        mix64(uint64_t(ds.live_analysis_tree_cur_depth));
+        for (int i = 0; i < ds.live_analysis_tree_count; i++) {
+            const auto& tn = ds.live_analysis_tree[i];
+            mix8(uint8_t(tn.col));
+            mix8(uint8_t(tn.current));
+        }
     }
 
     return h;
@@ -1505,6 +1832,174 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
         }
     render_chain_connections(view, active_board, ds.chain_mode, ds.stone_filter, /*shadows_only=*/false);
 
+    // Stone-removal overlay: grey out dead stones, mark territory
+    if (ds.live_dead_stones || ds.live_ownership) {
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+        int sq    = view.square;
+        int sq2   = sq / 2;
+        int tmark = std::max(3, sq / 5);  // territory square half-size
+
+        for (int r = 0; r < n; r++) {
+            for (int f = 0; f < n; f++) {
+                int cx = view.offset_x + f * sq + sq2;
+                int cy = view.offset_y + r * sq + sq2;
+
+                // Dead stone: thick X in contrasting colour (matches live cursor style)
+                if (ds.live_dead_stones && ds.live_dead_stones[r][f] && active_board[r][f] != 0) {
+                    bool dead_is_black = (active_board[r][f] == 1);
+                    int arm   = sq * 2 / 5;
+                    int gap   = std::max(2, sq / 9);
+                    int thick = std::max(2, sq / 8);
+                    // White X over black stones, black X over white stones
+                    if (dead_is_black)
+                        SDL_SetRenderDrawColor(sdl, 255, 255, 255, 230);
+                    else
+                        SDL_SetRenderDrawColor(sdl, 20, 20, 20, 230);
+                    for (int d = -thick/2; d <= thick/2; d++) {
+                        SDL_RenderDrawLine(sdl, cx-gap-d, cy-gap+d, cx-arm-d, cy-arm+d);
+                        SDL_RenderDrawLine(sdl, cx+gap+d, cy-gap+d, cx+arm+d, cy-arm+d);
+                        SDL_RenderDrawLine(sdl, cx-gap-d, cy+gap-d, cx-arm-d, cy+arm-d);
+                        SDL_RenderDrawLine(sdl, cx+gap+d, cy+gap-d, cx+arm+d, cy+arm-d);
+                    }
+                }
+
+                // Territory squares on empty intersections
+                if (ds.live_ownership && active_board[r][f] == 0) {
+                    int ow = ds.live_ownership[r][f];
+                    if (ow != 0) {
+                        SDL_Rect sq_rect = {cx - tmark, cy - tmark, tmark*2, tmark*2};
+                        if (ow > 0)  // black territory
+                            SDL_SetRenderDrawColor(sdl, 30, 30, 30, 220);
+                        else         // white territory
+                            SDL_SetRenderDrawColor(sdl, 220, 220, 220, 220);
+                        SDL_RenderFillRect(sdl, &sq_rect);
+                        // Outline
+                        SDL_SetRenderDrawColor(sdl, 0, 0, 0, 180);
+                        SDL_RenderDrawRect(sdl, &sq_rect);
+                    }
+                }
+            }
+        }
+    }
+
+    // Actual game move marker: yellow filled circle (larger than suggestions),
+    // drawn first so suggestion circles appear on top and form a visible ring.
+    // Hidden while hovering a suggestion (PV line is shown instead).
+    if (ds.live_actual_move_r >= 0 && ds.live_actual_move_f >= 0 &&
+        ds.live_hovered_suggestion < 0) {
+        int sq   = view.square;
+        int half = sq / 2;
+        int rad  = std::max(4, sq * 3 / 8);
+        int ar   = ds.live_actual_move_r;
+        int af   = ds.live_actual_move_f;
+        if (ar < n && af < n) {
+            int cx = view.offset_x + af * sq + half;
+            int cy = view.offset_y + ar * sq + half;
+            SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+            // Thin dark fringe (1 px) so the ring reads against any background
+            SDL_SetRenderDrawColor(sdl, 0, 0, 0, 130);
+            fill_ring(cx, cy, rad + 6, rad + 5);
+            // Yellow ring (5 px thick) — centre left transparent
+            SDL_SetRenderDrawColor(sdl, Palette::ACCENT.r, Palette::ACCENT.g, Palette::ACCENT.b, 230);
+            fill_ring(cx, cy, rad + 5, rad);
+            if (ds.live_actual_move_score != FLT_MAX && rad >= 10) {
+                float lead = ds.live_actual_move_score;
+                char buf[8];
+                if (std::abs(lead) < 10.f)
+                    snprintf(buf, sizeof(buf), "%.1f", lead);
+                else
+                    snprintf(buf, sizeof(buf), "%d", (int)(lead + (lead >= 0 ? 0.5f : -0.5f)));
+                int tw = text_width_px(buf, 2);
+                draw_text(cx - tw / 2, cy - 7, 2, buf, SDL_Color{255, 255, 255, 255});
+            }
+        }
+    }
+
+    // KataGo move suggestions (drawn during history review in GAME_OVER)
+    if (ds.live_suggestions && ds.live_suggestion_count > 0) {
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+        int sq   = view.square;
+        int half = sq / 2;
+        int rad  = std::max(4, sq * 3 / 8);
+
+        for (int i = 0; i < std::min(ds.live_suggestion_count, 3); i++) {
+            if (ds.live_hovered_suggestion >= 0 && i != ds.live_hovered_suggestion) continue;
+            const MoveSuggestion& s = ds.live_suggestions[i];
+            if (s.row < 0 || s.col < 0 || s.row >= n || s.col >= n) continue;
+            if (active_board[s.row][s.col] != 0) continue;  // stone already there
+
+            int cx = view.offset_x + s.col * sq + half;
+            int cy = view.offset_y + s.row * sq + half;
+
+            if (i == ds.live_hovered_suggestion) {
+                // Hovered: show as the player's actual stone, numbered 1
+                bool is_black = (ds.game.turn_is_black == 1);
+                SDL_SetRenderDrawColor(sdl, 0, 0, 0, 200);
+                fill_circle(cx, cy, rad + 1);
+                SDL_SetRenderDrawColor(sdl, is_black ? 30 : 215, is_black ? 30 : 215, is_black ? 30 : 215, 230);
+                fill_circle(cx, cy, rad);
+                {
+                    int sc = 1;
+                    if (rad >= 14) sc = 2;
+                    if (rad >= 20) sc = 3;
+                    int tw = text_width_px("1", sc), th = 7 * sc;
+                    SDL_Color tc = is_black ? SDL_Color{230,230,230,255} : SDL_Color{40,40,40,255};
+                    draw_text(cx - tw/2, cy - th/2, sc, "1", tc);
+                }
+            } else {
+                // Brightness fades with rank: best = 210, each step -25
+                Uint8 alpha = (Uint8)std::max(80, 210 - i * 25);
+                Uint8 green = (Uint8)std::max(130, 210 - i * 15);
+
+                SDL_SetRenderDrawColor(sdl, 0, 0, 0, (Uint8)(alpha * 0.7f));
+                fill_circle(cx, cy, rad + 1);
+                SDL_SetRenderDrawColor(sdl, 10, green, 150, alpha);
+                fill_circle(cx, cy, rad);
+
+                // Score lead label (points ahead for the player to move)
+                if (rad >= 10) {
+                    char buf[8];
+                    float lead = s.score_lead;
+                    if (std::abs(lead) < 10.f)
+                        snprintf(buf, sizeof(buf), "%.1f", lead);
+                    else
+                        snprintf(buf, sizeof(buf), "%d", (int)(lead + (lead >= 0 ? 0.5f : -0.5f)));
+                    int tw = text_width_px(buf, 2);
+                    draw_text(cx - tw / 2, cy - 7, 2, buf, SDL_Color{240, 240, 240, 255});
+                }
+            }
+        }
+
+        // PV overlay for the hovered suggestion (stones 2..N)
+        if (ds.live_hovered_suggestion >= 0 &&
+            ds.live_hovered_suggestion < ds.live_suggestion_count) {
+            const MoveSuggestion& hs = ds.live_suggestions[ds.live_hovered_suggestion];
+            bool black_plays_first = (ds.game.turn_is_black == 1);
+            for (int pv = 0; pv < hs.pv_count; pv++) {
+                int pr = hs.pv_row[pv];
+                int pf = hs.pv_col[pv];
+                if (pr < 0 || pr >= n || pf < 0 || pf >= n) continue;
+                int pcx = view.offset_x + pf * sq + half;
+                int pcy = view.offset_y + pr * sq + half;
+                // pv[0] = opponent's response, pv[1] = suggestion player again, etc.
+                bool is_black = (pv % 2 == 0) ? !black_plays_first : black_plays_first;
+                SDL_SetRenderDrawColor(sdl, 0, 0, 0, 180);
+                fill_circle(pcx, pcy, rad + 1);
+                SDL_SetRenderDrawColor(sdl, is_black ? 30 : 210, is_black ? 30 : 210, is_black ? 30 : 210, 220);
+                fill_circle(pcx, pcy, rad);
+                char pbuf[4];
+                snprintf(pbuf, sizeof(pbuf), "%d", pv + 2);  // hovered stone = 1, so PV starts at 2
+                int ndigits = (int)strlen(pbuf);
+                int sc = 1;
+                if (rad >= 14 && ndigits <= 2) sc = 2;
+                if (rad >= 20 && ndigits == 1)  sc = 3;
+                int ptw = text_width_px(pbuf, sc), pth = 7 * sc;
+                SDL_Color nc = is_black ? SDL_Color{230,230,230,255} : SDL_Color{40,40,40,255};
+                draw_text(pcx - ptw/2, pcy - pth/2, sc, pbuf, nc);
+            }
+        }
+    }
+
     // Move-number overlay
     if (ds.show_move_numbers) {
         // Build num/col grids from the appropriate source:
@@ -1582,14 +2077,66 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     if (!ds.territory_drill && !ds.free_mode) {
         render_game_comment(view, ds);
         render_player_labels(view, ds);
-        render_speed_label(view, ds.move_delay_ms, ds.speed_message_until);
+        if (!ds.live_mode) {
+            render_speed_label(view, ds.move_delay_ms, ds.speed_message_until);
+            render_result_message(view, ds);
+            render_game_date(view, ds.game_date);
+        }
         render_guess_score(view, ds.guess_mode, ds.guess_score);
-        render_result_message(view, ds);
-        render_game_date(view, ds.game_date);
     }
-    if (!ds.free_mode)
-        render_mode_status(view, ds.analysis_mode, ds.game_mode, ds.guess_mode, ds.territory_drill, false);
+    if (!ds.free_mode) {
+        if (ds.live_mode) {
+            // Status line in the same top-left spot as mode status
+            if (ds.live_status && ds.live_status[0]) {
+                int scale = (view.square >= 30) ? 3 : 2;
+                int pad   = (view.square >= 30) ? 16 : 8;
+                int avail = view.offset_x - view.margin - pad - 4;
+                // Scale down if the text overflows the left panel
+                while (scale > 1 && text_width_px(ds.live_status, scale) > avail)
+                    scale--;
+                int tw = text_width_px(ds.live_status, scale);
+                int x  = view.offset_x - view.margin - pad - tw;
+                int y  = view.offset_y - view.margin + pad;
+                SDL_Color col = ds.live_my_turn ? Palette::ACCENT : Palette::TEXT_SECONDARY;
+                draw_text(x, y, scale, ds.live_status, col);
+
+                // Final result and KataGo projected score below the status (GAME_OVER)
+                int next_y = y + scale * 8 + 3;
+                int lscale = std::max(1, scale - 1);
+                int lright = view.offset_x - view.margin - pad;
+
+                if (!ds.result_message.empty()) {
+                    char rbuf[48];
+                    const char* rm = ds.result_message.c_str();
+                    if ((rm[0] == 'B' || rm[0] == 'W') && rm[1] == '+') {
+                        const char* who = (rm[0] == 'B') ? "BLACK" : "WHITE";
+                        const char* margin = rm + 2;
+                        if (margin[0] == 'R' || margin[0] == 'r')
+                            snprintf(rbuf, sizeof(rbuf), "FINAL RESULT: %s RESIGN", who);
+                        else if (margin[0] == 'T' || margin[0] == 't')
+                            snprintf(rbuf, sizeof(rbuf), "FINAL RESULT: %s TIME", who);
+                        else
+                            snprintf(rbuf, sizeof(rbuf), "FINAL RESULT: %s +%s", who, margin);
+                    } else {
+                        snprintf(rbuf, sizeof(rbuf), "FINAL RESULT: %s", rm);
+                    }
+                    draw_text(lright - text_width_px(rbuf, lscale), next_y, lscale, rbuf, Palette::ACCENT);
+                    next_y += lscale * 8 + 3;
+                }
+                if (ds.live_kata_score_lead != FLT_MAX) {
+                    float sl = ds.live_kata_score_lead;
+                    const char* who = sl >= 0.f ? "BLACK" : "WHITE";
+                    char sbuf[48];
+                    snprintf(sbuf, sizeof(sbuf), "PROJECTED: %s +%.1f", who, std::fabsf(sl));
+                    draw_text(lright - text_width_px(sbuf, lscale), next_y, lscale, sbuf, Palette::PROJECTED);
+                }
+            }
+        } else {
+            render_mode_status(view, ds.analysis_mode, ds.game_mode, ds.guess_mode, ds.territory_drill, false);
+        }
+    }
     render_territory_overlay(view, ds);
+    render_analysis_tree(view, ds);
 
     render_help_overlay(view, ds.show_help);
     render_catalog_overlay(view, ds);
@@ -1624,7 +2171,47 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     // Blit cached board, then draw drag-overlay + cursor on top (always, every frame,
     // without touching the cache — so dragging never triggers a cache rebuild)
     SDL_RenderCopy(sdl, board_cache_, nullptr, nullptr);
+
+    // History review: dim the board so it's clear we're not in the live game
+    if (ds.live_in_history) {
+        int bx = view.offset_x - view.margin;
+        int by = view.offset_y - view.margin;
+        int bw = view.board_px + view.margin * 2;
+        int bh = view.board_px + view.margin * 2;
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(sdl, 140, 140, 140, 60);
+        SDL_Rect r = {bx, by, bw, bh};
+        SDL_RenderFillRect(sdl, &r);
+    }
+
     render_box_selection(view, ds);
+
+    // Live board cursor — yellow X drawn at the grid intersection (45° rotated, bold).
+    if (ds.live_mode && ds.live_cursor_r >= 0 && ds.live_cursor_f >= 0) {
+        int cx = view.offset_x + ds.live_cursor_f * view.square + view.square / 2;
+        int cy = view.offset_y + ds.live_cursor_r * view.square + view.square / 2;
+        int arm = view.square * 2 / 5;
+        int gap = std::max(2, view.square / 9);
+        int thick = std::max(2, view.square / 10);  // boldness
+        Uint8 alpha = ds.live_my_turn ? 230 : 130;
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+        if (ds.live_cursor_ko)
+            SDL_SetRenderDrawColor(sdl, 255, 60, 60, alpha);
+        else
+            SDL_SetRenderDrawColor(sdl, 255, 220, 0, alpha);
+        // Draw each of the 4 diagonal arms with thickness via parallel offset lines
+        for (int d = -thick/2; d <= thick/2; d++) {
+            // top-left arm
+            SDL_RenderDrawLine(sdl, cx - gap - d, cy - gap + d, cx - arm - d, cy - arm + d);
+            // top-right arm
+            SDL_RenderDrawLine(sdl, cx + gap + d, cy - gap + d, cx + arm + d, cy - arm + d);
+            // bottom-left arm
+            SDL_RenderDrawLine(sdl, cx - gap - d, cy + gap - d, cx - arm - d, cy + arm - d);
+            // bottom-right arm
+            SDL_RenderDrawLine(sdl, cx + gap + d, cy + gap - d, cx + arm + d, cy + arm - d);
+        }
+    }
+
     render_software_cursor(view, ds);
     if (!ds.suppress_present)
         SDL_RenderPresent(sdl);

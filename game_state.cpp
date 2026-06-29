@@ -16,15 +16,15 @@ void GameState::reset() {
 }
 
 bool GameState::place_stone(int r, int f, int is_black) {
-    if (r < 0 || r >= BOARD_SIZE || f < 0 || f >= BOARD_SIZE) return false;  // regular games always 19×19
+    if (r < 0 || r >= board_size || f < 0 || f >= board_size) return false;
     if (board[r][f] != 0) return false;
-    if (GoRules::would_be_suicide(board, r, f, is_black)) return false;
+    if (GoRules::would_be_suicide(board, r, f, is_black, board_size)) return false;
 
     board[r][f] = is_black ? 1 : 2;
     stones[stone_count++] = {r, f, is_black};
 
     int cap_r[MAX_BOARD_SIZE * MAX_BOARD_SIZE], cap_f[MAX_BOARD_SIZE * MAX_BOARD_SIZE], cap_count = 0;
-    GoRules::find_captured(board, is_black, r, f, cap_r, cap_f, cap_count);
+    GoRules::find_captured(board, is_black, r, f, cap_r, cap_f, cap_count, board_size);
 
     for (int i = 0; i < cap_count; i++) {
         board[cap_r[i]][cap_f[i]] = 0;

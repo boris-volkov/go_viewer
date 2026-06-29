@@ -3,7 +3,19 @@
 #include "game_state.hpp"
 #include "analysis_state.hpp"
 #include "catalog.hpp"
+#include <cfloat>
 #include <string>
+
+// Describes one node in the analysis tree for rendering (produced by ogs_client,
+// consumed by render_analysis_tree — a plain POD so renderer.hpp stays dependency-free).
+struct AnalysisTreeRenderNode {
+    int  depth        = 0;   // row in tree (0 = root)
+    int  col          = 0;   // column (0 = main trunk, 1+ = branches)
+    bool current      = false;
+    int  parent_depth = -1;  // -1 for root
+    int  parent_col   = 0;
+    int  move_color   = -1;  // 1=black stone, 0=white stone, -1=root (no move)
+};
 
 class Renderer {
 public:
@@ -65,13 +77,57 @@ public:
         bool        catalog_thumb_valid       = false;
         const char (*catalog_thumb_open) [BOARD_SIZE] = nullptr;
         const char (*catalog_thumb_final)[BOARD_SIZE] = nullptr;
+        int         catalog_thumb_board_size  = BOARD_SIZE;
         // Transient flash notification (e.g. save confirmation)
         const std::string& flash_message;
         Uint32 flash_message_until = 0;
         // Save-position text input (0=off, 1=name, 2=note)
         int                save_input_step = 0;
         const std::string& save_input_buf;
+
+        // Live game (ogs_client) — all default to off; go_viewer never sets these.
+        bool        live_mode       = false;
+        int         live_cursor_r   = -1;   // board cursor row; -1 = not shown
+        int         live_cursor_f   = -1;   // board cursor col
+        int         live_my_color   = 1;    // 1=black, 0=white (for cursor tint)
+        bool        live_my_turn    = false;
+        int         live_black_secs        = -1;  // -1 = no clock displayed
+        int         live_white_secs        = -1;
+        int         live_black_periods     = -1;  // -1 = not byo-yomi
+        int         live_white_periods     = -1;
+        int         live_black_period_secs = -1;
+        int         live_white_period_secs = -1;
+        const char* live_status            = nullptr;
+        // Stone removal overlay (STONE_REMOVAL phase only)
+        const bool (*live_dead_stones)[MAX_BOARD_SIZE] = nullptr;  // greyed-out stones
+        const int  (*live_ownership)[MAX_BOARD_SIZE]   = nullptr;  // territory: 1=black, -1=white
+        bool        live_in_history    = false;   // true while reviewing past moves
+        // KataGo move suggestions (GAME_OVER history review)
+        const MoveSuggestion* live_suggestions        = nullptr;
+        int                   live_suggestion_count   = 0;
+        int                   live_hovered_suggestion = -1;  // index into live_suggestions, -1 = none
+        // Ko violation: cursor flashes red when the move would recreate a prior board state
+        bool                  live_cursor_ko          = false;
+        // KataGo expected score lead from Black's perspective; FLT_MAX = not available
+        float                         live_kata_score_lead         = FLT_MAX;
+        // Actual game move from current analysis position (children[0]); -1 = none/pass
+        int   live_actual_move_r     = -1;
+        int   live_actual_move_f     = -1;
+        float live_actual_move_score = FLT_MAX;  // KataGo score_lead for that move; FLT_MAX = unknown
+        // Post-game analysis tree (GAME_OVER) — null when not in analysis
+        const AnalysisTreeRenderNode* live_analysis_tree          = nullptr;
+        int                           live_analysis_tree_count     = 0;
+        int                           live_analysis_tree_cur_depth = 0;
     };
+
+    // Match search settings menu (live client only)
+    struct MatchMenu {
+        int  focus_col   = 0;      // 0=board size column, 1=time control column
+        int  focus_row   = 0;      // row within focused column
+        bool size_sel[3] = {};     // 9x9, 13x13, 19x19
+        bool speed_sel[3]= {};     // blitz, live, rapid
+    };
+    void draw_match_menu(const MatchMenu& menu);
 
     void get_board_view(BoardView& view, int active_size = BOARD_SIZE) const;
     bool screen_to_board(const BoardView& view, int mx, int my, int& r, int& f) const;
@@ -100,11 +156,12 @@ private:
     void render_game_date(const BoardView& view, const std::string& date);
     void render_help_overlay(const BoardView& view, bool show_help);
     void render_catalog_overlay(const BoardView& view, const DrawState& ds);
-    void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE]);
+    void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE], int board_size = BOARD_SIZE);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
     void render_quit_confirm(const BoardView& view);
     void render_box_selection(const BoardView& view, const DrawState& ds);
     void render_flash_message(const BoardView& view, const DrawState& ds);
+    void render_analysis_tree(const BoardView& view, const DrawState& ds);
     void render_save_input(const BoardView& view, const DrawState& ds);
     void render_game_comment(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
@@ -121,7 +178,9 @@ private:
         float     alpha3;  // tight layer alpha
     };
     static StoneColors stone_colors(int is_black);
-    void fill_circle(int cx, int cy, int radius);  // scanline fill, color already set
+    void fill_circle(int cx, int cy, int radius);               // scanline fill, color already set
+    void draw_circle(int cx, int cy, int radius);               // Bresenham outline only, color already set
+    void fill_ring(int cx, int cy, int r_outer, int r_inner);  // scanline fill of annular region only
     // Scanline fill of a rotated ellipse. ra = semi-axis along (ux,uy), rb = semi-axis along perpendicular.
     void fill_ellipse_rotated(int cx, int cy, float ux, float uy, int ra, int rb);
 

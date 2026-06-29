@@ -13,6 +13,7 @@ public:
     int   white_prisoners               = 0;
     int   turn_is_black                 = 1;
     int   game_finished                 = 0;
+    int   board_size                    = BOARD_SIZE;
     Uint32 game_finished_timer          = 0;
 
     // Board history for left/right stepping

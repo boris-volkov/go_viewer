@@ -59,5 +59,6 @@ constexpr SDL_Color TERRITORY_BLACK = {100, 100, 100, 180};  // black territory 
 constexpr SDL_Color TERRITORY_WHITE = {200, 200, 200, 180};  // white territory shading
 constexpr SDL_Color SCORE_CORRECT   = {100, 220, 100, 255};  // correct-answer feedback (green)
 constexpr SDL_Color SCORE_TEXT      = {230, 230, 230, 255};  // score label
+constexpr SDL_Color PROJECTED       = { 10, 210, 150, 255};  // KataGo projected score (matches suggestion circles)
 
 } // namespace Palette

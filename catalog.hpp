@@ -19,6 +19,7 @@ struct CatalogEntry {
     std::string full_path;         // absolute path — set for search results and index-view files
     std::string player_black;      // PB name — if set, rendered as three yellow/white columns
     std::string player_white;      // PW name
+    std::string date;              // DT date string (e.g. "2024-01-15") — shown as 4th column
 };
 
 class Catalog {
@@ -83,9 +84,10 @@ public:
     // been loaded yet.
     void ensure_names_loaded(int from, int count);
 
+    bool load_entries();       // (re)populates entries from current_subdir on disk
+
 private:
     void dir_up();
-    bool load_entries();       // (re)populates entries from current_subdir on disk
     void load_year_list();     // populates entries with virtual year dirs
     void load_year_games(const std::string& year); // populates entries with games for a year
     void load_player_list();   // populates entries with unique player names from index

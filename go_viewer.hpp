@@ -39,6 +39,20 @@ struct Stone {
     int r = 0, f = 0, is_black = 0;
 };
 
+static constexpr int MAX_PV = 8;
+
+struct MoveSuggestion {
+    int   row        = -1;
+    int   col        = -1;
+    float winrate    = 0.f;
+    float score_lead = 0.f;
+    int   order      = 0;
+    int   pv_count = 0;
+    int   pv_row[MAX_PV] = {};
+    int   pv_col[MAX_PV] = {};
+};
+static constexpr int MAX_SUGGESTIONS = 10;
+
 struct MoveNumCell {
     int num      = 0;  // 1-based move number, 0 = no move played here
     int is_black = 0;
