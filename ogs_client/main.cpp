@@ -60,7 +60,7 @@ static std::string exe_dir() {
 
 static bool load_config(std::string& username, std::string& password, std::string& jwt,
                         std::string& kata_exe, std::string& kata_model, std::string& kata_cfg,
-                        std::string& kata_model_9x9) {
+                        std::string& kata_model_9x9, std::string& kata_human_model) {
     std::string path = exe_dir() + "config.ini";
     FILE* fp = fopen(path.c_str(), "r");
     if (!fp) return false;
@@ -73,13 +73,14 @@ static bool load_config(std::string& username, std::string& password, std::strin
         size_t vlen = strlen(val);
         while (vlen > 0 && (val[vlen-1] == '\n' || val[vlen-1] == '\r'))
             val[--vlen] = '\0';
-        if      (strcmp(line, "username")     == 0) username  = val;
-        else if (strcmp(line, "password")     == 0) password  = val;
-        else if (strcmp(line, "jwt")          == 0) jwt       = val;
-        else if (strcmp(line, "katago_exe")       == 0) kata_exe      = val;
-        else if (strcmp(line, "katago_model")     == 0) kata_model    = val;
-        else if (strcmp(line, "katago_config")    == 0) kata_cfg      = val;
-        else if (strcmp(line, "katago_model_9x9") == 0) kata_model_9x9 = val;
+        if      (strcmp(line, "username")           == 0) username          = val;
+        else if (strcmp(line, "password")           == 0) password          = val;
+        else if (strcmp(line, "jwt")                == 0) jwt               = val;
+        else if (strcmp(line, "katago_exe")         == 0) kata_exe          = val;
+        else if (strcmp(line, "katago_model")       == 0) kata_model        = val;
+        else if (strcmp(line, "katago_config")      == 0) kata_cfg          = val;
+        else if (strcmp(line, "katago_model_9x9")   == 0) kata_model_9x9   = val;
+        else if (strcmp(line, "katago_human_model") == 0) kata_human_model  = val;
     }
     fclose(fp);
     return !username.empty();  // password optional if jwt provided
@@ -347,11 +348,12 @@ static bool sgf_board_at(const std::string& path,
 
 struct AnalysisNode {
     GameState board;
-    int move_col    = -1;  // stone played to reach this node (-1 = root or pass)
-    int move_row    = -1;
-    int move_color  = -1;  // 1=black, 0=white, -1=root
-    int depth       = 0;   // distance from root
-    int active_child = 0;  // which child RT navigates into
+    int   move_col   = -1;   // stone played to reach this node (-1 = root or pass)
+    int   move_row   = -1;
+    int   move_color = -1;   // 1=black, 0=white, -1=root
+    int   depth      = 0;    // distance from root
+    int   active_child = 0;  // which child RT navigates into
+    float score_lead = FLT_MAX;  // KataGo score lead from Black's perspective; FLT_MAX = unknown
     std::vector<std::unique_ptr<AnalysisNode>> children;
     AnalysisNode* parent = nullptr;
 };
@@ -436,6 +438,10 @@ private:
     // Chain mode toggle (Y button)
     bool chain_mode_       = true;
 
+    // Help overlay / quit confirm
+    bool show_help_    = false;
+    bool quit_confirm_ = false;
+
     // Undo-request state
     bool undo_pending_     = false;
     int  undo_move_number_ = 0;
@@ -458,10 +464,38 @@ private:
     int            kata_suggestion_count_             = 0;
     float          kata_score_lead_               = FLT_MAX;  // FLT_MAX = no data
 
+    // Score graph: KataGo score_lead per main-line depth, built during play and review.
+    std::vector<float> move_scores_;           // indexed by depth; FLT_MAX = unknown
+    std::vector<bool>  move_marked_;           // indexed by depth; true = flagged for review
+    int                bg_analysis_next_  = 0; // next main-line depth to submit
+    int                bg_analysis_depth_ = -1;// depth of the currently-pending bg query
+    bool               bg_analysis_busy_  = false;
+    bool               fg_kata_pending_   = false; // foreground KataGo query in-flight
+    std::string        companion_path_;            // path of .katago companion file
+
     // Returns the best available KataGo process for the given board size.
     KatagoProc& kata_for(int bs) {
         return (bs == 9 && kata_9_.running()) ? kata_9_ : kata_;
     }
+
+    // KataGo GTP subprocess for local games vs the human SL model
+    KataGoGtp   kata_gtp_;
+    std::string kata_exe_;          // path from config (shared with analysis)
+    std::string kata_model_;        // path from config (shared with analysis)
+    std::string kata_human_model_;  // path to humanv0.bin.gz (enables VS KATAGO)
+
+    // Local game state
+    bool        is_local_game_       = false;
+    bool        local_prev_was_pass_ = false;  // true if the last move (by either side) was a pass
+    bool        local_result_pending_ = false;  // freeze on final board until user presses a button
+    std::string local_game_score_;             // score string shown during stone removal, empty until ownership arrives
+
+    void start_local_game();
+    void handle_katago_gtp_move(int row, int col);
+    // forced_result: non-empty means the result is already known (e.g. resignation).
+    // In that case skip the GTP final_status query and go straight to territory display.
+    void begin_local_stone_removal(const std::string& forced_result = "");
+    void end_local_game(const std::string& result);
 
     // Left-stick joystick cursor state
     Sint16 js_left_x_  = 0;
@@ -479,6 +513,8 @@ private:
     void step_history(int delta);  // delta=-1 back, +1 forward; sets history_pos
     void load_demo_game();
     void save_live_game();
+    void save_companion();          // write .katago file alongside the SGF
+    void load_companion();          // read .katago file if present
     void load_sgf_for_review(const std::string& path);
     void open_game_catalog();
     void draw();
@@ -523,6 +559,7 @@ bool App::init() {
 void App::cleanup() {
     kata_.stop();
     kata_9_.stop();
+    kata_gtp_.stop();
     net_.stop();
     if (pad_)      { SDL_GameControllerClose(pad_); pad_ = nullptr; }
     delete renderer_; renderer_ = nullptr;
@@ -540,6 +577,7 @@ void App::apply_move(int col, int row, int forced_color) {
     game_.board.save_snapshot();
     if (forced_color >= 0) {
         game_.history.push_back(game_.board);
+        if (move_scores_.size() < game_.history.size()) { move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); }
         return;  // pre-placed handicap stone: caller sets turn after
     }
     // Free handicap: first `handicap` stones are all black; after last one, white plays
@@ -549,6 +587,7 @@ void App::apply_move(int col, int row, int forced_color) {
         game_.board.turn_is_black = !is_black;
     }
     game_.history.push_back(game_.board);
+    if (move_scores_.size() < game_.history.size()) { move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); }
 }
 
 void App::step_history(int delta) {
@@ -600,6 +639,19 @@ void App::build_analysis_tree() {
         cur = cur->children[0].get();
     }
     analysis_cur_ = analysis_root_.get();  // open at start of game
+
+    // Seed nodes on the main line with any scores already collected during play.
+    {
+        AnalysisNode* n = analysis_root_.get();
+        while (n) {
+            int d = n->depth;
+            if (d < (int)move_scores_.size() && move_scores_[d] != FLT_MAX)
+                n->score_lead = move_scores_[d];
+            if (n->children.empty()) break;
+            n = n->children[0].get();
+        }
+    }
+
     build_analysis_tree_render();
 }
 
@@ -617,6 +669,7 @@ void App::build_analysis_tree_render() {
             rn.parent_depth = parent_depth;
             rn.parent_col   = parent_col;
             rn.move_color   = node->move_color;
+            rn.marked       = (node->depth < (int)move_marked_.size()) && move_marked_[node->depth];
             analysis_tree_render_.push_back(rn);
 
             for (int i = 0; i < (int)node->children.size(); i++) {
@@ -820,9 +873,21 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
-    // Y button toggles chain-mode overlay (works in all non-cred states)
+    // Y button: mark/unmark the current move for analysis attention
     if (btn == SDL_CONTROLLER_BUTTON_Y) {
-        chain_mode_ = !chain_mode_;
+        int depth = -1;
+        if (state_ == AppState::PLAYING) {
+            depth = (game_.history_pos >= 0) ? game_.history_pos
+                                             : (int)game_.history.size() - 1;
+        } else if (state_ == AppState::GAME_OVER && analysis_cur_) {
+            depth = analysis_cur_->depth;
+        }
+        if (depth >= 0 && depth < (int)move_marked_.size()) {
+            move_marked_[depth] = !move_marked_[depth];
+            if (state_ == AppState::GAME_OVER) build_analysis_tree_render();
+            flash_       = move_marked_[depth] ? "MARKED" : "UNMARKED";
+            flash_until_ = SDL_GetTicks() + 1200;
+        }
         draw();
         return;
     }
@@ -876,8 +941,10 @@ void App::handle_controller_button(Uint8 btn) {
             draw();
         } else if (btn == SDL_CONTROLLER_BUTTON_BACK) {
             // Open match settings menu
-            match_menu_.focus_col = 0;
-            match_menu_.focus_row = 0;
+            match_menu_.focus_col    = 0;
+            match_menu_.focus_row    = 0;
+            match_menu_.katago_mode  = match_prefs_.katago_mode;
+            match_menu_.katago_str   = match_prefs_.katago_str;
             for (int i = 0; i < 3; i++) match_menu_.size_sel[i]  = match_prefs_.sizes[i];
             for (int i = 0; i < 3; i++) match_menu_.speed_sel[i] = match_prefs_.speeds[i];
             state_ = AppState::MATCH_MENU;
@@ -887,11 +954,19 @@ void App::handle_controller_button(Uint8 btn) {
     }
 
     if (state_ == AppState::MATCH_MENU) {
-        int col_sizes[2] = {3, 3};  // item counts per column (3 sizes, 3 speeds)
+        // Col 1 has 3 items in OGS mode, 7 in KataGo mode
+        int col1_size = match_menu_.katago_mode ? 7 : 3;
+        int col_sizes[2] = {3, col1_size};
         int n = col_sizes[match_menu_.focus_col];
-        auto close_menu = [&]() {
+
+        auto save_prefs = [&]() {
             for (int i = 0; i < 3; i++) match_prefs_.sizes[i]  = match_menu_.size_sel[i];
             for (int i = 0; i < 3; i++) match_prefs_.speeds[i] = match_menu_.speed_sel[i];
+            match_prefs_.katago_mode = match_menu_.katago_mode;
+            match_prefs_.katago_str  = match_menu_.katago_str;
+        };
+        auto close_menu = [&]() {
+            save_prefs();
             state_ = AppState::LOBBY;
             set_status("PRESS START TO FIND GAME");
             draw();
@@ -907,16 +982,33 @@ void App::handle_controller_button(Uint8 btn) {
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
             match_menu_.focus_col = 0;
+            if (match_menu_.focus_row >= 3) match_menu_.focus_row = 2;
             renderer_->draw_match_menu(match_menu_);
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
             match_menu_.focus_col = 1;
             renderer_->draw_match_menu(match_menu_);
             break;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+            // Toggle OGS / KataGo mode (only when human model is configured)
+            if (!kata_human_model_.empty()) {
+                match_menu_.katago_mode = !match_menu_.katago_mode;
+                // Clamp row when switching to OGS mode's smaller column
+                if (!match_menu_.katago_mode && match_menu_.focus_col == 1
+                        && match_menu_.focus_row >= 3)
+                    match_menu_.focus_row = 2;
+                renderer_->draw_match_menu(match_menu_);
+            }
+            break;
         case SDL_CONTROLLER_BUTTON_A: {
             int r = match_menu_.focus_row;
-            if (match_menu_.focus_col == 0) match_menu_.size_sel[r]  = !match_menu_.size_sel[r];
-            else                            match_menu_.speed_sel[r] = !match_menu_.speed_sel[r];
+            if (match_menu_.focus_col == 0) {
+                match_menu_.size_sel[r] = !match_menu_.size_sel[r];
+            } else if (match_menu_.katago_mode) {
+                match_menu_.katago_str = r;   // radio — single select
+            } else {
+                match_menu_.speed_sel[r] = !match_menu_.speed_sel[r];
+            }
             renderer_->draw_match_menu(match_menu_);
             break;
         }
@@ -925,12 +1017,15 @@ void App::handle_controller_button(Uint8 btn) {
             close_menu();
             break;
         case SDL_CONTROLLER_BUTTON_START:
-            for (int i = 0; i < 3; i++) match_prefs_.sizes[i]  = match_menu_.size_sel[i];
-            for (int i = 0; i < 3; i++) match_prefs_.speeds[i] = match_menu_.speed_sel[i];
-            net_.cmd_find_match(match_prefs_);
-            state_ = AppState::SEARCHING;
-            set_status("SEARCHING...");
-            draw();
+            save_prefs();
+            if (match_menu_.katago_mode) {
+                start_local_game();
+            } else {
+                net_.cmd_find_match(match_prefs_);
+                state_ = AppState::SEARCHING;
+                set_status("SEARCHING...");
+                draw();
+            }
             break;
         default: break;
         }
@@ -984,13 +1079,23 @@ void App::handle_controller_button(Uint8 btn) {
                     break;
                 }
             }
-            net_.cmd_send_move(game_.game_id, game_.cursor_f, game_.cursor_r);
-            // Apply optimistically so the stone appears immediately; server echo will be skipped
-            apply_move(game_.cursor_f, game_.cursor_r);
-            game_.pending_col = game_.cursor_f;
-            game_.pending_row = game_.cursor_r;
-            game_.my_turn = false;
-            set_status("WAITING...");
+            if (is_local_game_) {
+                apply_move(game_.cursor_f, game_.cursor_r);
+                local_prev_was_pass_ = false;
+                game_.my_turn = false;
+                kata_gtp_.send_play(game_.my_color, game_.cursor_r, game_.cursor_f,
+                                    game_.board_size);
+                kata_gtp_.request_genmove(1 - game_.my_color);
+                set_status("KATAGO THINKING...");
+            } else {
+                net_.cmd_send_move(game_.game_id, game_.cursor_f, game_.cursor_r);
+                // Apply optimistically so stone appears immediately; server echo skipped
+                apply_move(game_.cursor_f, game_.cursor_r);
+                game_.pending_col = game_.cursor_f;
+                game_.pending_row = game_.cursor_r;
+                game_.my_turn = false;
+                set_status("WAITING...");
+            }
             draw();
             break;
 
@@ -998,12 +1103,22 @@ void App::handle_controller_button(Uint8 btn) {
             if (!game_.my_turn) break;
             if (pass_confirm_) {
                 pass_confirm_ = false;
-                net_.cmd_send_pass(game_.game_id);
-                game_.board.turn_is_black = !game_.board.turn_is_black;
-                game_.pending_col = -1;
-                game_.pending_row = -1;
-                game_.my_turn = false;
-                set_status("PASSED — WAITING...");
+                if (is_local_game_) {
+                    game_.board.turn_is_black = !game_.board.turn_is_black;
+                    game_.history.push_back(game_.board);
+                    kata_gtp_.send_play(game_.my_color, -1, -1, game_.board_size);
+                    local_prev_was_pass_ = true;
+                    game_.my_turn = false;
+                    kata_gtp_.request_genmove(1 - game_.my_color);
+                    set_status("PASSED — KATAGO THINKING...");
+                } else {
+                    net_.cmd_send_pass(game_.game_id);
+                    game_.board.turn_is_black = !game_.board.turn_is_black;
+                    game_.pending_col = -1;
+                    game_.pending_row = -1;
+                    game_.my_turn = false;
+                    set_status("PASSED — WAITING...");
+                }
             } else {
                 pass_confirm_ = true;
             }
@@ -1012,13 +1127,30 @@ void App::handle_controller_button(Uint8 btn) {
 
         case SDL_CONTROLLER_BUTTON_START:
             if (resign_confirm_) {
-                net_.cmd_send_resign(game_.game_id);
                 resign_confirm_ = false;
-                set_status("RESIGNED");
-                draw();
+                if (is_local_game_) {
+                    end_local_game("W+R");  // player resigned → White wins
+                } else {
+                    net_.cmd_send_resign(game_.game_id);
+                    set_status("RESIGNED");
+                    draw();
+                }
             } else {
                 resign_confirm_ = true;
                 draw();
+            }
+            break;
+
+        case SDL_CONTROLLER_BUTTON_BACK:
+            if (is_local_game_) {
+                kata_gtp_.stop();
+                is_local_game_ = false;
+                state_ = AppState::LOBBY;
+                game_.board.reset();
+                load_demo_game();
+                set_status("PRESS START TO FIND GAME");
+                draw();
+                return;
             }
             break;
 
@@ -1028,6 +1160,14 @@ void App::handle_controller_button(Uint8 btn) {
     }
 
     if (state_ == AppState::STONE_REMOVAL) {
+        if (is_local_game_) {
+            if (btn == SDL_CONTROLLER_BUTTON_A || btn == SDL_CONTROLLER_BUTTON_START) {
+                if (!local_game_score_.empty())
+                    end_local_game(local_game_score_);
+                // else still analyzing — ignore the press
+            }
+            return;
+        }
         if (btn == SDL_CONTROLLER_BUTTON_A || btn == SDL_CONTROLLER_BUTTON_START) {
             net_.cmd_accept_stones(game_.game_id);
             my_accept_sent_ = true;
@@ -1038,6 +1178,29 @@ void App::handle_controller_button(Uint8 btn) {
     }
 
     if (state_ == AppState::GAME_OVER) {
+        // Freeze on final board after local game — any button dismisses into analysis
+        if (local_result_pending_) {
+            local_result_pending_ = false;
+            if (btn == SDL_CONTROLLER_BUTTON_BACK) {
+                save_companion();
+                state_ = AppState::LOBBY;
+                game_.board.reset();
+                load_demo_game();
+                set_status("PRESS START TO FIND GAME");
+            } else {
+                build_analysis_tree();
+                kata_analysis_enabled_ = true;
+                set_status("GAME OVER — " + game_.result);
+                kata_for(game_.board_size).query_moves(
+                    analysis_cur_ ? analysis_cur_->board.board : game_.board.board,
+                    game_.board_size,
+                    analysis_cur_ ? (analysis_cur_->board.turn_is_black == 1)
+                                  : (game_.board.turn_is_black == 1));
+            }
+            draw();
+            return;
+        }
+
         int n = game_.board_size - 1;
         switch (btn) {
         case SDL_CONTROLLER_BUTTON_DPAD_UP:
@@ -1135,6 +1298,8 @@ void App::handle_controller_button(Uint8 btn) {
             draw();
             break;
         case SDL_CONTROLLER_BUTTON_BACK:
+            save_companion();  // persist scores + marks before leaving review
+            is_local_game_ = false;
             state_ = AppState::LOBBY;
             game_.history_pos = -1;
             analysis_root_.reset();
@@ -1189,10 +1354,217 @@ void App::save_live_game() {
                          + sgf_sanitize(opp_name) + ".sgf";
     std::string path = Catalog::join_path(player_dir, filename);
 
+    // Derive companion path before launching async fetch
+    companion_path_ = path.substr(0, path.rfind('.')) + ".katago";
+
     int game_id = game_.game_id;
     std::thread([this, game_id, path] {
         net_.fetch_sgf(game_id, path);
     }).detach();
+}
+
+void App::save_companion() {
+    if (companion_path_.empty()) return;
+    if (move_scores_.empty() && move_marked_.empty()) return;
+
+    FILE* f = fopen(companion_path_.c_str(), "w");
+    if (!f) return;
+
+    // Scores line: "S val val val ..." (nan for unknown)
+    fprintf(f, "S");
+    for (int i = 0; i < (int)move_scores_.size(); i++) {
+        float v = move_scores_[i];
+        if (v == FLT_MAX) fprintf(f, " nan");
+        else              fprintf(f, " %.4g", v);
+    }
+    fprintf(f, "\n");
+
+    // Marked line: "M depth depth ..."
+    fprintf(f, "M");
+    for (int i = 0; i < (int)move_marked_.size(); i++)
+        if (move_marked_[i]) fprintf(f, " %d", i);
+    fprintf(f, "\n");
+
+    fclose(f);
+}
+
+void App::load_companion() {
+    if (companion_path_.empty()) return;
+    FILE* f = fopen(companion_path_.c_str(), "r");
+    if (!f) return;
+
+    char line[65536];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == 'S') {
+            char* p = line + 1;
+            int idx = 0;
+            while (*p && idx < (int)move_scores_.size()) {
+                while (*p == ' ') p++;
+                if (strncmp(p, "nan", 3) == 0) { p += 3; idx++; }
+                else { move_scores_[idx++] = (float)strtod(p, &p); }
+            }
+        } else if (line[0] == 'M') {
+            char* p = line + 1;
+            while (*p) {
+                while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+                if (!*p) break;
+                int d = (int)strtol(p, &p, 10);
+                if (d >= 0 && d < (int)move_marked_.size())
+                    move_marked_[d] = true;
+            }
+        }
+    }
+    fclose(f);
+}
+
+// ── Local game vs KataGo ─────────────────────────────────────────────────────
+
+static const char* const KATA_GTP_PROFILES[7] = {
+    "preaz_20k", "preaz_15k", "preaz_10k", "preaz_5k",
+    "preaz_1k",  "preaz_1d",  "preaz_5d"
+};
+static const char* const KATA_GTP_NAMES[7] = {
+    "20 KYU", "15 KYU", "10 KYU", "5 KYU",
+    "1 KYU",  "1 DAN",  "5 DAN"
+};
+
+void App::start_local_game() {
+    // Pick board size (first checked, default 9x9)
+    int bs = 19;
+    if (match_prefs_.sizes[0]) bs = 9;
+    else if (match_prefs_.sizes[1]) bs = 13;
+
+    int str = match_prefs_.katago_str;
+    if (str < 0 || str >= 7) str = 2;
+
+    if (!kata_gtp_.start(kata_exe_, kata_model_, kata_human_model_,
+                         KATA_GTP_PROFILES[str], bs, 7.5f)) {
+        flash_       = "FAILED TO START KATAGO";
+        flash_until_ = SDL_GetTicks() + 3000;
+        state_ = AppState::LOBBY;
+        set_status("PRESS START TO FIND GAME");
+        draw();
+        return;
+    }
+
+    game_.result.clear();
+    game_.pending_col   = -2;
+    game_.pending_row   = -2;
+    game_.history.clear();
+    game_.history_pos   = -1;
+    memset(game_.dead_stones, 0, sizeof(game_.dead_stones));
+    memset(game_.ownership,   0, sizeof(game_.ownership));
+    game_.game_id       = 0;
+    game_.board_size    = bs;
+    game_.my_color      = 1;   // player is Black
+    game_.my_player_id  = 0;
+    game_.black_name    = my_username_.empty() ? "You" : my_username_;
+    game_.white_name    = KATA_GTP_NAMES[str];
+    game_.black_rank    = game_.white_rank = "";
+    game_.black_secs = game_.white_secs = -1;
+    game_.black_periods = game_.white_periods = -1;
+    game_.black_period_secs = game_.white_period_secs = -1;
+    game_.clock_tick    = 0;
+    game_.cursor_r = game_.cursor_f = bs / 2;
+    game_.board.reset();
+    game_.board.board_size    = bs;
+    game_.board.turn_is_black = 1;
+    game_.handicap      = 0;
+    game_.free_handicap = false;
+    game_.history.push_back(game_.board);
+
+    black_label_ = game_.black_name;
+    white_label_ = game_.white_name;
+
+    is_local_game_        = true;
+    local_prev_was_pass_  = false;
+    local_result_pending_ = false;
+    game_.my_turn         = true;
+
+    kata_suggestion_count_ = 0;
+    kata_score_lead_       = FLT_MAX;
+    kata_analysis_enabled_ = false;   // analysis overlay off during live play
+
+    state_ = AppState::PLAYING;
+    set_status("YOUR TURN  (BLACK)");
+    draw();
+}
+
+void App::handle_katago_gtp_move(int row, int col) {
+    if (row == -2) {
+        // KataGo resigned — show territory view before going to analysis
+        flash_       = "KATAGO RESIGNED — YOU WIN!";
+        flash_until_ = SDL_GetTicks() + 4000;
+        kata_gtp_.stop();  // no more GTP commands needed
+        begin_local_stone_removal("B+R");
+        return;
+    }
+    if (row == -1) {
+        // KataGo passed
+        flash_       = "KATAGO PASSED";
+        flash_until_ = SDL_GetTicks() + 3000;
+        game_.board.turn_is_black = !game_.board.turn_is_black;
+        game_.history.push_back(game_.board);
+        if (local_prev_was_pass_) {
+            begin_local_stone_removal();
+            return;
+        }
+        local_prev_was_pass_ = true;
+        game_.my_turn = true;
+        set_status("YOUR TURN  (BLACK)");
+        draw();
+        return;
+    }
+    // Normal move
+    apply_move(col, row);
+    local_prev_was_pass_ = false;
+    pass_confirm_        = false;
+    game_.my_turn        = true;
+    set_status("YOUR TURN  (BLACK)");
+    draw();
+}
+
+void App::begin_local_stone_removal(const std::string& forced_result) {
+    state_ = AppState::STONE_REMOVAL;
+    stone_removal_has_ogs_territory_ = false;
+    game_.history_pos = -1;
+    memset(game_.dead_stones, 0, sizeof(game_.dead_stones));
+    memset(game_.ownership,   0, sizeof(game_.ownership));
+    my_accept_sent_    = false;
+    local_game_score_  = forced_result;  // empty = double-pass, non-empty = resignation
+
+    if (forced_result.empty()) {
+        // Double-pass: ask GTP for dead stones first; ownership query follows in the poll loop.
+        if (kata_gtp_.running())
+            kata_gtp_.request_final_status();
+    } else {
+        // Resignation: result already known, no dead stones.
+        // Query territory directly so the user can see the board state.
+        if (kata_for(game_.board_size).running())
+            kata_for(game_.board_size).query_ownership(
+                game_.board.board, game_.board_size, game_.dead_stones, 7.5f, 100);
+    }
+    set_status("ANALYZING...");
+    draw();
+}
+
+void App::end_local_game(const std::string& result) {
+    kata_gtp_.stop();
+    is_local_game_        = false;
+    local_result_pending_ = true;
+    state_ = AppState::GAME_OVER;
+    game_.result = result;
+    save_live_game();
+    set_status(result + "  —  PRESS ANY BUTTON TO REVIEW");
+    kata_suggestion_count_ = 0;
+    kata_score_lead_       = FLT_MAX;
+    kata_analysis_enabled_ = false;
+    // Keep analysis_cur_ = nullptr so make_ds() shows game_.board (final position)
+    // and doesn't override the status with "ANALYSIS - MOVE N".
+    // build_analysis_tree() is deferred until the user dismisses this screen.
+    analysis_root_.reset();
+    analysis_cur_ = nullptr;
+    draw();
 }
 
 // ── Game catalog ──────────────────────────────────────────────────────────────
@@ -1261,6 +1633,15 @@ void App::load_sgf_for_review(const std::string& path) {
     black_label_ = game_.black_name;
     white_label_ = game_.white_name;
 
+    // Reset score graph / mark storage and derive companion path
+    move_scores_.assign(game_.history.size(), FLT_MAX);
+    move_marked_.assign(game_.history.size(), false);
+    bg_analysis_next_  = 0;
+    bg_analysis_depth_ = -1;
+    bg_analysis_busy_  = false;
+    companion_path_    = path.substr(0, path.rfind('.')) + ".katago";
+    load_companion();   // pre-populate scores and marks if the file exists
+
     // Build analysis tree from the replayed history
     build_analysis_tree();
 
@@ -1270,6 +1651,7 @@ void App::load_sgf_for_review(const std::string& path) {
     kata_suggestion_count_ = 0;
     kata_score_lead_ = FLT_MAX;
     if (analysis_cur_) {
+        fg_kata_pending_ = true;
         kata_for(game_.board_size).query_moves(
             analysis_cur_->board.board, game_.board_size,
             analysis_cur_->board.turn_is_black == 1);
@@ -1355,6 +1737,13 @@ void App::handle_net_msg(const NetMsg& msg) {
         bool black_to_play = (game_.board.turn_is_black == 1);
         game_.my_turn = (black_to_play && game_.my_color == 1) ||
                         (!black_to_play && game_.my_color == 0);
+
+        // Initialise score-graph / mark storage
+        move_scores_.resize(game_.history.size(), FLT_MAX);
+        move_marked_.resize(game_.history.size(), false);
+        bg_analysis_next_  = 0;
+        bg_analysis_depth_ = -1;
+        bg_analysis_busy_  = false;
 
         state_ = AppState::PLAYING;
         set_status(game_.my_turn ? "YOUR TURN" : "WAITING...");
@@ -1629,7 +2018,7 @@ Renderer::DrawState App::make_ds() {
         /* chain_mode      */ chain_mode_,
         /* free_mode       */ false,
         /* active_board_size */ active_bs,
-        /* show_help       */ false,
+        /* show_help       */ show_help_,
         /* catalog         */ catalog_,
         /* black_name      */ bname,
         /* white_name      */ wname,
@@ -1655,7 +2044,7 @@ Renderer::DrawState App::make_ds() {
         /* sgf_game_index  */ 0,
         /* analysis_num    */ nullptr,
         /* analysis_col    */ nullptr,
-        /* quit_confirm    */ false,
+        /* quit_confirm    */ quit_confirm_,
         /* box_sel_pts     */ nullptr,
         /* box_sel_count   */ 0,
         /* box_drag_active */ false,
@@ -1686,8 +2075,12 @@ Renderer::DrawState App::make_ds() {
         /* live_black_period_secs */ playing ? game_.black_period_secs : -1,
         /* live_white_period_secs */ playing ? game_.white_period_secs : -1,
         /* live_status     */ live ? status_cstr : nullptr,
-        /* live_dead_stones     */ (state_ == AppState::STONE_REMOVAL) ? game_.dead_stones : nullptr,
-        /* live_ownership       */ (state_ == AppState::STONE_REMOVAL) ? game_.ownership   : nullptr,
+        /* live_dead_stones     */ (state_ == AppState::STONE_REMOVAL ||
+                                    (state_ == AppState::GAME_OVER && local_result_pending_))
+                                       ? game_.dead_stones : nullptr,
+        /* live_ownership       */ (state_ == AppState::STONE_REMOVAL ||
+                                    (state_ == AppState::GAME_OVER && local_result_pending_))
+                                       ? game_.ownership   : nullptr,
         /* live_in_history      */ in_history,
         /* live_suggestions     */ (state_ == AppState::GAME_OVER && kata_suggestion_count_ > 0)
                                        ? kata_suggestions_ : nullptr,
@@ -1725,6 +2118,11 @@ Renderer::DrawState App::make_ds() {
         /* live_analysis_tree       */ analysis_tree_render_.empty() ? nullptr : analysis_tree_render_.data(),
         /* live_analysis_tree_count */ (int)analysis_tree_render_.size(),
         /* live_analysis_tree_cur_depth */ analysis_cur_ ? analysis_cur_->depth : 0,
+        // Score graph
+        /* live_score_graph     */ (state_ == AppState::GAME_OVER && !move_scores_.empty())
+                                       ? move_scores_.data() : nullptr,
+        /* live_score_graph_len */ (state_ == AppState::GAME_OVER) ? (int)move_scores_.size() : 0,
+        /* live_score_graph_cur */ analysis_cur_ ? analysis_cur_->depth : 0,
     };
 }
 
@@ -1810,9 +2208,36 @@ void App::event_loop() {
                     NetMsg msg;
                     while (net_.poll_msg(msg))
                         handle_net_msg(msg);
-                    // KataGo results — poll both processes
+                    // KataGo GTP move (local game)
+                    if (is_local_game_ && state_ == AppState::PLAYING) {
+                        int gtp_row, gtp_col;
+                        if (kata_gtp_.poll_genmove(gtp_row, gtp_col))
+                            handle_katago_gtp_move(gtp_row, gtp_col);
+                    }
+                    // GTP final_score + final_status_list dead (local stone removal)
+                    if (is_local_game_ && state_ == AppState::STONE_REMOVAL) {
+                        std::string fscore;
+                        int dead_rows[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
+                        int dead_cols[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
+                        int dead_count = 0;
+                        if (kata_gtp_.poll_final_status(fscore, dead_rows, dead_cols, dead_count)) {
+                            memset(game_.dead_stones, 0, sizeof(game_.dead_stones));
+                            for (int i = 0; i < dead_count; i++)
+                                game_.dead_stones[dead_rows[i]][dead_cols[i]] = true;
+                            local_game_score_ = fscore;
+                            // Now query territory with dead stones excluded so that
+                            // the colored squares inside dead groups are correct.
+                            if (kata_for(game_.board_size).running())
+                                kata_for(game_.board_size).query_ownership(
+                                    game_.board.board, game_.board_size,
+                                    game_.dead_stones, 7.5f, 100);
+                            // Status updates to "PRESS A" after ownership arrives (below).
+                            draw();
+                        }
+                    }
+                    // KataGo analysis results — poll both processes
                     for (KatagoProc* kp : { &kata_, &kata_9_ }) {
-                        // Territory result (stone removal phase)
+                        // Territory result (stone removal phase) — ownership fills color squares
                         if (state_ == AppState::STONE_REMOVAL) {
                             int kata_own[MAX_BOARD_SIZE][MAX_BOARD_SIZE];
                             int bs = 0;
@@ -1820,24 +2245,44 @@ void App::event_loop() {
                                 for (int r = 0; r < bs; r++)
                                     for (int f = 0; f < bs; f++)
                                         game_.ownership[r][f] = kata_own[r][f];
+                                // Territory is now ready; show the score + prompt
+                                if (is_local_game_ && !local_game_score_.empty())
+                                    set_status(local_game_score_ + "  —  PRESS A FOR ANALYSIS");
                                 draw();
                             }
                         }
-                        // Move suggestions (history review)
+                        // Move suggestions / background scoring
                         {
                             int count = 0;
                             float sl = FLT_MAX;
                             if (kp->poll_moves(kata_suggestions_, count, sl)) {
-                                kata_score_lead_ = sl;
-                                // Filter out illegal suggestions (ko, suicide, occupied)
-                                kata_suggestion_count_ = 0;
-                                for (int i = 0; i < count; i++) {
-                                    int sr = kata_suggestions_[i].row, sf = kata_suggestions_[i].col;
-                                    if (sr < 0 || sf < 0 ||
-                                        is_legal_analysis_move(sf, sr))
-                                        kata_suggestions_[kata_suggestion_count_++] = kata_suggestions_[i];
+                                if (bg_analysis_busy_) {
+                                    // Background scoring result — store in the graph array
+                                    if (sl != FLT_MAX && bg_analysis_depth_ >= 0 &&
+                                        bg_analysis_depth_ < (int)move_scores_.size())
+                                        move_scores_[bg_analysis_depth_] = sl;
+                                    bg_analysis_busy_ = false;
+                                    if (state_ == AppState::GAME_OVER) draw();
+                                } else {
+                                    fg_kata_pending_ = false;
+                                    kata_score_lead_ = sl;
+                                    // Persist score in the current analysis node and graph
+                                    if (analysis_cur_ && sl != FLT_MAX) {
+                                        analysis_cur_->score_lead = sl;
+                                        int d = analysis_cur_->depth;
+                                        if (d < (int)move_scores_.size())
+                                            move_scores_[d] = sl;
+                                    }
+                                    // Filter out illegal suggestions (ko, suicide, occupied)
+                                    kata_suggestion_count_ = 0;
+                                    for (int i = 0; i < count; i++) {
+                                        int sr = kata_suggestions_[i].row, sf = kata_suggestions_[i].col;
+                                        if (sr < 0 || sf < 0 ||
+                                            is_legal_analysis_move(sf, sr))
+                                            kata_suggestions_[kata_suggestion_count_++] = kata_suggestions_[i];
+                                    }
+                                    if (state_ == AppState::GAME_OVER) draw();
                                 }
-                                if (state_ == AppState::GAME_OVER) draw();
                             }
                         }
                     }
@@ -1904,8 +2349,17 @@ void App::event_loop() {
                             net_.start(cred_username_, cred_password_);
                         }
                         draw();
-                    } else if (k == SDLK_ESCAPE || k == SDLK_q) {
-                        quit = true;
+                    } else if (k == SDLK_q) {
+                        if (quit_confirm_) { quit = true; }
+                        else { quit_confirm_ = true; draw(); }
+                    } else if (k == SDLK_ESCAPE) {
+                        if (quit_confirm_) { quit_confirm_ = false; draw(); }
+                        else { show_help_ = !show_help_; draw(); }
+                    }
+                    // Any other key cancels quit confirm without acting
+                    else if (quit_confirm_) {
+                        quit_confirm_ = false;
+                        draw();
                     }
                     // Keyboard shortcut mirrors for controller buttons:
                     else if (k == SDLK_RETURN) {
@@ -1927,6 +2381,8 @@ void App::event_loop() {
                         handle_controller_button(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
                     } else if (k == SDLK_RIGHT) {
                         handle_controller_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+                    } else if (k == SDLK_TAB) {
+                        handle_controller_button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
                     }
 
                 } else if (e.type == SDL_WINDOWEVENT) {
@@ -1962,6 +2418,18 @@ void App::event_loop() {
             accum(js_left_x_, js_acc_x_);
             accum(js_left_y_, js_acc_y_);
             int dx = (int)js_acc_x_, dy = (int)js_acc_y_;
+            // Diagonal assist: when one axis fires a full step, pull the other along
+            // if it's already past halfway — gives natural diagonal movement.
+            bool x_active = std::abs(js_left_x_) > DEAD;
+            bool y_active = std::abs(js_left_y_) > DEAD;
+            if (dx != 0 && y_active && dy == 0 && std::abs(js_acc_y_) >= 0.5f) {
+                dy = (js_acc_y_ >= 0.f) ? 1 : -1;
+                js_acc_y_ -= (float)dy;
+            }
+            if (dy != 0 && x_active && dx == 0 && std::abs(js_acc_x_) >= 0.5f) {
+                dx = (js_acc_x_ >= 0.f) ? 1 : -1;
+                js_acc_x_ -= (float)dx;
+            }
             if (dx || dy) {
                 int n = game_.board_size - 1;
                 game_.cursor_f = std::max(0, std::min(n, game_.cursor_f + dx));
@@ -1991,10 +2459,34 @@ void App::event_loop() {
         // Fire deferred KataGo query once the user has settled on a position
         if (kata_query_after_ > 0 && now >= kata_query_after_) {
             kata_query_after_ = 0;
-            if (state_ == AppState::GAME_OVER && analysis_cur_ && kata_analysis_enabled_)
+            if (state_ == AppState::GAME_OVER && analysis_cur_ && kata_analysis_enabled_) {
+                bg_analysis_busy_ = false;  // cancel any in-flight background query
+                fg_kata_pending_  = true;
                 kata_for(game_.board_size).query_moves(
                     analysis_cur_->board.board, game_.board_size,
                     analysis_cur_->board.turn_is_black == 1);
+            }
+        }
+
+        // Background scoring — fill move_scores_[] with low-visit KataGo queries.
+        // Runs during PLAYING (so the graph is mostly ready at game-over) and during
+        // GAME_OVER (fills in positions the user hasn't explicitly navigated to yet).
+        // Guards: no foreground query in-flight, no deferred query pending.
+        if ((state_ == AppState::PLAYING || state_ == AppState::GAME_OVER) &&
+            !bg_analysis_busy_ && !fg_kata_pending_ && kata_query_after_ == 0 &&
+            kata_for(game_.board_size).running()) {
+            // Skip depths that already have a score
+            while (bg_analysis_next_ < (int)move_scores_.size() &&
+                   move_scores_[bg_analysis_next_] != FLT_MAX)
+                bg_analysis_next_++;
+            if (bg_analysis_next_ < (int)move_scores_.size() &&
+                bg_analysis_next_ < (int)game_.history.size()) {
+                const GameState& hs = game_.history[bg_analysis_next_];
+                kata_for(game_.board_size).query_moves(
+                    hs.board, game_.board_size, hs.turn_is_black == 1, 7.5f, 50);
+                bg_analysis_depth_ = bg_analysis_next_++;
+                bg_analysis_busy_  = true;
+            }
         }
 
         // Tick clock display every second even with no events
@@ -2019,9 +2511,13 @@ int App::run() {
     }
 
     std::string username, password, jwt;
-    std::string kata_exe, kata_model, kata_cfg, kata_model_9x9;
-    load_config(username, password, jwt, kata_exe, kata_model, kata_cfg, kata_model_9x9);
-    my_username_ = username;
+    std::string kata_exe, kata_model, kata_cfg, kata_model_9x9, kata_human_model;
+    load_config(username, password, jwt, kata_exe, kata_model, kata_cfg,
+                kata_model_9x9, kata_human_model);
+    my_username_       = username;
+    kata_exe_          = kata_exe;
+    kata_model_        = kata_model;
+    kata_human_model_  = kata_human_model;
     if (!kata_exe.empty() && !kata_model.empty() && !kata_cfg.empty())
         kata_.start(kata_exe, kata_model, kata_cfg);
     if (!kata_exe.empty() && !kata_model_9x9.empty() && !kata_cfg.empty())

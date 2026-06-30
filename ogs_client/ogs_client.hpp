@@ -74,8 +74,11 @@ struct NetMsg {
 struct MatchPrefs {
     // Board sizes — index 0=9x9, 1=13x13, 2=19x19
     bool sizes[3]  = {true, false, false};
-    // Speeds    — index 0=blitz, 1=live, 2=rapid
+    // Speeds    — index 0=blitz, 1=live, 2=rapid  (OGS mode only)
     bool speeds[3] = {false, true, false};
+    // Local play vs KataGo human SL model
+    bool katago_mode = false;
+    int  katago_str  = 2;   // index into strength table (0=20k … 6=5d)
 };
 
 // ── Outbound: main thread → network thread ─────────────────────────────────

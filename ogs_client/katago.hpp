@@ -27,7 +27,8 @@ public:
     // Send an ownership query for the current board position.
     // dead_stones[r][f] = true means that stone should be treated as removed.
     void query_ownership(const char  board[][MAX_BOARD_SIZE], int board_size,
-                         const bool  dead[][MAX_BOARD_SIZE],  float komi = 7.5f);
+                         const bool  dead[][MAX_BOARD_SIZE],  float komi = 7.5f,
+                         int max_visits = 1);
 
     // Returns true if a fresh result is available, and copies it to out[][].
     // Values: +1 = black territory, -1 = white territory, 0 = neutral.
@@ -69,6 +70,70 @@ private:
     int  pending_response_id_                        = 0;
     int  pending_query_bs_                           = 19;  // board size of last query
 
+    void write_line(const std::string& s);
+    void reader_loop();
+};
+
+// ── GTP subprocess for local play vs the human SL model ──────────────────────
+
+// Manages a KataGo GTP subprocess for local games.
+// poll_genmove returns: row/col >= 0 = normal move; -1/-1 = PASS; -2/-2 = resign.
+class KataGoGtp {
+public:
+    KataGoGtp()  = default;
+    ~KataGoGtp() { stop(); }
+
+    // Write a temp config then spawn:
+    //   katago.exe gtp -model <model> -human-model <human_model> -config <temp_cfg>
+    // profile: e.g. "preaz_10k". board_size and komi are sent immediately after spawn.
+    bool start(const std::string& exe, const std::string& model,
+               const std::string& human_model, const std::string& profile,
+               int board_size, float komi = 7.5f);
+    void stop();
+    bool running() const { return running_.load(); }
+
+    // Send "play B/W <coord>" (row=-1/col=-1 → "pass").  color: 1=Black, 0=White.
+    void send_play(int color, int row, int col, int board_size);
+
+    // Send "genmove B/W".
+    void request_genmove(int color);
+
+    // Returns true if a move is ready.  row/col: >=0 = move; -1/-1 = pass; -2/-2 = resign.
+    bool poll_genmove(int& row, int& col);
+
+    // Send "final_score" then "final_status_list dead" to the GTP process.
+    // Call once after the game ends; poll_final_status() returns when both reply.
+    void request_final_status();
+
+    // Returns true when both replies have arrived.
+    // score_out: KataGo score string, e.g. "B+5.5".
+    // dead_rows[]/dead_cols[]: up to MAX_BOARD_SIZE*MAX_BOARD_SIZE dead stone positions.
+    bool poll_final_status(std::string& score_out,
+                           int dead_rows[], int dead_cols[], int& dead_count_out);
+
+private:
+#ifdef _WIN32
+    HANDLE h_write_ = NULL;
+    HANDLE h_read_  = NULL;
+    PROCESS_INFORMATION proc_{};
+#endif
+    std::atomic<bool> running_{ false };
+    std::thread reader_;
+    std::mutex mu_;
+    bool move_ready_ = false;
+    int  move_row_   = 0;
+    int  move_col_   = 0;
+    int  board_size_ = 19;
+    std::string temp_cfg_;
+    // final_score / final_status_list dead state
+    int         final_pending_    = 0;  // 0=idle, 1=awaiting score, 2=awaiting dead list
+    bool        final_ready_      = false;
+    std::string final_score_str_;
+    int         final_dead_count_ = 0;
+    int         final_dead_rows_[MAX_BOARD_SIZE * MAX_BOARD_SIZE] = {};
+    int         final_dead_cols_[MAX_BOARD_SIZE * MAX_BOARD_SIZE] = {};
+
+    static std::string make_temp_cfg(const std::string& profile);
     void write_line(const std::string& s);
     void reader_loop();
 };

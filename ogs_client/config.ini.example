@@ -8,5 +8,10 @@ password=your-ogs-password
 # Optional: KataGo analysis engine. All three fields required to enable analysis.
 # katago_exe=C:\path\to\katago.exe
 # katago_model=C:\path\to\model.bin.gz
-# katago_config=C:\path\to\gtp_example.cfg
+# katago_config=C:\path\to\analysis_example.cfg
 # katago_model_9x9=C:\path\to\model_9x9.bin.gz
+
+# Optional: path to the human SL model (humanv0.bin.gz) to enable "VS KATAGO"
+# local games at adjustable strength (20k to 5d).
+# Download from: https://github.com/lightvector/KataGo/releases/tag/v1.15.0
+# katago_human_model=C:\path\to\humanv0.bin.gz

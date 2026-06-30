@@ -20,6 +20,7 @@ struct CatalogEntry {
     std::string player_black;      // PB name — if set, rendered as three yellow/white columns
     std::string player_white;      // PW name
     std::string date;              // DT date string (e.g. "2024-01-15") — shown as 4th column
+    uint64_t    mtime = 0;         // file last-write time (OS ticks) — tiebreaker within same date
 };
 
 class Catalog {

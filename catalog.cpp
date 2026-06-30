@@ -189,7 +189,10 @@ bool Catalog::load_entries() {
         if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             dirs_vec.push_back({data.cFileName, "", true, 1});
         } else if (has_sgf_ext(data.cFileName)) {
-            files_vec.push_back({data.cFileName, "", false, 0});
+            CatalogEntry e; e.name = data.cFileName; e.type = 0;
+            e.mtime = ((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32)
+                    |  (uint64_t)data.ftLastWriteTime.dwLowDateTime;
+            files_vec.push_back(std::move(e));
         }
     } while (FindNextFileA(h, &data));
     FindClose(h);
@@ -209,21 +212,55 @@ bool Catalog::load_entries() {
             struct stat st{};
             if (stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) is_dir = true;
         }
-        if (is_dir) dirs_vec.push_back({ent->d_name, "", true, 1});
-        else if (has_sgf_ext(ent->d_name)) files_vec.push_back({ent->d_name, "", false, 0});
+        if (is_dir) {
+            dirs_vec.push_back({ent->d_name, "", true, 1});
+        } else if (has_sgf_ext(ent->d_name)) {
+            CatalogEntry e; e.name = ent->d_name; e.type = 0;
+            struct stat st2{};
+            if (stat(full.c_str(), &st2) == 0) e.mtime = (uint64_t)st2.st_mtime;
+            files_vec.push_back(std::move(e));
+        }
     }
     closedir(d);
 #endif
 
-    auto cmp = [](const CatalogEntry& a, const CatalogEntry& b) {
+    // Sort dirs A→Z by name.
+    std::sort(dirs_vec.begin(), dirs_vec.end(), [](const CatalogEntry& a, const CatalogEntry& b) {
 #ifdef _WIN32
         return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
 #else
         return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
 #endif
-    };
-    std::sort(dirs_vec.begin(),  dirs_vec.end(),  cmp);
-    std::sort(files_vec.begin(), files_vec.end(), cmp);
+    });
+
+    // Populate date + display fields from the index before sorting files,
+    // so we can sort by DT[] date (which may differ from the filename date).
+    for (auto& e : files_vec) {
+        std::string rel = current_subdir.empty() ? e.name : join_path(current_subdir, e.name);
+        const GameIndexEntry* ge = game_index.find(rel);
+        if (ge) {
+            e.display_name = make_display_name(e.name, ge->black, ge->white);
+            e.player_black = ge->black;
+            e.player_white = ge->white;
+            e.date         = ge->date;
+            e.name_loaded  = true;
+        } else {
+            e.display_name = make_display_name(e.name, "", "");
+            e.name_loaded  = false;
+        }
+    }
+    // Sort files newest first: by DT[] date, then by file mtime, then by filename.
+    std::sort(files_vec.begin(), files_vec.end(), [](const CatalogEntry& a, const CatalogEntry& b) {
+        if (!a.date.empty() || !b.date.empty()) {
+            if (a.date != b.date) return a.date > b.date;
+        }
+        if (a.mtime != b.mtime) return a.mtime > b.mtime;
+#ifdef _WIN32
+        return _stricmp(a.name.c_str(), b.name.c_str()) > 0;
+#else
+        return strcasecmp(a.name.c_str(), b.name.c_str()) > 0;
+#endif
+    });
 
     // Parent entry first when inside a subdirectory.
     // At root level, offer the virtual [BY YEAR] browser.
@@ -243,20 +280,6 @@ bool Catalog::load_entries() {
         entries.push_back(e);
     }
     for (auto& e : files_vec) {
-        // Build relative path from base_dir to look up in the game index
-        std::string rel = current_subdir.empty() ? e.name : join_path(current_subdir, e.name);
-        const GameIndexEntry* ge = game_index.find(rel);
-        if (ge) {
-            e.display_name = make_display_name(e.name, ge->black, ge->white);
-            e.player_black = ge->black;
-            e.player_white = ge->white;
-            e.date         = ge->date;
-            e.name_loaded  = true;
-        } else {
-            // Fall back to lazy parsing via ensure_names_loaded()
-            e.display_name = make_display_name(e.name, "", "");
-            e.name_loaded  = false;
-        }
         entries.push_back(e);
     }
     return true;
@@ -338,10 +361,10 @@ void Catalog::load_player_games(const std::string& player) {
             matches.push_back(ge);
     }
 
-    // Sort by date, then opponent name
+    // Sort by date descending (newest first), then opponent name ascending
     std::sort(matches.begin(), matches.end(),
               [&player](const GameIndexEntry* a, const GameIndexEntry* b) {
-                  if (a->date != b->date) return a->date < b->date;
+                  if (a->date != b->date) return a->date > b->date;
                   const std::string& oa = (a->black == player) ? a->white : a->black;
                   const std::string& ob = (b->black == player) ? b->white : b->black;
                   return oa < ob;
@@ -425,10 +448,10 @@ void Catalog::load_year_games(const std::string& year) {
         if (yr == year) matches.push_back(ge);
     }
 
-    // Sort by date then by black player name
+    // Sort by date descending (newest first), then by black player name
     std::sort(matches.begin(), matches.end(),
               [](const GameIndexEntry* a, const GameIndexEntry* b) {
-                  if (a->date != b->date) return a->date < b->date;
+                  if (a->date != b->date) return a->date > b->date;
                   return a->black < b->black;
               });
 

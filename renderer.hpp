@@ -15,6 +15,7 @@ struct AnalysisTreeRenderNode {
     int  parent_depth = -1;  // -1 for root
     int  parent_col   = 0;
     int  move_color   = -1;  // 1=black stone, 0=white stone, -1=root (no move)
+    bool marked       = false; // flagged for special analysis attention
 };
 
 class Renderer {
@@ -118,14 +119,20 @@ public:
         const AnalysisTreeRenderNode* live_analysis_tree          = nullptr;
         int                           live_analysis_tree_count     = 0;
         int                           live_analysis_tree_cur_depth = 0;
+        // Score graph — KataGo score_lead (Black's perspective) per main-line depth
+        const float* live_score_graph     = nullptr;   // FLT_MAX = no data for that depth
+        int          live_score_graph_len = 0;
+        int          live_score_graph_cur = 0;          // current depth → yellow scan line
     };
 
     // Match search settings menu (live client only)
     struct MatchMenu {
-        int  focus_col   = 0;      // 0=board size column, 1=time control column
-        int  focus_row   = 0;      // row within focused column
-        bool size_sel[3] = {};     // 9x9, 13x13, 19x19
-        bool speed_sel[3]= {};     // blitz, live, rapid
+        int  focus_col    = 0;     // 0=board size, 1=time control or strength
+        int  focus_row    = 0;     // row within focused column
+        bool size_sel[3]  = {};    // 9x9, 13x13, 19x19
+        bool speed_sel[3] = {};    // blitz, live, rapid  (OGS mode)
+        bool katago_mode  = false; // true = play vs KataGo locally
+        int  katago_str   = 2;     // strength index 0-6 (default 10k)
     };
     void draw_match_menu(const MatchMenu& menu);
 
@@ -154,7 +161,7 @@ private:
     void render_territory_overlay(const BoardView& view, const DrawState& ds);
     void render_result_message(const BoardView& view, const DrawState& ds);
     void render_game_date(const BoardView& view, const std::string& date);
-    void render_help_overlay(const BoardView& view, bool show_help);
+    void render_help_overlay(const BoardView& view, bool show_help, bool live_mode = false);
     void render_catalog_overlay(const BoardView& view, const DrawState& ds);
     void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE], int board_size = BOARD_SIZE);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
@@ -162,6 +169,7 @@ private:
     void render_box_selection(const BoardView& view, const DrawState& ds);
     void render_flash_message(const BoardView& view, const DrawState& ds);
     void render_analysis_tree(const BoardView& view, const DrawState& ds);
+    void render_score_graph(const BoardView& view, const DrawState& ds);
     void render_save_input(const BoardView& view, const DrawState& ds);
     void render_game_comment(const BoardView& view, const DrawState& ds);
     void draw_stone_at_px(int cx, int cy, int radius, int is_black, Uint8 alpha);
