@@ -24,6 +24,9 @@
 #include <memory>
 #include <algorithm>
 #include <thread>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 // Registered once in main(); OgsNet reads this to push SDL events.
 Uint32 g_net_event_type = 0;
@@ -1334,8 +1337,13 @@ void App::save_live_game() {
     // Locate games/ directory (same two-path probe as demo-game loader)
     std::string games_dir = exe_dir() + "games";
     auto is_dir = [](const std::string& p) {
+#ifdef _WIN32
         DWORD a = GetFileAttributesA(p.c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+        struct stat st;
+        return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
     };
     if (!is_dir(games_dir)) games_dir = exe_dir() + "../games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
@@ -1343,8 +1351,13 @@ void App::save_live_game() {
     std::string my_name  = (game_.my_color == 1) ? game_.black_name : game_.white_name;
     std::string opp_name = (game_.my_color == 1) ? game_.white_name : game_.black_name;
     std::string player_dir = Catalog::join_path(games_dir, my_name);
+#ifdef _WIN32
     CreateDirectoryA(games_dir.c_str(), nullptr);
     CreateDirectoryA(player_dir.c_str(), nullptr);
+#else
+    mkdir(games_dir.c_str(), 0755);
+    mkdir(player_dir.c_str(), 0755);
+#endif
 
     time_t t = time(nullptr);
     char date[16];
@@ -1575,8 +1588,13 @@ void App::open_game_catalog() {
     // Locate games/<username>/ — same two-path probe as demo loader
     std::string gdir = exe_dir() + "games";
     auto is_dir = [](const std::string& p) {
+#ifdef _WIN32
         DWORD a = GetFileAttributesA(p.c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+        struct stat st;
+        return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
     };
     if (!is_dir(gdir)) gdir = exe_dir() + "../games";
 
