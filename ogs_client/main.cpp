@@ -2584,7 +2584,10 @@ void App::pz_start() {
     game_.white_name = "WHITE";
     game_.black_rank = game_.white_rank = "";
     game_.black_secs = game_.white_secs = -1;
-    game_.cursor_r = game_.cursor_f = pz_.width / 2;
+    // Keep the cursor where it was (clamped to this board) — recentering on every
+    // puzzle jump/retry forces a re-approach when grinding through a collection.
+    game_.cursor_r = std::max(0, std::min(pz_.width - 1, game_.cursor_r));
+    game_.cursor_f = std::max(0, std::min(pz_.width - 1, game_.cursor_f));
     auto apply_stones = [&](const std::string& coords, char stone) {
         for (size_t i = 0; i + 1 < coords.size(); i += 2) {
             int f = coords[i]     - 'a';
