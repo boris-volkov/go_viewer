@@ -76,3 +76,4 @@ KataGo-master/
 
 # Per-user runtime state
 adaptive_level.txt
+solved_puzzles.txt

@@ -595,6 +595,12 @@ private:
     int  pz_index_  = 0;                                // browser cursor (per view)
     int  pz_list_pos_ = -1;                             // playing puzzle's index in pz_list_
 
+    // Puzzles solved across sessions (ids; persisted to solved_puzzles.txt) —
+    // shown as [X] checkmarks in the puzzle list.
+    std::set<int> pz_solved_ids_;
+    void load_solved_puzzles();
+    void save_solved_puzzles();
+
     OgsPuzzle             pz_;                 // puzzle being solved
     const PuzzleMoveNode* pz_node_  = nullptr; // current position in the solution tree
     bool        pz_done_   = false;            // solved or failed — judging over
@@ -2500,6 +2506,23 @@ void App::start_free_analysis() {
 
 // ── OGS puzzle browser / player ───────────────────────────────────────────────
 
+void App::load_solved_puzzles() {
+    FILE* f = fopen((exe_dir() + "solved_puzzles.txt").c_str(), "r");
+    if (!f) return;
+    int id;
+    while (fscanf(f, "%d", &id) == 1)
+        if (id > 0) pz_solved_ids_.insert(id);
+    fclose(f);
+}
+
+void App::save_solved_puzzles() {
+    FILE* f = fopen((exe_dir() + "solved_puzzles.txt").c_str(), "w");
+    if (!f) return;
+    for (int id : pz_solved_ids_)
+        fprintf(f, "%d\n", id);
+    fclose(f);
+}
+
 // OGS rank number → display string: 1..29 = 29k..1k, 30+ = 1d+. 0 = unrated.
 static std::string ogs_rank_str(int r) {
     if (r <= 0)  return "?";
@@ -2680,6 +2703,8 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
         pz_done_   = true;
         pz_solved_ = true;
         pz_banner_ = "SOLVED!";
+        if (pz_.id > 0 && pz_solved_ids_.insert(pz_.id).second)
+            save_solved_puzzles();   // first solve of this puzzle — remember it
         set_status(pz_more_lines_
                        ? GLYPH_PS_CIRCLE ": MORE RESISTANCE LINES REMAIN"
                        : "R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST");
@@ -2827,9 +2852,13 @@ void App::draw_puzzle_browser() {
         }
         footer = GLYPH_PS_CROSS " OPEN   LEFT/RIGHT: PAGE   " GLYPH_PS_CIRCLE " LOBBY";
     } else {
-        title = "PUZZLES — " + pz_list_title_;
+        int solved_here = 0;
         for (const auto& p : pz_list_)
-            lines.push_back(p.second);
+            if (pz_solved_ids_.count(p.first)) solved_here++;
+        title = "PUZZLES — " + pz_list_title_ + "  (" + std::to_string(solved_here)
+              + "/" + std::to_string((int)pz_list_.size()) + " SOLVED)";
+        for (const auto& p : pz_list_)
+            lines.push_back((pz_solved_ids_.count(p.first) ? "[X] " : "[ ] ") + p.second);
         footer = GLYPH_PS_CROSS " SOLVE   " GLYPH_PS_CIRCLE " COLLECTIONS";
     }
     if (pz_loading_)
@@ -4148,7 +4177,8 @@ int App::run() {
     kata_exe_          = kata_exe;
     kata_model_        = kata_model;
     kata_human_model_  = kata_human_model;
-    load_adaptive();   // restore the adaptive KataGo strength from previous sessions
+    load_adaptive();        // restore the adaptive KataGo strength from previous sessions
+    load_solved_puzzles();  // restore the solved-puzzle checklist
     if (!kata_exe.empty() && !kata_model.empty() && !kata_cfg.empty())
         kata_.start(kata_exe, kata_model, kata_cfg);
     if (!kata_exe.empty() && !kata_model_9x9.empty() && !kata_cfg.empty())
