@@ -2712,11 +2712,14 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
             game_.board.board[reply->y][reply->x] == 0) {
             int opp_black = (game_.board.turn_is_black == 1);
             game_.board.save_snapshot();
-            game_.board.place_stone(reply->y, reply->x, opp_black);
-            game_.board.turn_is_black = opp_black ? 0 : 1;
-            game_.history.push_back(game_.board);
-            last_move_r_ = reply->y;
-            last_move_f_ = reply->x;
+            // Only mutate turn/history if the placement actually happened —
+            // a refused move must never flip whose turn it is
+            if (game_.board.place_stone(reply->y, reply->x, opp_black)) {
+                game_.board.turn_is_black = opp_black ? 0 : 1;
+                game_.history.push_back(game_.board);
+                last_move_r_ = reply->y;
+                last_move_f_ = reply->x;
+            }
         }
         pz_advance(reply, false);
         return;
@@ -2734,8 +2737,33 @@ void App::pz_place(int r, int f) {
     if (r < 0 || f < 0 || r >= game_.board_size || f >= game_.board_size) return;
     if (game_.board.board[r][f] != 0) return;
 
-    // Place the stone (captures apply) so the player sees their move either way
     int is_black = (game_.board.turn_is_black == 1);
+
+    // Legality first — an illegal move must change NOTHING (a rejected placement
+    // previously still flipped the turn, silently swapping colors for the next click).
+    if (GoRules::would_be_suicide(game_.board.board, r, f, is_black, game_.board_size)) {
+        ko_flash_until_ = SDL_GetTicks() + 400;   // red cursor flash, like live play
+        draw();
+        return;
+    }
+    // Simple ko: simulated result must not recreate the position before the last move
+    if (game_.history.size() >= 2) {
+        char test[MAX_BOARD_SIZE][MAX_BOARD_SIZE];
+        memcpy(test, game_.board.board, sizeof(test));
+        test[r][f] = is_black ? 1 : 2;
+        int cap_r[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
+        int cap_f[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
+        int cap_count = 0;
+        GoRules::find_captured(test, is_black, r, f, cap_r, cap_f, cap_count, game_.board_size);
+        for (int i = 0; i < cap_count; i++) test[cap_r[i]][cap_f[i]] = 0;
+        if (memcmp(test, game_.history[game_.history.size() - 2].board, sizeof(test)) == 0) {
+            ko_flash_until_ = SDL_GetTicks() + 400;
+            draw();
+            return;
+        }
+    }
+
+    // Place the stone (captures apply) so the player sees their move either way
     game_.board.save_snapshot();
     game_.board.place_stone(r, f, is_black);
     game_.board.turn_is_black = is_black ? 0 : 1;
