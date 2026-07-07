@@ -6,6 +6,17 @@
 #include <cfloat>
 #include <string>
 
+// PlayStation face-button glyphs: draw_text() renders these placeholder characters
+// as the button shapes (see font_glyphs in renderer.cpp). Use in control-hint strings
+// via literal concatenation, e.g.  GLYPH_PS_CROSS "=SELECT".
+#define GLYPH_PS_CROSS    "~"
+#define GLYPH_PS_CIRCLE   "@"
+#define GLYPH_PS_SQUARE   "#"
+#define GLYPH_PS_TRIANGLE "^"
+
+// A letter mark ("A", "B", …) placed on a board point during analysis.
+struct BoardLabel { int r = 0; int f = 0; char ch = 'A'; };
+
 // Describes one node in the analysis tree for rendering (produced by ogs_client,
 // consumed by render_analysis_tree — a plain POD so renderer.hpp stays dependency-free).
 struct AnalysisTreeRenderNode {
@@ -76,6 +87,9 @@ public:
         int   box_drag_r2 = 0, box_drag_f2 = 0;  // drag end (current mouse)
         // Catalog thumbnails: opening (first N moves) and final position
         bool        catalog_thumb_valid       = false;
+        bool        catalog_thumb_single      = false;  // opening == final (e.g. a
+                                                        // saved position) — draw one
+                                                        // larger board instead of two
         const char (*catalog_thumb_open) [BOARD_SIZE] = nullptr;
         const char (*catalog_thumb_final)[BOARD_SIZE] = nullptr;
         int         catalog_thumb_board_size  = BOARD_SIZE;
@@ -98,6 +112,8 @@ public:
         int         live_white_periods     = -1;
         int         live_black_period_secs = -1;
         int         live_white_period_secs = -1;
+        bool        live_black_in_byo      = false;  // main time gone, byo-yomi period counting
+        bool        live_white_in_byo      = false;
         const char* live_status            = nullptr;
         // Stone removal overlay (STONE_REMOVAL phase only)
         const bool (*live_dead_stones)[MAX_BOARD_SIZE] = nullptr;  // greyed-out stones
@@ -123,16 +139,39 @@ public:
         const float* live_score_graph     = nullptr;   // FLT_MAX = no data for that depth
         int          live_score_graph_len = 0;
         int          live_score_graph_cur = 0;          // current depth → yellow scan line
+        // Last-played stone — row/col highlight crosshair (-1 = none)
+        int          live_last_move_r = -1;
+        int          live_last_move_f = -1;
+        // Board-edge coordinate labels (toggled by RT during live play)
+        bool         live_show_coords = false;
+        // Letter labels placed with circle during analysis (per-position, live client)
+        const BoardLabel* live_labels      = nullptr;
+        int               live_label_count = 0;
+        // Big result banner (e.g. "W+42.5") drawn above the status line in double
+        // scale — local-game score screen ("result big, prompt normal")
+        const char*       live_result_banner = nullptr;
+        // Square stone mode: board stones render as beveled tiles instead of
+        // shaded circles (settings menu DISPLAY toggle; off = classic round)
+        bool              square_stones = false;
     };
 
-    // Match search settings menu (live client only)
+    // Match search settings menu (live client only) — also doubles as a general
+    // settings menu accessible mid-game (see `ingame`), for display toggles that
+    // don't belong in the network-facing MatchPrefs payload.
     struct MatchMenu {
-        int  focus_col    = 0;     // 0=board size, 1=time control or strength
+        int  focus_col    = 0;     // 0=board size, 1=time control or strength, 2=display
         int  focus_row    = 0;     // row within focused column
         bool size_sel[3]  = {};    // 9x9, 13x13, 19x19
-        bool speed_sel[3] = {};    // blitz, live, rapid  (OGS mode)
+        bool speed_sel[3] = {};    // fast/blitz, medium/rapid, slow/live  (OGS mode)
         bool katago_mode  = false; // true = play vs KataGo locally
-        int  katago_str   = 2;     // strength index 0-6 (default 10k)
+        int  katago_str   = 2;     // strength index 0-6 fixed ranks, 7 = adaptive (default 10k)
+        std::string adaptive_label; // display text for the adaptive row, e.g. "ADAPTIVE (8 KYU)"
+        bool show_coords_sel = false; // mirrors App::show_coords_ while the menu is open
+        bool analysis_sel    = false; // mirrors App::kata_analysis_enabled_ while the menu is open
+        bool chain_sel       = false; // mirrors App::chain_mode_ (visual links between chained stones)
+        bool square_sel      = false; // mirrors App::square_stones_ (tile-style stones)
+        bool ingame       = false; // opened mid-game — hide search/mode controls, board
+                                   // size/speed shown read-only for reference only
     };
     void draw_match_menu(const MatchMenu& menu);
 
@@ -165,6 +204,7 @@ private:
     void render_catalog_overlay(const BoardView& view, const DrawState& ds);
     void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE], int board_size = BOARD_SIZE);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
+    void render_board_coordinates(const BoardView& view, const DrawState& ds);
     void render_quit_confirm(const BoardView& view);
     void render_box_selection(const BoardView& view, const DrawState& ds);
     void render_flash_message(const BoardView& view, const DrawState& ds);
@@ -197,6 +237,7 @@ private:
     void render_board_content(const BoardView& view, const Overlay* overlay, const DrawState& ds);
     uint64_t compute_cache_hash(const DrawState& ds) const;
 
+    bool square_stones_ = false;   // mirrored from DrawState each draw_board call
     SDL_Texture* board_cache_ = nullptr;
     int          cache_w_     = 0;
     int          cache_h_     = 0;

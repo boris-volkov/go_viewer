@@ -72,3 +72,7 @@ go
 # Third-party reference repos (not part of this project)
 ogs_api-master/
 online-go.com-main/
+KataGo-master/
+
+# Per-user runtime state
+adaptive_level.txt

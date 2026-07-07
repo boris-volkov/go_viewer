@@ -12,6 +12,8 @@ struct GameIndexEntry {
     std::string white;      // PW[] player name
     std::string date;       // DT[] date string
     std::string result;     // RE[] result string
+    std::string black_rank; // BR[] rank string, e.g. "5k"
+    std::string white_rank; // WR[] rank string
 };
 
 // Flat-file persistent index of all SGF files under a directory tree.
@@ -77,7 +79,8 @@ private:
                             const std::vector<GameIndexEntry>& entries);
     static bool scan_sgf_header(const std::string& full_path,
                                 std::string& black, std::string& white,
-                                std::string& date,  std::string& result);
+                                std::string& date,  std::string& result,
+                                std::string& black_rank, std::string& white_rank);
     static bool list_sgf_recursive(const std::string& dir, const std::string& base,
                                    std::vector<std::string>& rel_paths);
     static int  count_sgf_files(const std::string& base_dir);

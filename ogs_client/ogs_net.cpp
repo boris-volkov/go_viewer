@@ -260,7 +260,11 @@ void OgsNet::cmd_find_match(const MatchPrefs& prefs) {
     match_uuid_ = make_uuid();
 
     static const char* size_strs[3]  = {"9x9", "13x13", "19x19"};
-    static const char* speed_strs[3] = {"blitz", "live", "rapid"};
+    // Real OGS speed values (goban's Speed type): "blitz" | "rapid" | "live" | "correspondence".
+    // We expose the 3 non-correspondence tiers as explicit fast/medium/slow buckets — this
+    // order must match MatchPrefs::speeds and renderer.cpp's speed_labels exactly (previously
+    // it didn't: the UI showed "RAPID" in the slot that actually sent "live", and vice versa).
+    static const char* speed_strs[3] = {"blitz", "rapid", "live"};
 
     json opts = json::array();
     for (int si = 0; si < 3; si++) {
@@ -323,30 +327,30 @@ void OgsNet::cmd_send_resign(int game_id) {
 }
 
 void OgsNet::cmd_accept_stones(int game_id) {
+    // Payload/event name per the real client (goban's OGSConnectivity.acceptRemovedStones):
+    // no player_id, no all_removed — just game_id/stones/strict_seki_mode on "game/removed_stones/accept".
     json payload = {
         {"game_id",          game_id},
-        {"player_id",        my_player_id},
         {"stones",           removed_stones_},
-        {"all_removed",      removed_stones_},
         {"strict_seki_mode", false}
     };
     std::string dump = payload.dump();
     net_log(("cmd_accept_stones: " + dump).c_str());
-    enqueue_event("game/removed_stones_accept", dump);
+    enqueue_event("game/removed_stones/accept", dump);
 }
 
 void OgsNet::cmd_accept_undo(int game_id, int move_number) {
     json payload = {{"game_id", game_id}, {"move_number", move_number}};
     std::string dump = payload.dump();
     net_log(("cmd_accept_undo: " + dump).c_str());
-    enqueue_event("game/undo", dump);
+    enqueue_event("game/undo/accept", dump);
 }
 
 void OgsNet::cmd_reject_undo(int game_id, int move_number) {
     json payload = {{"game_id", game_id}, {"move_number", move_number}};
     std::string dump = payload.dump();
     net_log(("cmd_reject_undo: " + dump).c_str());
-    enqueue_event("game/undo_cancel", dump);
+    enqueue_event("game/undo/cancel", dump);
 }
 
 bool OgsNet::poll_msg(NetMsg& out) {
@@ -613,7 +617,7 @@ void OgsNet::dispatch_sio(const std::string& msg) {
 
 // ── OGS event handlers ────────────────────────────────────────────────────────
 
-struct ClockInfo { int secs = -1; int periods = -1; int period_secs = -1; };
+struct ClockInfo { int secs = -1; int periods = -1; int period_secs = -1; bool in_byo = false; };
 
 static ClockInfo extract_clock(const json& time_obj) {
     if (time_obj.is_null()) return {};
@@ -621,7 +625,8 @@ static ClockInfo extract_clock(const json& time_obj) {
     // In byo-yomi OGS sends thinking_time = the full period duration (e.g. 30), not the
     // remaining time. period_time_left is the actual seconds left in the current period.
     // Prefer it so the countdown reflects reality rather than always starting from 30.
-    if (time_obj.contains("period_time_left") && !time_obj["period_time_left"].is_null())
+    bool has_ptl = time_obj.contains("period_time_left") && !time_obj["period_time_left"].is_null();
+    if (has_ptl)
         c.secs = (int)time_obj["period_time_left"].get<double>();
     else if (time_obj.contains("thinking_time"))
         c.secs = (int)time_obj["thinking_time"].get<double>();
@@ -631,11 +636,13 @@ static ClockInfo extract_clock(const json& time_obj) {
         c.periods = time_obj["periods"].get<int>();
     if (time_obj.contains("period_time"))
         c.period_secs = (int)time_obj["period_time"].get<double>();
+    // "In byo-yomi" must be decided here, at parse time: once reduced to plain
+    // numbers, a period countdown is indistinguishable from low main time.
+    c.in_byo = c.periods > 0 &&
+               (has_ptl ||
+                (time_obj.contains("thinking_time") &&
+                 (int)time_obj["thinking_time"].get<double>() <= 0));
     return c;
-
-// keep old name as wrapper so gamedata clock path still compiles
-}
-static int extract_clock_secs(const json& time_obj) { return extract_clock(time_obj).secs;
 }
 
 void OgsNet::on_event(const std::string& name, const std::string& payload_json) {
@@ -652,24 +659,6 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
         NetMsg m;
         m.type = NetMsgType::AUTH_OK;
         push_msg(std::move(m));
-        return;
-    }
-
-    // ---------- active_game: track stone removal acceptance ----------
-    if (name == "active_game" && in_stone_removal_) {
-        try {
-            auto d = json::parse(payload_json);
-            if (d.contains("black") && d.contains("white")) {
-                bool black_acc   = d["black"].value("accepted", false);
-                bool white_acc   = d["white"].value("accepted", false);
-                bool my_is_black = (d["black"].value("id", 0) == my_player_id);
-                NetMsg m;
-                m.type       = NetMsgType::ACCEPT_STATUS;
-                m.my_accepted  = my_is_black ? (black_acc ? 1 : 0) : (white_acc ? 1 : 0);
-                m.opp_accepted = my_is_black ? (white_acc ? 1 : 0) : (black_acc ? 1 : 0);
-                push_msg(std::move(m));
-            }
-        } catch (...) {}
         return;
     }
 
@@ -783,13 +772,21 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
                 }
             }
 
-            // Clocks
+            // Clocks — full extraction: this previously only took secs, so a
+            // reconnect into a byo-yomi game arrived with periods=-1 (no byo state)
+            // until the first standalone clock event happened to correct it.
             if (d.contains("clock") && d["clock"].is_object()) {
                 auto& clk = d["clock"];
-                if (clk.contains("black_time"))
-                    m.black_secs = extract_clock_secs(clk["black_time"]);
-                if (clk.contains("white_time"))
-                    m.white_secs = extract_clock_secs(clk["white_time"]);
+                if (clk.contains("black_time")) {
+                    auto c = extract_clock(clk["black_time"]);
+                    m.black_secs = c.secs; m.black_periods = c.periods;
+                    m.black_period_secs = c.period_secs; m.black_in_byo = c.in_byo;
+                }
+                if (clk.contains("white_time")) {
+                    auto c = extract_clock(clk["white_time"]);
+                    m.white_secs = c.secs; m.white_periods = c.periods;
+                    m.white_period_secs = c.period_secs; m.white_in_byo = c.in_byo;
+                }
             }
 
             std::string phase = d.value("phase", "");
@@ -859,11 +856,21 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
                 }
             }
 
-            // Clocks bundled with the move
-            if (d.contains("black_time"))
-                m.black_secs = extract_clock_secs(d["black_time"]);
-            if (d.contains("white_time"))
-                m.white_secs = extract_clock_secs(d["white_time"]);
+            // Clocks bundled with the move — full extraction. This previously only
+            // took secs while main.cpp's handler copies all clock fields whenever
+            // secs >= 0, so every move event clobbered periods/period_secs back to
+            // -1 and wiped the byo-yomi state until the next standalone clock event
+            // (the "byo-yomi clock only sometimes red" bug).
+            if (d.contains("black_time")) {
+                auto c = extract_clock(d["black_time"]);
+                m.black_secs = c.secs; m.black_periods = c.periods;
+                m.black_period_secs = c.period_secs; m.black_in_byo = c.in_byo;
+            }
+            if (d.contains("white_time")) {
+                auto c = extract_clock(d["white_time"]);
+                m.white_secs = c.secs; m.white_periods = c.periods;
+                m.white_period_secs = c.period_secs; m.white_in_byo = c.in_byo;
+            }
 
             push_msg(std::move(m));
         } catch (const std::exception& e) {
@@ -881,11 +888,13 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
             m.game_id = active_game_id_;
             if (d.contains("black_time")) {
                 auto c = extract_clock(d["black_time"]);
-                m.black_secs = c.secs; m.black_periods = c.periods; m.black_period_secs = c.period_secs;
+                m.black_secs = c.secs; m.black_periods = c.periods;
+                m.black_period_secs = c.period_secs; m.black_in_byo = c.in_byo;
             }
             if (d.contains("white_time")) {
                 auto c = extract_clock(d["white_time"]);
-                m.white_secs = c.secs; m.white_periods = c.periods; m.white_period_secs = c.period_secs;
+                m.white_secs = c.secs; m.white_periods = c.periods;
+                m.white_period_secs = c.period_secs; m.white_in_byo = c.in_byo;
             }
             push_msg(std::move(m));
         } catch (...) {}
@@ -928,7 +937,6 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
             std::string phase = d.is_string() ? d.get<std::string>() : d.value("phase", "");
             net_log(("/phase event: " + (phase.empty() ? "(empty)" : phase)).c_str());
             if (phase == "finished") {
-                in_stone_removal_ = false;
                 net_log("/phase=finished → firing GAME_OVER");
                 NetMsg m;
                 m.type    = NetMsgType::GAME_OVER;
@@ -936,7 +944,6 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
                 m.text    = game_result_;
                 push_msg(std::move(m));
             } else if (phase == "stone removal") {
-                in_stone_removal_ = true;
                 // Fire STONE_REMOVAL immediately — /removed_stones may not arrive (e.g. no dead stones)
                 NetMsg m;
                 m.type    = NetMsgType::STONE_REMOVAL;
@@ -944,7 +951,6 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
                 m.text    = removed_stones_;  // empty until /removed_stones arrives
                 push_msg(std::move(m));
             } else if (phase == "play") {
-                in_stone_removal_ = false;
                 // Opponent (or us) cancelled stone removal — return to playing
                 NetMsg m;
                 m.type    = NetMsgType::RESUME_PLAY;

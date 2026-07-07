@@ -11,6 +11,7 @@
 //   4 = [BY YEAR] meta-entry
 //   5 = virtual player directory (name = player name)
 //   6 = [BY DIRECTORY] meta-entry
+//   7 = [BY PLAYER] meta-entry (directory root → virtual player browser)
 struct CatalogEntry {
     std::string name;              // raw filename / directory name / year/player string
     std::string display_name;      // rendered label (fallback for non-player entries)
@@ -19,6 +20,8 @@ struct CatalogEntry {
     std::string full_path;         // absolute path — set for search results and index-view files
     std::string player_black;      // PB name — if set, rendered as three yellow/white columns
     std::string player_white;      // PW name
+    std::string player_black_rank; // BR rank string, e.g. "5k" — shown next to the name
+    std::string player_white_rank; // WR rank string
     std::string date;              // DT date string (e.g. "2024-01-15") — shown as 4th column
     uint64_t    mtime = 0;         // file last-write time (OS ticks) — tiebreaker within same date
 };
@@ -76,6 +79,16 @@ public:
 
     // Build a full path from two components (handles trailing separators).
     static std::string join_path(const std::string& dir, const std::string& name);
+
+    // Unicode-safe file I/O: Windows' plain fopen()/FindFirstFileA() etc. go through
+    // the process ANSI codepage, which can't represent most non-Latin filenames (e.g.
+    // Chinese Fox Go Server exports) — silently mangling the path so the file can never
+    // actually be opened. These route through the wide (UTF-16) Win32 APIs instead, with
+    // paths kept as UTF-8 std::string everywhere else in the app. No-ops through to the
+    // plain libc calls on non-Windows, where paths are already raw UTF-8 bytes.
+    static std::wstring utf8_to_wide(const std::string& s);
+    static std::string  wide_to_utf8(const std::wstring& w);
+    static FILE*        fopen_utf8(const std::string& path, const char* mode);
 
     // Return the full filesystem path of the currently selected entry,
     // or empty string if the selection is a directory or parent link.

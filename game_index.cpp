@@ -43,7 +43,8 @@ GameIndex::~GameIndex() {
 
 bool GameIndex::scan_sgf_header(const std::string& full_path,
                                 std::string& black, std::string& white,
-                                std::string& date,  std::string& result) {
+                                std::string& date,  std::string& result,
+                                std::string& black_rank, std::string& white_rank) {
     FILE* fp = fopen(full_path.c_str(), "rb");
     if (!fp) return false;
     char buf[4096];
@@ -76,6 +77,8 @@ bool GameIndex::scan_sgf_header(const std::string& full_path,
     extract("PW[", "pw[", white);
     extract("DT[", "dt[", date);
     extract("RE[", "re[", result);
+    extract("BR[", "br[", black_rank);
+    extract("WR[", "wr[", white_rank);
     return !black.empty() || !white.empty() || !date.empty() || !result.empty();
 }
 
@@ -160,7 +163,11 @@ bool GameIndex::read_index(const std::string& path,
     if (!fp) return false;
 
     char line[2048];
-    static const char* HEADER = "go_viewer_index_v1\t";
+    // v2 adds BR[]/WR[] rank fields. Bumped (rather than tolerating a mixed-version
+    // file) so that any pre-existing v1 index — which has no rank data at all —
+    // is rejected outright and triggers one full rebuild, instead of silently
+    // caching blank ranks until file count happens to change.
+    static const char* HEADER = "go_viewer_index_v2\t";
     if (!fgets(line, sizeof(line), fp)) { fclose(fp); return false; }
     if (strncmp(line, HEADER, strlen(HEADER)) != 0) { fclose(fp); return false; }
     stored_count = atoi(line + strlen(HEADER));
@@ -172,10 +179,10 @@ bool GameIndex::read_index(const std::string& path,
         if (len == 0) continue;
 
         GameIndexEntry e;
-        const char* parts[5] = {};
+        const char* parts[7] = {};
         char* p = line;
         int n = 0;
-        while (n < 5) {
+        while (n < 7) {
             parts[n++] = p;
             char* t = strchr(p, '\t');
             if (!t) break;
@@ -184,10 +191,14 @@ bool GameIndex::read_index(const std::string& path,
         }
         if (!parts[0] || !*parts[0]) continue;
         e.rel_path = parts[0];
-        if (n > 1 && parts[1]) e.black  = parts[1];
-        if (n > 2 && parts[2]) e.white  = parts[2];
-        if (n > 3 && parts[3]) e.date   = parts[3];
-        if (n > 4 && parts[4]) e.result = parts[4];
+        if (n > 1 && parts[1]) e.black      = parts[1];
+        if (n > 2 && parts[2]) e.white      = parts[2];
+        if (n > 3 && parts[3]) e.date       = parts[3];
+        if (n > 4 && parts[4]) e.result     = parts[4];
+        // Fields 6/7 (rank) are absent in index files written before this feature —
+        // n simply won't reach them for those lines, leaving rank empty. Fine.
+        if (n > 5 && parts[5]) e.black_rank = parts[5];
+        if (n > 6 && parts[6]) e.white_rank = parts[6];
         out.push_back(std::move(e));
     }
     fclose(fp);
@@ -199,19 +210,21 @@ bool GameIndex::write_index(const std::string& path,
     FILE* fp = fopen(path.c_str(), "w");
     if (!fp) return false;
 
-    fprintf(fp, "go_viewer_index_v1\t%d\n", (int)entries.size());
+    fprintf(fp, "go_viewer_index_v2\t%d\n", (int)entries.size());
     for (const auto& e : entries) {
         auto clean = [](const std::string& s) -> std::string {
             std::string r = s;
             for (char& c : r) if (c == '\t' || c == '\n' || c == '\r') c = ' ';
             return r;
         };
-        fprintf(fp, "%s\t%s\t%s\t%s\t%s\n",
+        fprintf(fp, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
                 clean(e.rel_path).c_str(),
                 clean(e.black).c_str(),
                 clean(e.white).c_str(),
                 clean(e.date).c_str(),
-                clean(e.result).c_str());
+                clean(e.result).c_str(),
+                clean(e.black_rank).c_str(),
+                clean(e.white_rank).c_str());
     }
     fclose(fp);
     return true;
@@ -252,7 +265,8 @@ void GameIndex::do_load(std::string base_dir) {
     for (const auto& rel : rel_paths) {
         GameIndexEntry e;
         e.rel_path = rel;
-        scan_sgf_header(gi_join_path(base_dir, rel), e.black, e.white, e.date, e.result);
+        scan_sgf_header(gi_join_path(base_dir, rel), e.black, e.white, e.date, e.result,
+                        e.black_rank, e.white_rank);
         built.push_back(std::move(e));
     }
 

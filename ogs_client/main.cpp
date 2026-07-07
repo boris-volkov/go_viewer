@@ -4,6 +4,7 @@
 #endif
 
 #include <cfloat>
+#include <cmath>
 #include "../go_viewer.hpp"
 #include "../go_rules.hpp"
 #include "../game_state.hpp"
@@ -13,13 +14,17 @@
 #include "ogs_client.hpp"
 #include "ogs_net.hpp"
 #include "katago.hpp"
+#include "sound.hpp"
 
 #include "json.hpp"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <map>
+#include <set>
 #include <string>
 #include <memory>
 #include <algorithm>
@@ -27,21 +32,6 @@
 
 // Registered once in main(); OgsNet reads this to push SDL events.
 Uint32 g_net_event_type = 0;
-
-// ── Opponent alias ────────────────────────────────────────────────────────────
-
-static const char* random_dbz_name() {
-    static const char* names[] = {
-        "Goku", "Vegeta", "Piccolo", "Gohan", "Trunks",
-        "Krillin", "Frieza", "Cell", "Buu", "Broly",
-        "Goten", "Gotenks", "Bardock", "Raditz", "Nappa",
-        "Android 17", "Android 18", "Tien", "Yamcha", "Beerus",
-        "Whis", "Jiren", "Hit", "Caulifla", "Kale",
-        "Cooler", "Turles", "Bojack", "Janemba", "Pikkon",
-    };
-    static constexpr int N = (int)(sizeof(names) / sizeof(names[0]));
-    return names[rand() % N];
-}
 
 // ── Credentials ──────────────────────────────────────────────────────────────
 
@@ -116,6 +106,8 @@ struct LiveGame {
     int         white_periods     = -1;
     int         black_period_secs = -1;
     int         white_period_secs = -1;
+    bool        black_in_byo      = false;  // main time gone — living on byo-yomi periods
+    bool        white_in_byo      = false;
     Uint32      clock_tick  = 0;   // SDL_GetTicks() when clock last updated
     bool        my_turn     = false;
     int         pending_col = -2;  // -2=none, -1=pass pending echo, >=0=move pending echo
@@ -137,10 +129,14 @@ struct SgfGame {
     char  moves[MAX_MOVES][MOVE_TEXT_LEN] = {};
     int   colors[MAX_MOVES]               = {};
     int   move_count                      = 0;
+    int   setup_count                     = 0;  // leading entries from AB[]/AW[] setup stones, not real moves
+    int   start_black                     = 1;  // from PL[] property: who's to move in the starting position
+    bool  has_pl                          = false; // true if PL[] was present (start_black is authoritative)
     int   board_size                      = BOARD_SIZE;
     char  black_name[NAME_LEN]            = "Black";
     char  white_name[NAME_LEN]            = "White";
     char  result[32]                      = {};
+    float komi                            = 7.5f;  // from KM[] property
 };
 
 static bool parse_sgf_move(const char* move_str, int& out_r, int& out_f) {
@@ -157,7 +153,7 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     g.board_size = BOARD_SIZE;
     g.black_name[0] = g.white_name[0] = '\0';
 
-    FILE* fp = fopen(path.c_str(), "rb");
+    FILE* fp = Catalog::fopen_utf8(path, "rb");
     if (!fp) return false;
     fseek(fp, 0, SEEK_END);
     long fsz = ftell(fp);
@@ -188,8 +184,13 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
     // A second '(' at the same parent depth is a variation branch and gets skipped.
     // This handles both standard SGF (variations at depth 2) and the OGS auto-save
     // format where every move after the second is wrapped in its own '(' pair,
-    // pushing moves to progressively deeper levels.
-    bool branch_taken[256] = {};
+    // pushing moves to progressively deeper levels — so depth can grow roughly as
+    // large as the move count. Sized past MAX_MOVES with margin (not just 256, which
+    // any real OGS game past ~255 moves would silently overflow — this function runs
+    // on every catalog cursor move for the thumbnail preview, so that was a reliable
+    // stack-corruption crash on scrolling to any sufficiently long game).
+    static constexpr int MAX_SGF_DEPTH = MAX_MOVES + 16;
+    bool branch_taken[MAX_SGF_DEPTH] = {};
     int  skip_depth = 0;   // >0 = we're inside a sibling variation; skip until depth drops below this
 
     while (*p) {
@@ -202,6 +203,12 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
         }
         if (*p == '(') {
             depth++;
+            if (depth >= MAX_SGF_DEPTH) {
+                // Pathologically deep nesting (or a malformed/hostile file) — stop
+                // parsing rather than overflow branch_taken[]. Whatever was already
+                // parsed is kept; the remainder of the file is dropped.
+                break;
+            }
             if (skip_depth == 0) {
                 if (branch_taken[depth - 1]) {
                     skip_depth = depth;          // sibling branch → skip
@@ -240,6 +247,7 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
                     g.moves[g.move_count][len] = '\0';
                     g.colors[g.move_count] = ab_color;
                     g.move_count++;
+                    g.setup_count++;
                 }
                 if (*p == ']') p++;
                 while (*p && isspace((unsigned char)*p)) p++;  // skip whitespace between values
@@ -285,6 +293,27 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
                 if (*p == ']') p++;
                 prev_alpha = false; continue;
             }
+            if (*p == 'K' && *(p+1) == 'M' && *(p+2) == '[') {
+                p += 3;
+                float km = (float)atof(p);
+                // Fox Go Server encodes Chinese-rules komi without a decimal point
+                // (e.g. "375" meaning 3.75) — KataGo doesn't understand that raw
+                // value, so translate that specific case to the equivalent komi
+                // it expects.
+                if (km == 375.f) km = 3.5f;
+                g.komi = km;
+                while (*p && *p != ']') p++;
+                if (*p == ']') p++;
+                prev_alpha = false; continue;
+            }
+            if (*p == 'P' && *(p+1) == 'L' && *(p+2) == '[') {
+                p += 3;
+                g.start_black = (*p == 'B') ? 1 : 0;
+                g.has_pl      = true;
+                while (*p && *p != ']') p++;
+                if (*p == ']') p++;
+                prev_alpha = false; continue;
+            }
             if (*p == 'P' && *(p+1) == 'B' && *(p+2) == '[') {
                 p += 3; p = read_val(p, g.black_name, sizeof(g.black_name));
                 prev_alpha = false; continue;
@@ -323,6 +352,7 @@ static bool sgf_board_at(const std::string& path,
     int sz = g.board_size;
     if (board_size_out) *board_size_out = sz;
     int limit = (max_moves < 0 || max_moves > g.move_count) ? g.move_count : max_moves;
+    if (limit < g.setup_count) limit = g.setup_count;  // never truncate mid-setup
     char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
     for (int i = 0; i < limit; i++) {
         int r, f;
@@ -354,6 +384,15 @@ struct AnalysisNode {
     int   depth      = 0;    // distance from root
     int   active_child = 0;  // which child RT navigates into
     float score_lead = FLT_MAX;  // KataGo score lead from Black's perspective; FLT_MAX = unknown
+    // True for nodes that are part of the actual played game (children[0] chain from
+    // root, set once by build_analysis_tree() and never altered). False for nodes
+    // created by branching off into a hypothetical line. Distinct from active_child,
+    // which just tracks navigation and gets repointed at whichever branch you last
+    // explored — is_main_line is the stable, structural "is this the real game" fact.
+    bool  is_main_line = true;
+    // Letter annotations ("A", "B", …) placed with the circle button — owned by the
+    // position they were placed on, so navigating away and back restores them.
+    std::vector<BoardLabel> labels;
     std::vector<std::unique_ptr<AnalysisNode>> children;
     AnalysisNode* parent = nullptr;
 };
@@ -373,9 +412,11 @@ private:
     AppState    state_    = AppState::CONNECTING;
     OgsNet      net_;
     LiveGame    game_;
+    Sound       sound_;
 
     // Game catalog for reviewing saved OGS games
     Catalog      catalog_;
+    bool         catalog_delete_confirm_ = false;  // Y pressed once, awaiting confirm
     std::string  my_username_;   // from config.ini; used to locate games/<name>/ dir
 
     // Catalog thumbnails (BOARD_SIZE stride matches DrawState::catalog_thumb_open type)
@@ -383,6 +424,7 @@ private:
     char         thumb_open_ [BOARD_SIZE][BOARD_SIZE] = {};
     char         thumb_final_[BOARD_SIZE][BOARD_SIZE] = {};
     bool         thumb_valid_      = false;
+    bool         thumb_single_     = false;  // opening == final → show one board, not two
     int          thumb_board_size_ = BOARD_SIZE;
 
     void update_catalog_thumb() {
@@ -392,6 +434,11 @@ private:
         thumb_valid_ = !sel.empty()
             && sgf_board_at(sel, thumb_open_,  &thumb_board_size_, THUMB_OPENING_MOVES)
             && sgf_board_at(sel, thumb_final_,  nullptr);
+        // Single-position files (marked positions, study puzzles — all setup stones,
+        // no moves) produce identical opening/final snapshots; drawing both is just
+        // the same picture twice. Board equality is the cheapest reliable test.
+        thumb_single_ = thumb_valid_ &&
+                        memcmp(thumb_open_, thumb_final_, sizeof(thumb_open_)) == 0;
     }
 
     // DrawState anchors (refs must point to persistent objects)
@@ -411,6 +458,7 @@ private:
     // Resign confirm
     bool resign_confirm_ = false;
     bool pass_confirm_   = false;
+    bool mark_confirm_   = false;
 
     // Flash message
     std::string flash_;
@@ -418,10 +466,13 @@ private:
     Uint32      ko_flash_until_   = 0;
     Uint32      kata_query_after_      = 0;    // deferred KataGo query — fires after user settles
     bool        kata_analysis_enabled_ = true; // toggled by START in GAME_OVER
+    float       review_komi_          = 7.5f; // komi used for GAME_OVER analysis queries;
+                                               // set from a loaded SGF's KM[], else default
 
     // Match settings
     MatchPrefs            match_prefs_;
     Renderer::MatchMenu   match_menu_;
+    AppState              pre_menu_state_ = AppState::LOBBY;  // state to return to when closing an in-game menu
 
     // Lobby screensaver: auto-plays a game from the games/ directory.
     // Moves are applied one per second into a single GameState — no bulk copying.
@@ -435,12 +486,26 @@ private:
     } demo_;
     bool demo_active_ = false;
 
-    // Chain mode toggle (Y button)
+    // Visual links between chained stones — toggled in the settings menu's DISPLAY column
     bool chain_mode_       = true;
+    // Stones drawn as beveled square tiles instead of circles (DISPLAY toggle, off by default)
+    bool square_stones_    = false;
 
     // Help overlay / quit confirm
     bool show_help_    = false;
     bool quit_confirm_ = false;
+
+    // Board-edge coordinate labels toggle (RT during live play)
+    bool show_coords_  = false;
+
+    // Double-press START → lobby, outside states where START already has an
+    // immediate single-press meaning (LOBBY quick-match, MATCH_MENU search,
+    // PLAYING resign, STONE_REMOVAL accept)
+    bool lobby_confirm_ = false;
+
+    // Last-played stone position (for row/col crosshair highlight)
+    int last_move_r_ = -1;
+    int last_move_f_ = -1;
 
     // Undo-request state
     bool undo_pending_     = false;
@@ -450,6 +515,7 @@ private:
     bool stone_removal_has_ogs_territory_ = false;
     // True after user presses A but before server confirms our acceptance
     bool        my_accept_sent_           = false;
+    Uint32      accept_resend_at_         = 0;   // next time to proactively resend cmd_accept_stones
     std::string stone_removal_all_removed_;  // all_removed string from last removed_stones event
 
     // Post-game analysis tree (valid in GAME_OVER state)
@@ -467,11 +533,35 @@ private:
     // Score graph: KataGo score_lead per main-line depth, built during play and review.
     std::vector<float> move_scores_;           // indexed by depth; FLT_MAX = unknown
     std::vector<bool>  move_marked_;           // indexed by depth; true = flagged for review
+    // Path of the standalone SGF written for a marked depth this session (empty = none/unknown —
+    // e.g. marks restored from a companion file on load have no recorded path to clean up).
+    std::vector<std::string> marked_paths_;
     int                bg_analysis_next_  = 0; // next main-line depth to submit
     int                bg_analysis_depth_ = -1;// depth of the currently-pending bg query
     bool               bg_analysis_busy_  = false;
+    Uint32             bg_analysis_started_at_ = 0;  // for the stuck-query timeout below
     bool               fg_kata_pending_   = false; // foreground KataGo query in-flight
     std::string        companion_path_;            // path of .katago companion file
+
+    // Auto-detected study puzzles: positions where exactly one move kept the game
+    // and it wasn't played. Top-2 of each background-scoring response is kept here
+    // (the sweep already queries every position; we previously discarded all of it
+    // except the root score), then evaluated once the game is over — never during
+    // play, so no engine information can leak into a live game.
+    struct PuzzleEval {
+        float best_sl   = FLT_MAX;   // best suggestion's scoreLead (Black's perspective)
+        float second_sl = FLT_MAX;   // second-best; FLT_MAX = KataGo offered no alternative
+        int   best_r = -1, best_f = -1;
+    };
+    std::map<int, PuzzleEval> puzzle_eval_;   // keyed by depth (position before the move)
+    std::set<int>             puzzle_saved_;  // depths already written to puzzles/
+    void check_puzzle(int d);
+    void save_puzzle_position(int depth);
+
+    // Path of the SGF currently open for review (catalog-loaded only; empty after a
+    // live game). Enables L3/R3 cycling through sibling files without the catalog.
+    std::string review_path_;
+    void review_cycle(int dir);
 
     // Returns the best available KataGo process for the given board size.
     KatagoProc& kata_for(int bs) {
@@ -484,13 +574,30 @@ private:
     std::string kata_model_;        // path from config (shared with analysis)
     std::string kata_human_model_;  // path to humanv0.bin.gz (enables VS KATAGO)
 
+    // Adaptive KataGo strength: fractional rank index (0=20k … 19=1k, 20=1d … 28=9d),
+    // nudged up after each win and down after each loss (scaled by the score margin),
+    // persisted to adaptive_level.txt so it tracks Boris's level across sessions.
+    float adaptive_rank_ = 10.0f;   // starting point: 10 KYU
+    bool  adaptive_game_ = false;   // current local game uses the adaptive profile
+    void  load_adaptive();
+    void  save_adaptive();
+    void  update_adaptive(const std::string& result);
+
     // Local game state
     bool        is_local_game_       = false;
     bool        local_prev_was_pass_ = false;  // true if the last move (by either side) was a pass
-    bool        local_result_pending_ = false;  // freeze on final board until user presses a button
     std::string local_game_score_;             // score string shown during stone removal, empty until ownership arrives
 
     void start_local_game();
+    // Free analysis: an empty 19x19 board in the normal GAME_OVER analysis mode
+    // (tree panel, branching, engine toggle) — entered from LOBBY with triangle.
+    void start_free_analysis();
+    // Board size is single-select (radio) vs KataGo but multi-select for OGS search;
+    // collapses match_menu_.size_sel[] down to exactly one entry — the first one
+    // already checked, or 19x19 if none were — when entering KataGo mode.
+    void normalize_size_sel_for_katago();
+    // Write an SGF from game_.history for a local game (no OGS copy exists to fetch).
+    void save_local_sgf(const std::string& path);
     void handle_katago_gtp_move(int row, int col);
     // forced_result: non-empty means the result is already known (e.g. resignation).
     // In that case skip the GTP final_status query and go straight to territory display.
@@ -500,8 +607,9 @@ private:
     // Left-stick joystick cursor state
     Sint16 js_left_x_  = 0;
     Sint16 js_left_y_  = 0;
-    float  js_acc_x_   = 0.f;
-    float  js_acc_y_   = 0.f;
+
+    // RT held state — while held during live play, reveals the last-played stone
+    bool rt_down_ = false;
 
     bool init();
     void cleanup();
@@ -510,18 +618,28 @@ private:
     void handle_net_msg(const NetMsg& msg);
     // forced_color: -1 = use current turn (normal), 0/1 = force that color and don't flip turn
     void apply_move(int col, int row, int forced_color = -1);
+    void apply_pass();  // flips turn and records a history snapshot, same bookkeeping as apply_move
+    void undo_local_move();  // pop back to your last turn in a local game vs KataGo
     void step_history(int delta);  // delta=-1 back, +1 forward; sets history_pos
     void load_demo_game();
     void save_live_game();
     void save_companion();          // write .katago file alongside the SGF
     void load_companion();          // read .katago file if present
+    std::string marked_position_path(int depth) const;  // deterministic path in games/<user>/marked/
+    void save_marked_position(int depth);   // write flattened static-position SGF for the marked move
+    void delete_marked_position(int depth); // remove that SGF when unmarked
     void load_sgf_for_review(const std::string& path);
     void open_game_catalog();
+    // Delete an SGF (and its .katago companion) from disk, then refresh the
+    // catalog listing in place. Called via double-press Y confirm in the catalog.
+    void delete_catalog_game(const std::string& sgf_path);
+    void open_settings_menu();
     void draw();
     void build_analysis_tree();
     void build_analysis_tree_render();
     void apply_analysis_move(int col, int row);
     bool is_legal_analysis_move(int col, int row) const;
+    float cached_analysis_score(const AnalysisNode* node) const;
 
     void set_status(const std::string& s) { status_ = s; }
 
@@ -533,6 +651,7 @@ private:
 bool App::init() {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) return false;
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+    sound_.init();  // best-effort — app runs silent if no audio device
 
     window_ = SDL_CreateWindow("OGS Live",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -557,6 +676,8 @@ bool App::init() {
 }
 
 void App::cleanup() {
+    save_companion();  // persist any in-progress review scores/marks before exiting
+    sound_.shutdown();
     kata_.stop();
     kata_9_.stop();
     kata_gtp_.stop();
@@ -572,12 +693,16 @@ void App::cleanup() {
 
 void App::apply_move(int col, int row, int forced_color) {
     if (col < 0 || row < 0) return;  // pass — board unchanged
+    last_move_r_ = row;
+    last_move_f_ = col;
     int is_black = (forced_color >= 0) ? forced_color : (int)game_.board.turn_is_black;
     game_.board.place_stone(row, col, is_black);
     game_.board.save_snapshot();
     if (forced_color >= 0) {
         game_.history.push_back(game_.board);
-        if (move_scores_.size() < game_.history.size()) { move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); }
+        if (move_scores_.size() < game_.history.size()) {
+            move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); marked_paths_.push_back("");
+        }
         return;  // pre-placed handicap stone: caller sets turn after
     }
     // Free handicap: first `handicap` stones are all black; after last one, white plays
@@ -587,7 +712,96 @@ void App::apply_move(int col, int row, int forced_color) {
         game_.board.turn_is_black = !is_black;
     }
     game_.history.push_back(game_.board);
-    if (move_scores_.size() < game_.history.size()) { move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); }
+    if (move_scores_.size() < game_.history.size()) {
+        move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); marked_paths_.push_back("");
+    }
+}
+
+// A pass has no stone to place, but still needs its own history snapshot with the same
+// bookkeeping as a real move — skipping it desyncs history depth from the true move
+// count (ko-check's "2 states ago" comparison, move_scores_/marked_paths_ indexing, and
+// build_analysis_tree()'s per-node depth all silently drift once a pass is missing).
+void App::apply_pass() {
+    game_.board.turn_is_black = !game_.board.turn_is_black;
+    game_.board.save_snapshot();
+    game_.history.push_back(game_.board);
+    if (move_scores_.size() < game_.history.size()) {
+        move_scores_.push_back(FLT_MAX); move_marked_.push_back(false); marked_paths_.push_back("");
+    }
+}
+
+// Pops history back to your own last turn in a local game vs KataGo — your last move
+// plus whatever KataGo played in response (generically walks back ply-by-ply checking
+// whose turn each resulting position is, rather than assuming a hardcoded pair, so it
+// still does the right thing across a free-handicap run of same-color moves). Only
+// safe to call when it's genuinely your turn: if KataGo is still "thinking" (a genmove
+// request is in flight), pulling the position out from under it would leave its reply
+// arriving for a position that no longer exists.
+void App::undo_local_move() {
+    if (!is_local_game_ || state_ != AppState::PLAYING) return;
+    if (!game_.my_turn) {
+        flash_       = "CAN'T UNDO — KATAGO IS THINKING";
+        flash_until_ = SDL_GetTicks() + 1500;
+        draw();
+        return;
+    }
+    if (game_.history.size() <= 1) {
+        flash_       = "NOTHING TO UNDO";
+        flash_until_ = SDL_GetTicks() + 1500;
+        draw();
+        return;
+    }
+
+    while (game_.history.size() > 1) {
+        game_.history.pop_back();
+        // Keep the score arrays in strict lockstep with history — only pop entries
+        // that actually correspond to the popped plies. (Guarding on size, not just
+        // non-empty, means a desynced-longer array can't be drained past the moves
+        // being undone.)
+        while (move_scores_.size() > game_.history.size()) {
+            move_scores_.pop_back();
+            move_marked_.pop_back();
+            marked_paths_.pop_back();
+        }
+        kata_gtp_.send_undo();
+        if (game_.history.back().turn_is_black == game_.my_color) break;
+    }
+    // Rewind the background-scoring sweep: its pointer only ever moves forward, so
+    // without this, replayed moves after an undo would never get scored (the sweep
+    // would still think it was past them) — the "dead space" gap in the score graph.
+    // The skip-loop fast-forwards over already-scored depths, so restarting from 0
+    // costs nothing.
+    bg_analysis_next_ = 0;
+    // Puzzle evals for the popped depths describe positions that no longer exist;
+    // the replayed line gets fresh ones when the sweep re-scores it. (Evals for
+    // surviving depths — including the position we landed on — stay valid.)
+    puzzle_eval_.erase(puzzle_eval_.lower_bound((int)game_.history.size()),
+                       puzzle_eval_.end());
+
+    game_.board    = game_.history.back();
+    game_.my_turn  = true;
+    kata_suggestion_count_ = 0;
+    kata_score_lead_       = FLT_MAX;
+
+    // Recompute "was the last move a pass" and the last-played-stone highlight from
+    // the position we landed on, rather than leaving them stale from before the undo.
+    local_prev_was_pass_ = false;
+    last_move_r_ = last_move_f_ = -1;
+    if (game_.history.size() >= 2) {
+        const auto& cur  = game_.history.back();
+        const auto& prev = game_.history[game_.history.size() - 2];
+        local_prev_was_pass_ = (memcmp(cur.board, prev.board, sizeof(cur.board)) == 0);
+        for (int r = 0; r < game_.board_size && last_move_r_ < 0; r++)
+            for (int f = 0; f < game_.board_size; f++)
+                if (cur.board[r][f] != 0 && prev.board[r][f] == 0) {
+                    last_move_r_ = r; last_move_f_ = f; break;
+                }
+    }
+
+    flash_       = "UNDID YOUR MOVE";
+    flash_until_ = SDL_GetTicks() + 1500;
+    set_status(std::string("YOUR TURN  (") + (game_.my_color == 1 ? "BLACK" : "WHITE") + ")");
+    draw();
 }
 
 void App::step_history(int delta) {
@@ -704,6 +918,22 @@ bool App::is_legal_analysis_move(int col, int row) const {
     return true;
 }
 
+// Returns an already-known score for this node without querying KataGo — the node's
+// own score_lead if a foreground query has landed on it before, else move_scores_[depth]
+// (populated by background scoring; exact for main-line nodes, a same-depth proxy off
+// it). FLT_MAX if nothing is cached yet. Used to show "PROJECTED: ..." instantly on
+// navigation instead of blanking out until the (now debounced) fresh query completes.
+float App::cached_analysis_score(const AnalysisNode* node) const {
+    if (!node) return FLT_MAX;
+    if (node->score_lead != FLT_MAX) return node->score_lead;
+    // move_scores_[] is main-line-only (see AnalysisNode::is_main_line) — for a branch
+    // node it would just be some unrelated main-line position at the same depth, not a
+    // real preview of this position, so don't fall back to it off the main line.
+    if (node->is_main_line && node->depth < (int)move_scores_.size())
+        return move_scores_[node->depth];
+    return FLT_MAX;
+}
+
 void App::apply_analysis_move(int col, int row) {
     if (!analysis_cur_) return;
 
@@ -724,13 +954,17 @@ void App::apply_analysis_move(int col, int row) {
         return;
     }
 
-    // Create new child node
+    // Create new child node — always a hypothetical branch. build_analysis_tree() is
+    // the only place that creates real is_main_line=true nodes, from the actual played
+    // game; any move placed interactively here, even one continuing past the end of
+    // the recorded game, is exploration, not the real game.
     auto child = std::make_unique<AnalysisNode>();
-    child->board    = analysis_cur_->board;
-    child->move_col = col;
-    child->move_row = row;
-    child->depth    = analysis_cur_->depth + 1;
-    child->parent   = analysis_cur_;
+    child->board        = analysis_cur_->board;
+    child->move_col     = col;
+    child->move_row     = row;
+    child->depth        = analysis_cur_->depth + 1;
+    child->parent       = analysis_cur_;
+    child->is_main_line = false;
 
     // Apply the move using GameState::place_stone (handles captures & prisoners)
     int is_black = (child->board.turn_is_black == 1) ? 1 : 0;
@@ -809,13 +1043,15 @@ void App::handle_controller_button(Uint8 btn) {
     // Catalog overlay: intercept all input while open
     if (catalog_.active) {
         const int CAT_VIS = 15;
+        // Delete confirm is armed by Y and cancelled by any other button
+        if (catalog_delete_confirm_ && btn != SDL_CONTROLLER_BUTTON_Y)
+            catalog_delete_confirm_ = false;
         switch (btn) {
         case SDL_CONTROLLER_BUTTON_DPAD_UP:
             if (catalog_.index > 0) {
                 catalog_.index--;
                 if (catalog_.index < catalog_.scroll)
                     catalog_.scroll = catalog_.index;
-                catalog_.ensure_names_loaded(catalog_.index - 2, 6);
                 update_catalog_thumb();
             }
             break;
@@ -824,7 +1060,6 @@ void App::handle_controller_button(Uint8 btn) {
                 catalog_.index++;
                 if (catalog_.index >= catalog_.scroll + CAT_VIS)
                     catalog_.scroll = catalog_.index - CAT_VIS + 1;
-                catalog_.ensure_names_loaded(catalog_.index - 2, 6);
                 update_catalog_thumb();
             }
             break;
@@ -833,6 +1068,20 @@ void App::handle_controller_button(Uint8 btn) {
             if (catalog_.selection_made) {
                 load_sgf_for_review(catalog_.selected_path);
                 catalog_.selection_made = false;
+            }
+            break;
+        case SDL_CONTROLLER_BUTTON_Y:
+            // Delete the selected game — double-press confirm, same idiom as
+            // resign/pass/mark. Only file entries (not directories/meta-entries).
+            if (!catalog_.selected_entry_path().empty()) {
+                if (!catalog_delete_confirm_) {
+                    catalog_delete_confirm_ = true;
+                    flash_       = "PRESS " GLYPH_PS_TRIANGLE " AGAIN TO DELETE GAME";
+                    flash_until_ = SDL_GetTicks() + 2500;
+                } else {
+                    catalog_delete_confirm_ = false;
+                    delete_catalog_game(catalog_.selected_entry_path());
+                }
             }
             break;
         default:
@@ -863,7 +1112,7 @@ void App::handle_controller_button(Uint8 btn) {
                 }
                 build_analysis_tree_render();
                 kata_suggestion_count_ = 0;
-                kata_score_lead_ = FLT_MAX;
+                kata_score_lead_ = cached_analysis_score(analysis_cur_);
                 kata_query_after_ = SDL_GetTicks() + 1000;
             } else {
                 step_history(btn == 0xFD ? -1 : +1);
@@ -873,8 +1122,13 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
-    // Y button: mark/unmark the current move for analysis attention
-    if (btn == SDL_CONTROLLER_BUTTON_Y) {
+    // Y button: mark/unmark the current move for analysis attention.
+    // Marking saves a standalone SGF snapshot of the position to games/<user>/marked/,
+    // and unmarking deletes it — both are file operations, so both require a confirm press.
+    // Scoped to the states where marking exists — an unconditional catch here would
+    // swallow triangle everywhere (it silently ate LOBBY's free-analysis binding).
+    if (btn == SDL_CONTROLLER_BUTTON_Y &&
+        (state_ == AppState::PLAYING || state_ == AppState::GAME_OVER)) {
         int depth = -1;
         if (state_ == AppState::PLAYING) {
             depth = (game_.history_pos >= 0) ? game_.history_pos
@@ -883,10 +1137,25 @@ void App::handle_controller_button(Uint8 btn) {
             depth = analysis_cur_->depth;
         }
         if (depth >= 0 && depth < (int)move_marked_.size()) {
+            if (!mark_confirm_) {
+                mark_confirm_ = true;
+                flash_       = move_marked_[depth] ? "PRESS " GLYPH_PS_TRIANGLE " AGAIN TO UNMARK"
+                                                   : "PRESS " GLYPH_PS_TRIANGLE " AGAIN TO MARK";
+                flash_until_ = SDL_GetTicks() + 2000;
+                draw();
+                return;
+            }
+            mark_confirm_ = false;
             move_marked_[depth] = !move_marked_[depth];
-            if (state_ == AppState::GAME_OVER) build_analysis_tree_render();
-            flash_       = move_marked_[depth] ? "MARKED" : "UNMARKED";
+            if (move_marked_[depth]) {
+                save_marked_position(depth);
+                flash_ = "MARKED";
+            } else {
+                delete_marked_position(depth);
+                flash_ = "UNMARKED";
+            }
             flash_until_ = SDL_GetTicks() + 1200;
+            if (state_ == AppState::GAME_OVER) build_analysis_tree_render();
         }
         draw();
         return;
@@ -929,34 +1198,58 @@ void App::handle_controller_button(Uint8 btn) {
         draw();
         return;
     }
+    // Cancel mark confirm on any non-Y button
+    if (mark_confirm_ && btn != SDL_CONTROLLER_BUTTON_Y) {
+        mark_confirm_ = false;
+        draw();
+        return;
+    }
+    // Cancel lobby confirm on any non-START button
+    if (lobby_confirm_ && btn != SDL_CONTROLLER_BUTTON_START) {
+        lobby_confirm_ = false;
+        draw();
+        return;
+    }
+
+    // BACK: open the settings menu from anywhere — the same button that used to open
+    // it from the lobby, standardized across every state (catalog interception and
+    // CREDENTIAL_PROMPT's early return above already rule those out; MATCH_MENU itself
+    // handles BACK as its own close action, in that switch below).
+    if (btn == SDL_CONTROLLER_BUTTON_BACK && state_ != AppState::MATCH_MENU) {
+        open_settings_menu();
+        return;
+    }
 
     if (state_ == AppState::LOBBY) {
         if (btn == SDL_CONTROLLER_BUTTON_X) {
             open_game_catalog();
             draw();
+        } else if (btn == SDL_CONTROLLER_BUTTON_Y) {
+            start_free_analysis();
         } else if (btn == SDL_CONTROLLER_BUTTON_START || btn == SDL_CONTROLLER_BUTTON_A) {
             net_.cmd_find_match(match_prefs_);
             state_ = AppState::SEARCHING;
             set_status("SEARCHING...");
             draw();
-        } else if (btn == SDL_CONTROLLER_BUTTON_BACK) {
-            // Open match settings menu
-            match_menu_.focus_col    = 0;
-            match_menu_.focus_row    = 0;
-            match_menu_.katago_mode  = match_prefs_.katago_mode;
-            match_menu_.katago_str   = match_prefs_.katago_str;
-            for (int i = 0; i < 3; i++) match_menu_.size_sel[i]  = match_prefs_.sizes[i];
-            for (int i = 0; i < 3; i++) match_menu_.speed_sel[i] = match_prefs_.speeds[i];
-            state_ = AppState::MATCH_MENU;
-            renderer_->draw_match_menu(match_menu_);
         }
         return;
     }
 
     if (state_ == AppState::MATCH_MENU) {
-        // Col 1 has 3 items in OGS mode, 7 in KataGo mode
-        int col1_size = match_menu_.katago_mode ? 7 : 3;
-        int col_sizes[2] = {3, col1_size};
+        // Ingame: only the DISPLAY column exists (col 0) — board size/speed/mode don't
+        // apply to the game already in progress. From LOBBY: 3 columns as before, plus
+        // DISPLAY as a 3rd column so everything really is in "the one menu".
+        int display_col  = match_menu_.ingame ? 0 : 2;
+        int col_count    = match_menu_.ingame ? 1 : 3;
+        const int DISPLAY_ROWS = 4;  // SHOW COORDINATES, ENGINE ANALYSIS, CHAIN LINKS, SQUARE STONES
+        int col_sizes[3];
+        if (match_menu_.ingame) {
+            col_sizes[0] = DISPLAY_ROWS;
+        } else {
+            col_sizes[0] = 3;
+            col_sizes[1] = match_menu_.katago_mode ? 8 : 3;  // 7 fixed ranks + ADAPTIVE
+            col_sizes[2] = DISPLAY_ROWS;
+        }
         int n = col_sizes[match_menu_.focus_col];
 
         auto save_prefs = [&]() {
@@ -967,8 +1260,12 @@ void App::handle_controller_button(Uint8 btn) {
         };
         auto close_menu = [&]() {
             save_prefs();
-            state_ = AppState::LOBBY;
-            set_status("PRESS START TO FIND GAME");
+            if (match_menu_.ingame) {
+                state_ = pre_menu_state_;
+            } else {
+                state_ = AppState::LOBBY;
+                set_status("PRESS " GLYPH_PS_CROSS " TO FIND GAME");
+            }
             draw();
         };
         switch (btn) {
@@ -981,18 +1278,23 @@ void App::handle_controller_button(Uint8 btn) {
             renderer_->draw_match_menu(match_menu_);
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-            match_menu_.focus_col = 0;
-            if (match_menu_.focus_row >= 3) match_menu_.focus_row = 2;
+            if (match_menu_.focus_col > 0) match_menu_.focus_col--;
+            match_menu_.focus_row = std::min(match_menu_.focus_row, col_sizes[match_menu_.focus_col] - 1);
             renderer_->draw_match_menu(match_menu_);
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-            match_menu_.focus_col = 1;
+            if (match_menu_.focus_col < col_count - 1) match_menu_.focus_col++;
+            match_menu_.focus_row = std::min(match_menu_.focus_row, col_sizes[match_menu_.focus_col] - 1);
             renderer_->draw_match_menu(match_menu_);
             break;
         case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-            // Toggle OGS / KataGo mode (only when human model is configured)
-            if (!kata_human_model_.empty()) {
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+            // Toggle OGS / KataGo mode (only when human model is configured; doesn't
+            // apply mid-game since only the DISPLAY column is shown there). Only two
+            // categories exist, so LB and RB both just flip it either direction.
+            if (!match_menu_.ingame && !kata_human_model_.empty()) {
                 match_menu_.katago_mode = !match_menu_.katago_mode;
+                if (match_menu_.katago_mode) normalize_size_sel_for_katago();
                 // Clamp row when switching to OGS mode's smaller column
                 if (!match_menu_.katago_mode && match_menu_.focus_col == 1
                         && match_menu_.focus_row >= 3)
@@ -1002,8 +1304,33 @@ void App::handle_controller_button(Uint8 btn) {
             break;
         case SDL_CONTROLLER_BUTTON_A: {
             int r = match_menu_.focus_row;
-            if (match_menu_.focus_col == 0) {
-                match_menu_.size_sel[r] = !match_menu_.size_sel[r];
+            if (match_menu_.focus_col == display_col) {
+                if (r == 0) {
+                    match_menu_.show_coords_sel = !match_menu_.show_coords_sel;
+                    show_coords_ = match_menu_.show_coords_sel;
+                } else if (r == 1) {
+                    match_menu_.analysis_sel = !match_menu_.analysis_sel;
+                    kata_analysis_enabled_   = match_menu_.analysis_sel;
+                    if (kata_analysis_enabled_) {
+                        kata_query_after_ = SDL_GetTicks() + 1000;
+                    } else {
+                        kata_suggestion_count_ = 0;
+                        kata_score_lead_ = FLT_MAX;
+                        kata_query_after_ = 0;
+                    }
+                } else if (r == 2) {
+                    match_menu_.chain_sel = !match_menu_.chain_sel;
+                    chain_mode_           = match_menu_.chain_sel;
+                } else {
+                    match_menu_.square_sel = !match_menu_.square_sel;
+                    square_stones_         = match_menu_.square_sel;
+                }
+            } else if (match_menu_.focus_col == 0) {
+                if (match_menu_.katago_mode) {
+                    for (int i = 0; i < 3; i++) match_menu_.size_sel[i] = (i == r);  // radio
+                } else {
+                    match_menu_.size_sel[r] = !match_menu_.size_sel[r];
+                }
             } else if (match_menu_.katago_mode) {
                 match_menu_.katago_str = r;   // radio — single select
             } else {
@@ -1017,6 +1344,7 @@ void App::handle_controller_button(Uint8 btn) {
             close_menu();
             break;
         case SDL_CONTROLLER_BUTTON_START:
+            if (match_menu_.ingame) { close_menu(); break; }  // no new search mid-game
             save_prefs();
             if (match_menu_.katago_mode) {
                 start_local_game();
@@ -1033,10 +1361,10 @@ void App::handle_controller_button(Uint8 btn) {
     }
 
     if (state_ == AppState::SEARCHING) {
-        if (btn == SDL_CONTROLLER_BUTTON_B || btn == SDL_CONTROLLER_BUTTON_BACK) {
+        if (btn == SDL_CONTROLLER_BUTTON_B) {
             net_.cmd_cancel_match();
             state_ = AppState::LOBBY;
-            set_status("PRESS START TO FIND GAME");
+            set_status("PRESS " GLYPH_PS_CROSS " TO FIND GAME");
             draw();
         }
         return;
@@ -1104,8 +1432,7 @@ void App::handle_controller_button(Uint8 btn) {
             if (pass_confirm_) {
                 pass_confirm_ = false;
                 if (is_local_game_) {
-                    game_.board.turn_is_black = !game_.board.turn_is_black;
-                    game_.history.push_back(game_.board);
+                    apply_pass();
                     kata_gtp_.send_play(game_.my_color, -1, -1, game_.board_size);
                     local_prev_was_pass_ = true;
                     game_.my_turn = false;
@@ -1113,7 +1440,7 @@ void App::handle_controller_button(Uint8 btn) {
                     set_status("PASSED — KATAGO THINKING...");
                 } else {
                     net_.cmd_send_pass(game_.game_id);
-                    game_.board.turn_is_black = !game_.board.turn_is_black;
+                    apply_pass();  // optimistic, same pattern as apply_move for real moves
                     game_.pending_col = -1;
                     game_.pending_row = -1;
                     game_.my_turn = false;
@@ -1129,7 +1456,8 @@ void App::handle_controller_button(Uint8 btn) {
             if (resign_confirm_) {
                 resign_confirm_ = false;
                 if (is_local_game_) {
-                    end_local_game("W+R");  // player resigned → White wins
+                    // Player resigned → the other color wins
+                    end_local_game(std::string(game_.my_color == 1 ? "W" : "B") + "+R");
                 } else {
                     net_.cmd_send_resign(game_.game_id);
                     set_status("RESIGNED");
@@ -1141,17 +1469,8 @@ void App::handle_controller_button(Uint8 btn) {
             }
             break;
 
-        case SDL_CONTROLLER_BUTTON_BACK:
-            if (is_local_game_) {
-                kata_gtp_.stop();
-                is_local_game_ = false;
-                state_ = AppState::LOBBY;
-                game_.board.reset();
-                load_demo_game();
-                set_status("PRESS START TO FIND GAME");
-                draw();
-                return;
-            }
+        case SDL_CONTROLLER_BUTTON_X:
+            undo_local_move();
             break;
 
         default: break;
@@ -1169,38 +1488,25 @@ void App::handle_controller_button(Uint8 btn) {
             return;
         }
         if (btn == SDL_CONTROLLER_BUTTON_A || btn == SDL_CONTROLLER_BUTTON_START) {
+            if (!stone_removal_has_ogs_territory_) {
+                // Server hasn't sent its own dead-stone detection yet — what's on screen
+                // is only our local KataGo guess. Sending accept now would tell the
+                // server we accept an empty/wrong stone set, not what's displayed.
+                flash_       = "WAITING FOR SERVER SCORE...";
+                flash_until_ = SDL_GetTicks() + 2000;
+                draw();
+                return;
+            }
             net_.cmd_accept_stones(game_.game_id);
-            my_accept_sent_ = true;
-            set_status("ACCEPTING...");
+            my_accept_sent_   = true;
+            accept_resend_at_ = SDL_GetTicks() + 6000;
+            set_status("ACCEPTING... WAITING FOR OPPONENT");
             draw();
         }
         return;
     }
 
     if (state_ == AppState::GAME_OVER) {
-        // Freeze on final board after local game — any button dismisses into analysis
-        if (local_result_pending_) {
-            local_result_pending_ = false;
-            if (btn == SDL_CONTROLLER_BUTTON_BACK) {
-                save_companion();
-                state_ = AppState::LOBBY;
-                game_.board.reset();
-                load_demo_game();
-                set_status("PRESS START TO FIND GAME");
-            } else {
-                build_analysis_tree();
-                kata_analysis_enabled_ = true;
-                set_status("GAME OVER — " + game_.result);
-                kata_for(game_.board_size).query_moves(
-                    analysis_cur_ ? analysis_cur_->board.board : game_.board.board,
-                    game_.board_size,
-                    analysis_cur_ ? (analysis_cur_->board.turn_is_black == 1)
-                                  : (game_.board.turn_is_black == 1));
-            }
-            draw();
-            return;
-        }
-
         int n = game_.board_size - 1;
         switch (btn) {
         case SDL_CONTROLLER_BUTTON_DPAD_UP:
@@ -1213,38 +1519,45 @@ void App::handle_controller_button(Uint8 btn) {
             game_.cursor_f = std::min(n, game_.cursor_f + 1); draw(); break;
         case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
         case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
-            if (analysis_cur_) {
-                // Find nearest ancestor whose parent has multiple children (the fork point).
-                // branch_root ends up as the immediate child of that fork.
-                AnalysisNode* branch_root = analysis_cur_;
-                while (branch_root->parent &&
-                       (int)branch_root->parent->children.size() <= 1)
-                    branch_root = branch_root->parent;
-
-                if (branch_root->parent &&
-                    (int)branch_root->parent->children.size() > 1) {
-                    AnalysisNode* fork_node = branch_root->parent;
-                    auto& siblings = fork_node->children;
-
-                    int cur_idx = 0;
-                    for (int i = 0; i < (int)siblings.size(); i++)
-                        if (siblings[i].get() == branch_root) { cur_idx = i; break; }
-
-                    int delta    = (btn == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 1 : -1;
-                    int next_idx = (cur_idx + delta + (int)siblings.size()) % (int)siblings.size();
-                    fork_node->active_child = next_idx;
-
-                    // Navigate into the new sibling branch as deep as possible.
-                    int steps = analysis_cur_->depth - fork_node->depth - 1;
-                    AnalysisNode* dest = siblings[next_idx].get();
-                    for (int i = 0; i < steps; i++) {
-                        if (dest->children.empty()) break;
-                        dest = dest->children[dest->active_child].get();
+            // Jump between ALL branches that reach the current move number, anywhere
+            // in the tree — not just siblings of the nearest fork. (The old nearest-
+            // fork version couldn't reach a branch whose common ancestor was farther
+            // up than the last fork below the cursor.)
+            if (analysis_cur_ && analysis_root_) {
+                int target_depth = analysis_cur_->depth;
+                // Collect every node at this depth, in DFS order (matches the tree
+                // panel's column order, so the cycle direction feels consistent).
+                std::vector<AnalysisNode*> peers;
+                std::function<void(AnalysisNode*)> walk = [&](AnalysisNode* node) {
+                    if (node->depth == target_depth) {
+                        peers.push_back(node);
+                        return;  // children are all deeper — no need to descend
                     }
+                    for (auto& c : node->children) walk(c.get());
+                };
+                walk(analysis_root_.get());
+
+                if (peers.size() > 1) {
+                    int cur_idx = 0;
+                    for (int i = 0; i < (int)peers.size(); i++)
+                        if (peers[i] == analysis_cur_) { cur_idx = i; break; }
+                    int delta = (btn == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 1 : -1;
+                    AnalysisNode* dest =
+                        peers[(cur_idx + delta + (int)peers.size()) % (int)peers.size()];
+
+                    // Re-aim every ancestor's active_child at the path to the new
+                    // node, so LT/RT stepping follows the branch we just landed on.
+                    for (AnalysisNode* p = dest; p->parent; p = p->parent)
+                        for (int i = 0; i < (int)p->parent->children.size(); i++)
+                            if (p->parent->children[i].get() == p) {
+                                p->parent->active_child = i;
+                                break;
+                            }
+
                     analysis_cur_ = dest;
                     build_analysis_tree_render();
                     kata_suggestion_count_ = 0;
-                    kata_score_lead_ = FLT_MAX;
+                    kata_score_lead_ = cached_analysis_score(analysis_cur_);
                     kata_query_after_ = SDL_GetTicks() + 1000;
                     draw();
                 }
@@ -1261,20 +1574,35 @@ void App::handle_controller_button(Uint8 btn) {
                         kata_query_after_ = 0;
                         kata_for(game_.board_size).query_moves(
                             analysis_cur_->board.board, game_.board_size,
-                            analysis_cur_->board.turn_is_black == 1);
+                            analysis_cur_->board.turn_is_black == 1, review_komi_);
                     }
                     draw();
                 }
             }
             break;
         case SDL_CONTROLLER_BUTTON_B:
-            if (analysis_cur_ && analysis_cur_->parent) {
-                analysis_cur_ = analysis_cur_->parent;
-                analysis_cur_->active_child = 0;  // RT follows main line after stepping back
-                build_analysis_tree_render();
-                kata_suggestion_count_ = 0;
-                kata_score_lead_ = FLT_MAX;
-                kata_query_after_ = SDL_GetTicks() + 1000;
+            // Letter labels: circle toggles an "A"/"B"/"C"… mark on the cursor point.
+            // (Stepping back is L2's job — circle's old step-back was redundant.)
+            if (analysis_cur_) {
+                auto& labels = analysis_cur_->labels;
+                int r = game_.cursor_r, f = game_.cursor_f;
+                bool removed = false;
+                for (size_t i = 0; i < labels.size(); i++)
+                    if (labels[i].r == r && labels[i].f == f) {
+                        labels.erase(labels.begin() + i);   // second press removes
+                        removed = true;
+                        break;
+                    }
+                if (!removed) {
+                    bool used[26] = {};
+                    for (const auto& l : labels)
+                        if (l.ch >= 'A' && l.ch <= 'Z') used[l.ch - 'A'] = true;
+                    for (int c = 0; c < 26; c++)
+                        if (!used[c]) {                     // lowest unused letter
+                            labels.push_back({r, f, char('A' + c)});
+                            break;
+                        }
+                }
                 draw();
             }
             break;
@@ -1282,36 +1610,37 @@ void App::handle_controller_button(Uint8 btn) {
             open_game_catalog();
             draw();
             break;
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+            review_cycle(-1);
+            break;
+        case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+            // L3/R3: jump to the previous/next SGF in the same directory as the
+            // currently open review — cycle marked positions or study puzzles
+            // without a round trip through the catalog.
+            review_cycle(+1);
+            break;
         case SDL_CONTROLLER_BUTTON_START:
-            kata_analysis_enabled_ = !kata_analysis_enabled_;
-            if (kata_analysis_enabled_) {
-                flash_       = "ANALYSIS ON";
-                flash_until_ = SDL_GetTicks() + 1500;
-                kata_query_after_ = SDL_GetTicks() + 1000;
-            } else {
-                flash_       = "ANALYSIS OFF";
-                flash_until_ = SDL_GetTicks() + 1500;
+            // Engine analysis toggle moved to the settings menu (BACK). Double-press
+            // START here is the standardized "back to lobby" gesture instead.
+            if (lobby_confirm_) {
+                lobby_confirm_ = false;
+                save_companion();  // persist scores + marks before leaving review
+                is_local_game_ = false;
+                state_ = AppState::LOBBY;
+                game_.history_pos = -1;
+                analysis_root_.reset();
+                analysis_cur_ = nullptr;
+                analysis_tree_render_.clear();
                 kata_suggestion_count_ = 0;
                 kata_score_lead_ = FLT_MAX;
                 kata_query_after_ = 0;
+                kata_analysis_enabled_ = true;
+                set_status("PRESS " GLYPH_PS_CROSS " TO FIND GAME");
+                game_.board.reset();
+                load_demo_game();
+            } else {
+                lobby_confirm_ = true;
             }
-            draw();
-            break;
-        case SDL_CONTROLLER_BUTTON_BACK:
-            save_companion();  // persist scores + marks before leaving review
-            is_local_game_ = false;
-            state_ = AppState::LOBBY;
-            game_.history_pos = -1;
-            analysis_root_.reset();
-            analysis_cur_ = nullptr;
-            analysis_tree_render_.clear();
-            kata_suggestion_count_ = 0;
-            kata_score_lead_ = FLT_MAX;
-            kata_query_after_ = 0;
-            kata_analysis_enabled_ = true;
-            set_status("PRESS START TO FIND GAME");
-            game_.board.reset();
-            load_demo_game();
             draw();
             break;
         }
@@ -1334,7 +1663,7 @@ void App::save_live_game() {
     // Locate games/ directory (same two-path probe as demo-game loader)
     std::string games_dir = exe_dir() + "games";
     auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesA(p.c_str());
+        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
     if (!is_dir(games_dir)) games_dir = exe_dir() + "../games";
@@ -1343,19 +1672,39 @@ void App::save_live_game() {
     std::string my_name  = (game_.my_color == 1) ? game_.black_name : game_.white_name;
     std::string opp_name = (game_.my_color == 1) ? game_.white_name : game_.black_name;
     std::string player_dir = Catalog::join_path(games_dir, my_name);
-    CreateDirectoryA(games_dir.c_str(), nullptr);
-    CreateDirectoryA(player_dir.c_str(), nullptr);
+    CreateDirectoryW(Catalog::utf8_to_wide(games_dir).c_str(), nullptr);
+    CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
+
+    // Local games (vs KataGo) have game_id 0 — there is nothing to fetch from OGS
+    // (the old code tried anyway, got HTTP 404, and silently saved no SGF at all,
+    // leaving the .katago companion orphaned and the game impossible to reopen).
+    // Write the SGF locally from our own move history instead — into a katago/
+    // subdirectory so practice games don't mingle with the real OGS archive.
+    // Local filenames get a time component: the opponent label is just the
+    // strength ("15 KYU"), so two same-strength games on the same day would
+    // otherwise overwrite each other.
+    bool local = (game_.game_id == 0);
+    std::string save_dir = player_dir;
+    if (local) {
+        save_dir = Catalog::join_path(player_dir, "katago");
+        CreateDirectoryW(Catalog::utf8_to_wide(save_dir).c_str(), nullptr);
+    }
 
     time_t t = time(nullptr);
-    char date[16];
-    strftime(date, sizeof(date), "%Y%m%d", localtime(&t));
+    char date[32];
+    strftime(date, sizeof(date), local ? "%Y%m%d-%H%M%S" : "%Y%m%d", localtime(&t));
     std::string filename = std::string(date) + "-"
                          + sgf_sanitize(my_name) + "-"
                          + sgf_sanitize(opp_name) + ".sgf";
-    std::string path = Catalog::join_path(player_dir, filename);
+    std::string path = Catalog::join_path(save_dir, filename);
 
-    // Derive companion path before launching async fetch
+    // Derive companion path before writing/fetching the SGF
     companion_path_ = path.substr(0, path.rfind('.')) + ".katago";
+
+    if (local) {
+        save_local_sgf(path);
+        return;
+    }
 
     int game_id = game_.game_id;
     std::thread([this, game_id, path] {
@@ -1363,11 +1712,235 @@ void App::save_live_game() {
     }).detach();
 }
 
+// Write an SGF for a locally-played game by diffing consecutive history snapshots
+// (the same move-recovery approach build_analysis_tree() uses). A snapshot pair with
+// no added stone is a pass.
+void App::save_local_sgf(const std::string& path) {
+    if (game_.history.size() < 2) return;  // no moves — nothing worth saving
+
+    FILE* f = Catalog::fopen_utf8(path, "wb");
+    if (!f) return;
+
+    char today[16];
+    time_t t = time(nullptr);
+    strftime(today, sizeof(today), "%Y-%m-%d", localtime(&t));
+    fprintf(f, "(;GM[1]FF[4]CA[UTF-8]SZ[%d]KM[7.5]PB[%s]PW[%s]DT[%s]",
+            game_.board_size, game_.black_name.c_str(), game_.white_name.c_str(), today);
+    if (!game_.result.empty())
+        fprintf(f, "RE[%s]", game_.result.c_str());
+    fprintf(f, "\n");
+
+    for (size_t i = 1; i < game_.history.size(); i++) {
+        const GameState& prev = game_.history[i - 1];
+        const GameState& cur  = game_.history[i];
+        int mr = -1, mf = -1;
+        for (int r = 0; r < game_.board_size && mr < 0; r++)
+            for (int fcol = 0; fcol < game_.board_size; fcol++)
+                if (cur.board[r][fcol] != 0 && prev.board[r][fcol] == 0) {
+                    mr = r; mf = fcol; break;
+                }
+        // Mover color: the stone value where one was added, else (for a pass) whoever's
+        // turn it was in the pre-move snapshot. Board values: 1 = black, 2 = white.
+        int is_black = (mr >= 0) ? (cur.board[mr][mf] == 1) : (prev.turn_is_black == 1);
+        if (mr >= 0)
+            fprintf(f, ";%c[%c%c]", is_black ? 'B' : 'W', 'a' + mf, 'a' + mr);
+        else
+            fprintf(f, ";%c[]", is_black ? 'B' : 'W');
+    }
+    fprintf(f, ")\n");
+    fclose(f);
+}
+
+// ── Marked positions (standalone flattened-SGF snapshots) ───────────────────
+
+std::string App::marked_position_path(int depth) const {
+    std::string games_dir = exe_dir() + "games";
+    auto is_dir = [](const std::string& p) {
+        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
+        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+    };
+    if (!is_dir(games_dir)) games_dir = exe_dir() + "../games";
+    if (!is_dir(games_dir)) games_dir = exe_dir();
+
+    std::string player_dir = Catalog::join_path(games_dir, my_username_.empty() ? "You" : my_username_);
+    std::string marked_dir = Catalog::join_path(player_dir, "marked");
+
+    std::string opp_name = (game_.my_color == 1) ? game_.white_name : game_.black_name;
+    time_t t = time(nullptr);
+    char date[16];
+    strftime(date, sizeof(date), "%Y%m%d", localtime(&t));
+    std::string filename = std::string(date) + "-" + sgf_sanitize(opp_name)
+                          + "-move" + std::to_string(depth) + ".sgf";
+    return Catalog::join_path(marked_dir, filename);
+}
+
+void App::save_marked_position(int depth) {
+    const GameState* gs = nullptr;
+    if (state_ == AppState::PLAYING) {
+        if (depth >= 0 && depth < (int)game_.history.size()) gs = &game_.history[depth];
+    } else if (state_ == AppState::GAME_OVER && analysis_cur_) {
+        gs = &analysis_cur_->board;
+    }
+    if (!gs) return;
+
+    std::string path = marked_position_path(depth);
+    std::string marked_dir = path.substr(0, path.find_last_of("/\\"));
+    std::string player_dir = marked_dir.substr(0, marked_dir.find_last_of("/\\"));
+    std::string games_dir  = player_dir.substr(0, player_dir.find_last_of("/\\"));
+    CreateDirectoryW(Catalog::utf8_to_wide(games_dir).c_str(), nullptr);
+    CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
+    CreateDirectoryW(Catalog::utf8_to_wide(marked_dir).c_str(), nullptr);
+
+    FILE* f = Catalog::fopen_utf8(path, "w");
+    if (!f) return;
+
+    auto sgf_escape = [](const std::string& s) {
+        std::string out;
+        for (char c : s) { if (c == ']' || c == '\\') out += '\\'; out += c; }
+        return out;
+    };
+
+    int n = gs->board_size;
+    fprintf(f, "(;GM[1]FF[4]CA[UTF-8]SZ[%d]", n);
+    for (int color = 1; color >= 0; color--) {  // black setup stones first, then white
+        bool any = false;
+        for (int r = 0; r < n && !any; r++)
+            for (int c = 0; c < n; c++)
+                if (gs->board[r][c] == (color ? 1 : 2)) { any = true; break; }
+        if (!any) continue;
+        fprintf(f, "%s", color ? "AB" : "AW");
+        for (int r = 0; r < n; r++)
+            for (int c = 0; c < n; c++)
+                if (gs->board[r][c] == (color ? 1 : 2))
+                    fprintf(f, "[%c%c]", char('a' + c), char('a' + r));
+    }
+    fprintf(f, "PL[%s]", gs->turn_is_black ? "B" : "W");
+    fprintf(f, "PB[%s]PW[%s]", sgf_escape(game_.black_name).c_str(), sgf_escape(game_.white_name).c_str());
+    time_t t = time(nullptr);
+    char date[16];
+    strftime(date, sizeof(date), "%Y-%m-%d", localtime(&t));
+    fprintf(f, "DT[%s]", date);
+    fprintf(f, "C[Marked position, move %d]", depth);
+    fprintf(f, ")\n");
+    fclose(f);
+
+    if (depth < (int)marked_paths_.size()) marked_paths_[depth] = path;
+}
+
+void App::delete_marked_position(int depth) {
+    if (depth < 0 || depth >= (int)marked_paths_.size()) return;
+    if (marked_paths_[depth].empty()) return;  // marked in a prior session — no known path to clean up
+    remove(marked_paths_[depth].c_str());
+    marked_paths_[depth].clear();
+}
+
+// ── Auto-detected study puzzles ──────────────────────────────────────────────
+
+// Evaluate depth d ("position before the move played at d") against the study-
+// puzzle criterion: it was my turn, exactly one move kept the game, and I played
+// something else that lost it. Uses only data the background sweep already
+// produced — no extra KataGo queries. Called only once the game is over.
+void App::check_puzzle(int d) {
+    if (game_.my_color != 0 && game_.my_color != 1) return;   // review — not my game
+    if (puzzle_saved_.count(d)) return;
+    if (d < 0 || d + 1 >= (int)game_.history.size()) return;
+    auto it = puzzle_eval_.find(d);
+    if (it == puzzle_eval_.end() || it->second.best_sl == FLT_MAX) return;
+    const GameState& pos = game_.history[d];
+    if ((int)pos.turn_is_black != game_.my_color) return;     // opponent's move
+    if (d + 1 >= (int)move_scores_.size() || move_scores_[d + 1] == FLT_MAX) return;
+
+    const float SAVABLE    = -2.0f;  // best move leaves me at worst ~2 pts behind
+    const float ONLY_MOVE  =  8.0f;  // every alternative loses at least this much more
+    const float AFTER_LOST = -7.0f;  // my actual move left me at least this far behind
+
+    float mp        = (game_.my_color == 1) ? 1.f : -1.f;     // to my perspective
+    float best_my   = mp * it->second.best_sl;
+    float second_my = (it->second.second_sl == FLT_MAX) ? -1e9f : mp * it->second.second_sl;
+    float after_my  = mp * move_scores_[d + 1];
+
+    if (best_my < SAVABLE)               return;  // game was already gone
+    if (second_my > best_my - ONLY_MOVE) return;  // more than one way to save it
+    if (after_my > AFTER_LOST)           return;  // my move didn't actually lose it
+
+    // Direct coordinate check as a final guard: if I somehow played the saving
+    // move itself (and the score drop came from elsewhere/noise), don't mark.
+    int pr = -1, pf = -1;
+    const GameState& nxt = game_.history[d + 1];
+    for (int r = 0; r < pos.board_size && pr < 0; r++)
+        for (int c = 0; c < pos.board_size; c++)
+            if (nxt.board[r][c] != 0 && pos.board[r][c] == 0) { pr = r; pf = c; break; }
+    if (pr == it->second.best_r && pf == it->second.best_f) return;
+
+    save_puzzle_position(d);
+    puzzle_saved_.insert(d);
+    flash_       = "STUDY PUZZLE SAVED (MOVE " + std::to_string(d) + ")";
+    flash_until_ = SDL_GetTicks() + 2500;
+}
+
+// Write the puzzle as a flattened setup SGF (same format as manual marked
+// positions) into games/<user>/puzzles/. The saving move is deliberately NOT
+// recorded anywhere in the file — reviewing the puzzle with engine analysis
+// reveals the answer on demand instead of spoiling it up front.
+void App::save_puzzle_position(int depth) {
+    if (depth < 0 || depth >= (int)game_.history.size()) return;
+    const GameState* gs = &game_.history[depth];
+
+    std::string games_dir = exe_dir() + "games";
+    auto is_dir = [](const std::string& p) {
+        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
+        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+    };
+    if (!is_dir(games_dir)) games_dir = exe_dir() + "../games";
+    if (!is_dir(games_dir)) games_dir = exe_dir();
+    std::string player_dir = Catalog::join_path(games_dir, my_username_.empty() ? "You" : my_username_);
+    std::string puzzle_dir = Catalog::join_path(player_dir, "puzzles");
+    CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
+    CreateDirectoryW(Catalog::utf8_to_wide(puzzle_dir).c_str(), nullptr);
+
+    std::string opp_name = (game_.my_color == 1) ? game_.white_name : game_.black_name;
+    time_t t = time(nullptr);
+    char date[32];
+    strftime(date, sizeof(date), "%Y%m%d-%H%M%S", localtime(&t));
+    std::string path = Catalog::join_path(puzzle_dir,
+        std::string(date) + "-" + sgf_sanitize(opp_name) + "-move" + std::to_string(depth) + ".sgf");
+
+    FILE* f = Catalog::fopen_utf8(path, "w");
+    if (!f) return;
+    auto sgf_escape = [](const std::string& s) {
+        std::string out;
+        for (char c : s) { if (c == ']' || c == '\\') out += '\\'; out += c; }
+        return out;
+    };
+    int n = gs->board_size;
+    fprintf(f, "(;GM[1]FF[4]CA[UTF-8]SZ[%d]", n);
+    for (int color = 1; color >= 0; color--) {  // black setup stones first, then white
+        bool any = false;
+        for (int r = 0; r < n && !any; r++)
+            for (int c = 0; c < n; c++)
+                if (gs->board[r][c] == (color ? 1 : 2)) { any = true; break; }
+        if (!any) continue;
+        fprintf(f, "%s", color ? "AB" : "AW");
+        for (int r = 0; r < n; r++)
+            for (int c = 0; c < n; c++)
+                if (gs->board[r][c] == (color ? 1 : 2))
+                    fprintf(f, "[%c%c]", char('a' + c), char('a' + r));
+    }
+    fprintf(f, "PL[%s]", gs->turn_is_black ? "B" : "W");
+    fprintf(f, "PB[%s]PW[%s]", sgf_escape(game_.black_name).c_str(), sgf_escape(game_.white_name).c_str());
+    char day[16];
+    strftime(day, sizeof(day), "%Y-%m-%d", localtime(&t));
+    fprintf(f, "DT[%s]", day);
+    fprintf(f, "C[Study puzzle: one move keeps the game. From move %d.]", depth);
+    fprintf(f, ")\n");
+    fclose(f);
+}
+
 void App::save_companion() {
     if (companion_path_.empty()) return;
     if (move_scores_.empty() && move_marked_.empty()) return;
 
-    FILE* f = fopen(companion_path_.c_str(), "w");
+    FILE* f = Catalog::fopen_utf8(companion_path_, "w");
     if (!f) return;
 
     // Scores line: "S val val val ..." (nan for unknown)
@@ -1390,7 +1963,7 @@ void App::save_companion() {
 
 void App::load_companion() {
     if (companion_path_.empty()) return;
-    FILE* f = fopen(companion_path_.c_str(), "r");
+    FILE* f = Catalog::fopen_utf8(companion_path_, "r");
     if (!f) return;
 
     char line[65536];
@@ -1428,6 +2001,26 @@ static const char* const KATA_GTP_NAMES[7] = {
     "1 KYU",  "1 DAN",  "5 DAN"
 };
 
+// Adaptive strength: a fractional position on KataGo's full human-profile ladder,
+// rank index 0..28 → 20k..1k (0..19) then 1d..9d (20..28).
+static constexpr int KATA_RANK_MAX = 28;
+static std::string kata_rank_profile(int idx) {
+    return idx <= 19 ? "preaz_" + std::to_string(20 - idx) + "k"
+                     : "preaz_" + std::to_string(idx - 19) + "d";
+}
+static std::string kata_rank_label(int idx) {
+    return idx <= 19 ? std::to_string(20 - idx) + " KYU"
+                     : std::to_string(idx - 19) + " DAN";
+}
+
+void App::normalize_size_sel_for_katago() {
+    int keep = 2;  // default 19x19
+    for (int i = 0; i < 3; i++)
+        if (match_menu_.size_sel[i]) { keep = i; break; }
+    for (int i = 0; i < 3; i++)
+        match_menu_.size_sel[i] = (i == keep);
+}
+
 void App::start_local_game() {
     // Pick board size (first checked, default 9x9)
     int bs = 19;
@@ -1435,14 +2028,27 @@ void App::start_local_game() {
     else if (match_prefs_.sizes[1]) bs = 13;
 
     int str = match_prefs_.katago_str;
-    if (str < 0 || str >= 7) str = 2;
+    if (str < 0 || str > 7) str = 2;
+
+    // Index 7 = ADAPTIVE: resolve the fractional rating to the nearest profile rank
+    std::string profile, opp_label;
+    adaptive_game_ = (str == 7);
+    if (adaptive_game_) {
+        int idx = (int)std::lround(adaptive_rank_);
+        idx = std::max(0, std::min(KATA_RANK_MAX, idx));
+        profile   = kata_rank_profile(idx);
+        opp_label = "ADAPTIVE (" + kata_rank_label(idx) + ")";
+    } else {
+        profile   = KATA_GTP_PROFILES[str];
+        opp_label = KATA_GTP_NAMES[str];
+    }
 
     if (!kata_gtp_.start(kata_exe_, kata_model_, kata_human_model_,
-                         KATA_GTP_PROFILES[str], bs, 7.5f)) {
+                         profile, bs, 7.5f)) {
         flash_       = "FAILED TO START KATAGO";
         flash_until_ = SDL_GetTicks() + 3000;
         state_ = AppState::LOBBY;
-        set_status("PRESS START TO FIND GAME");
+        set_status("PRESS " GLYPH_PS_CROSS " TO FIND GAME");
         draw();
         return;
     }
@@ -1456,10 +2062,11 @@ void App::start_local_game() {
     memset(game_.ownership,   0, sizeof(game_.ownership));
     game_.game_id       = 0;
     game_.board_size    = bs;
-    game_.my_color      = 1;   // player is Black
+    game_.my_color      = rand() % 2;   // randomly Black or White each game
     game_.my_player_id  = 0;
-    game_.black_name    = my_username_.empty() ? "You" : my_username_;
-    game_.white_name    = KATA_GTP_NAMES[str];
+    std::string my_name = my_username_.empty() ? "You" : my_username_;
+    game_.black_name    = (game_.my_color == 1) ? my_name : opp_label;
+    game_.white_name    = (game_.my_color == 0) ? my_name : opp_label;
     game_.black_rank    = game_.white_rank = "";
     game_.black_secs = game_.white_secs = -1;
     game_.black_periods = game_.white_periods = -1;
@@ -1473,45 +2080,68 @@ void App::start_local_game() {
     game_.free_handicap = false;
     game_.history.push_back(game_.board);
 
+    // Fresh score-graph / mark storage — never inherit the previous game's arrays.
+    // (Leftovers made the new game's graph show the *previous* game's scores, made
+    // the background sweep think those depths were already done, and let undo pop
+    // scores that belonged to a different game entirely.)
+    move_scores_.assign(game_.history.size(), FLT_MAX);
+    move_marked_.assign(game_.history.size(), false);
+    marked_paths_.assign(game_.history.size(), "");
+    bg_analysis_next_  = 0;
+    bg_analysis_depth_ = -1;
+    bg_analysis_busy_  = false;
+    puzzle_eval_.clear();
+    puzzle_saved_.clear();
+    review_path_.clear();  // this GAME_OVER will be a live game's, not a loaded file
+
     black_label_ = game_.black_name;
     white_label_ = game_.white_name;
 
     is_local_game_        = true;
     local_prev_was_pass_  = false;
-    local_result_pending_ = false;
-    game_.my_turn         = true;
+    game_.my_turn         = (game_.my_color == 1);   // Black always moves first
 
     kata_suggestion_count_ = 0;
     kata_score_lead_       = FLT_MAX;
     kata_analysis_enabled_ = false;   // analysis overlay off during live play
+    review_komi_           = 7.5f;    // local games are always played at the standard komi
 
     state_ = AppState::PLAYING;
-    set_status("YOUR TURN  (BLACK)");
+    sound_.play_game_start();
+    if (game_.my_turn) {
+        set_status(std::string("YOUR TURN  (") + (game_.my_color == 1 ? "BLACK" : "WHITE") + ")");
+    } else {
+        // Player is White — KataGo (Black) opens
+        kata_gtp_.request_genmove(1 - game_.my_color);
+        set_status("KATAGO THINKING...");
+    }
     draw();
 }
 
 void App::handle_katago_gtp_move(int row, int col) {
+    const char* my_col_str = (game_.my_color == 1) ? "B" : "W";
+    std::string my_turn_status = std::string("YOUR TURN  (")
+                                + (game_.my_color == 1 ? "BLACK" : "WHITE") + ")";
     if (row == -2) {
         // KataGo resigned — show territory view before going to analysis
         flash_       = "KATAGO RESIGNED — YOU WIN!";
         flash_until_ = SDL_GetTicks() + 4000;
         kata_gtp_.stop();  // no more GTP commands needed
-        begin_local_stone_removal("B+R");
+        begin_local_stone_removal(std::string(my_col_str) + "+R");
         return;
     }
     if (row == -1) {
         // KataGo passed
         flash_       = "KATAGO PASSED";
         flash_until_ = SDL_GetTicks() + 3000;
-        game_.board.turn_is_black = !game_.board.turn_is_black;
-        game_.history.push_back(game_.board);
+        apply_pass();
         if (local_prev_was_pass_) {
             begin_local_stone_removal();
             return;
         }
         local_prev_was_pass_ = true;
         game_.my_turn = true;
-        set_status("YOUR TURN  (BLACK)");
+        set_status(my_turn_status);
         draw();
         return;
     }
@@ -1520,7 +2150,7 @@ void App::handle_katago_gtp_move(int row, int col) {
     local_prev_was_pass_ = false;
     pass_confirm_        = false;
     game_.my_turn        = true;
-    set_status("YOUR TURN  (BLACK)");
+    set_status(my_turn_status);
     draw();
 }
 
@@ -1548,22 +2178,76 @@ void App::begin_local_stone_removal(const std::string& forced_result) {
     draw();
 }
 
+// ── Adaptive strength bookkeeping ─────────────────────────────────────────────
+
+void App::load_adaptive() {
+    FILE* f = fopen((exe_dir() + "adaptive_level.txt").c_str(), "r");
+    if (!f) return;
+    float v = 0.f;
+    if (fscanf(f, "%f", &v) == 1 && v >= 0.f && v <= (float)KATA_RANK_MAX)
+        adaptive_rank_ = v;
+    fclose(f);
+}
+
+void App::save_adaptive() {
+    FILE* f = fopen((exe_dir() + "adaptive_level.txt").c_str(), "w");
+    if (!f) return;
+    fprintf(f, "%.3f\n", adaptive_rank_);
+    fclose(f);
+}
+
+// Nudge the adaptive rating after a finished adaptive game. The player is always
+// Black in local games, so "B+..." is a win. Step size scales with the score
+// margin — a 40-point blowout moves a full rank, a nail-biter barely moves —
+// with resignations counted as a solid but not extreme result.
+void App::update_adaptive(const std::string& result) {
+    if (result.size() < 3 || (result[0] != 'B' && result[0] != 'W')) return;
+    bool won = (result[0] == 'B');
+
+    float step;
+    std::string margin = result.substr(2);
+    if (!margin.empty() && (margin[0] == 'R' || margin[0] == 'T')) {
+        step = 0.6f;
+    } else {
+        float pts = (float)atof(margin.c_str());
+        step = std::max(0.15f, std::min(1.0f, pts / 25.0f));
+    }
+
+    adaptive_rank_ += won ? step : -step;
+    adaptive_rank_  = std::max(0.f, std::min((float)KATA_RANK_MAX, adaptive_rank_));
+    save_adaptive();
+
+    int idx = std::max(0, std::min(KATA_RANK_MAX, (int)std::lround(adaptive_rank_)));
+    flash_       = std::string("ADAPTIVE LEVEL: ") + kata_rank_label(idx)
+                 + (won ? " (UP)" : " (DOWN)");
+    flash_until_ = SDL_GetTicks() + 3500;
+}
+
 void App::end_local_game(const std::string& result) {
     kata_gtp_.stop();
+    if (adaptive_game_) {
+        update_adaptive(result);
+        adaptive_game_ = false;
+    }
     is_local_game_        = false;
-    local_result_pending_ = true;
+    // Restart the background sweep from move 0 so any depths that missed scoring
+    // during play (lost responses, mid-game undos) get filled in during review.
+    bg_analysis_next_ = 0;
+    lobby_confirm_         = false;
+    review_komi_           = 7.5f;  // local games are always played at the standard komi
     state_ = AppState::GAME_OVER;
     game_.result = result;
     save_live_game();
-    set_status(result + "  —  PRESS ANY BUTTON TO REVIEW");
+    // Scan for auto study puzzles (remaining depths get checked as the background
+    // sweep fills them in during review)
+    for (int d = 0; d + 1 < (int)game_.history.size(); d++) check_puzzle(d);
+    // Straight into analysis — the score was already shown big on the stone-removal
+    // screen, so a second result-confirmation screen here was redundant.
+    build_analysis_tree();
     kata_suggestion_count_ = 0;
-    kata_score_lead_       = FLT_MAX;
+    kata_score_lead_       = cached_analysis_score(analysis_cur_);
     kata_analysis_enabled_ = false;
-    // Keep analysis_cur_ = nullptr so make_ds() shows game_.board (final position)
-    // and doesn't override the status with "ANALYSIS - MOVE N".
-    // build_analysis_tree() is deferred until the user dismisses this screen.
-    analysis_root_.reset();
-    analysis_cur_ = nullptr;
+    set_status("GAME OVER — " + result);
     draw();
 }
 
@@ -1571,28 +2255,221 @@ void App::end_local_game(const std::string& result) {
 
 void App::open_game_catalog() {
     if (catalog_.active) return;
+    save_companion();  // persist any in-progress review scores/marks before switching away
 
     // Locate games/<username>/ — same two-path probe as demo loader
     std::string gdir = exe_dir() + "games";
     auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesA(p.c_str());
+        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
     if (!is_dir(gdir)) gdir = exe_dir() + "../games";
 
     std::string my_dir = Catalog::join_path(gdir, my_username_);
 
-    // Open in flat filesystem mode (skip the virtual player browser)
-    catalog_.open(my_dir);
+    // Reopening the catalog resumes where it was last time (same subdirectory —
+    // e.g. puzzles/ or marked/ — and roughly the same cursor spot) instead of
+    // resetting to the root on every visit. First open of the session still
+    // starts fresh at the root.
+    bool resume = catalog_.base_dir == my_dir;
+    int  old_index  = catalog_.index;
+    int  old_scroll = catalog_.scroll;
+    if (!resume) {
+        catalog_.open(my_dir);   // full reset (also kicks off the search index)
+        catalog_.current_subdir = "";
+    } else {
+        catalog_.selection_made = false;
+        catalog_.selected_path.clear();
+        catalog_.search_query.clear();
+        catalog_.search_mode = false;
+        catalog_.active      = true;
+    }
+    // Flat filesystem mode (skip the virtual player browser)
     catalog_.virtual_player_mode = false;
     catalog_.virtual_year_mode   = false;
-    catalog_.current_subdir      = "";
-    catalog_.load_entries();
+    catalog_.load_entries();     // refresh — new games/puzzles may have appeared
+
+    int n = (int)catalog_.entries.size();
     catalog_.index  = 0;
     catalog_.scroll = 0;
-    catalog_.ensure_names_loaded(0, 17);  // prefill first visible page (15 rows + margin)
+    if (resume && n > 0) {
+        catalog_.index  = std::min(old_index, n - 1);
+        catalog_.scroll = old_scroll;
+        // If a review is open and it lives in the displayed directory, park the
+        // cursor on it — after L3/R3 cycling this lands on the current file.
+        if (!review_path_.empty()) {
+            size_t sep = review_path_.find_last_of("/\\");
+            std::string rdir  = (sep == std::string::npos) ? "" : review_path_.substr(0, sep);
+            std::string rname = (sep == std::string::npos) ? review_path_ : review_path_.substr(sep + 1);
+            std::string shown = catalog_.current_subdir.empty()
+                                ? catalog_.base_dir
+                                : Catalog::join_path(catalog_.base_dir, catalog_.current_subdir);
+            if (rdir == shown)
+                for (int i = 0; i < n; i++)
+                    if (catalog_.entries[i].type == 0 && catalog_.entries[i].name == rname) {
+                        catalog_.index = i;
+                        break;
+                    }
+        }
+        // Keep the cursor row within the visible window (15 rows)
+        catalog_.scroll = std::min(catalog_.scroll, catalog_.index);
+        if (catalog_.index >= catalog_.scroll + 15)
+            catalog_.scroll = catalog_.index - 14;
+    }
+    catalog_delete_confirm_ = false;
+    // Parse player names for every entry up front, not just the first visible page —
+    // each parse only reads a 4KB SGF header, so even a few hundred games open fast,
+    // and the whole list shows "Black vs White" immediately instead of raw filenames
+    // trickling in as rows scroll into view.
+    catalog_.ensure_names_loaded(0, (int)catalog_.entries.size());
     thumb_path_ = "";                     // force thumbnail reload on first draw
     update_catalog_thumb();
+}
+
+void App::delete_catalog_game(const std::string& sgf_path) {
+    if (sgf_path.empty()) return;
+    if (_wremove(Catalog::utf8_to_wide(sgf_path).c_str()) != 0) {
+        flash_       = "DELETE FAILED";
+        flash_until_ = SDL_GetTicks() + 2000;
+        return;
+    }
+    // Companion score/mark file goes with it (fails silently if there isn't one)
+    size_t dot = sgf_path.rfind('.');
+    if (dot != std::string::npos) {
+        std::string companion = sgf_path.substr(0, dot) + ".katago";
+        _wremove(Catalog::utf8_to_wide(companion).c_str());
+        // If the deleted game is the one currently loaded behind the catalog,
+        // forget its companion path so exiting review can't resurrect the file.
+        if (companion == companion_path_) companion_path_.clear();
+    }
+    flash_       = "GAME DELETED";
+    flash_until_ = SDL_GetTicks() + 1500;
+
+    // Refresh the listing in place, keeping the cursor near where it was
+    int old_index = catalog_.index;
+    catalog_.load_entries();
+    int n = (int)catalog_.entries.size();
+    catalog_.index  = (n == 0) ? 0 : std::min(old_index, n - 1);
+    catalog_.scroll = std::min(catalog_.scroll, std::max(0, catalog_.index));
+    catalog_.ensure_names_loaded(0, n);
+    thumb_path_ = "";
+    update_catalog_thumb();
+}
+
+void App::open_settings_menu() {
+    pre_menu_state_          = state_;
+    match_menu_.ingame       = (state_ != AppState::LOBBY);
+    match_menu_.focus_col    = 0;
+    match_menu_.focus_row    = 0;
+    match_menu_.katago_mode  = match_prefs_.katago_mode;
+    match_menu_.katago_str   = match_prefs_.katago_str;
+    {
+        int idx = std::max(0, std::min(KATA_RANK_MAX, (int)std::lround(adaptive_rank_)));
+        match_menu_.adaptive_label = "ADAPTIVE (" + kata_rank_label(idx) + ")";
+    }
+    for (int i = 0; i < 3; i++) match_menu_.size_sel[i]  = match_prefs_.sizes[i];
+    for (int i = 0; i < 3; i++) match_menu_.speed_sel[i] = match_prefs_.speeds[i];
+    if (match_menu_.katago_mode) normalize_size_sel_for_katago();
+    match_menu_.show_coords_sel = show_coords_;
+    match_menu_.analysis_sel    = kata_analysis_enabled_;
+    match_menu_.chain_sel       = chain_mode_;
+    match_menu_.square_sel      = square_stones_;
+    state_ = AppState::MATCH_MENU;
+    renderer_->draw_match_menu(match_menu_);
+}
+
+// Triangle from LOBBY: fresh empty 19x19 board in the standard analysis mode —
+// same tree panel, branching, labels, and engine toggle as a game review, just
+// with nothing played yet.
+void App::start_free_analysis() {
+    game_.history.clear();
+    game_.history_pos = -1;
+    game_.board_size  = 19;
+    game_.board.reset();
+    game_.board.board_size    = 19;
+    game_.board.turn_is_black = 1;
+    game_.cursor_r = game_.cursor_f = 9;
+    game_.black_name = "BLACK";
+    game_.white_name = "WHITE";
+    game_.black_rank = game_.white_rank = "";
+    game_.result.clear();
+    game_.my_color   = -1;   // pure analysis — no "my side"
+    game_.game_id    = 0;
+    game_.black_secs = game_.white_secs = -1;
+    game_.history.push_back(game_.board);
+
+    black_label_ = game_.black_name;
+    white_label_ = game_.white_name;
+    review_komi_ = 7.5f;
+
+    move_scores_.assign(game_.history.size(), FLT_MAX);
+    move_marked_.assign(game_.history.size(), false);
+    marked_paths_.assign(game_.history.size(), "");
+    puzzle_eval_.clear();
+    puzzle_saved_.clear();
+    bg_analysis_next_  = 0;
+    bg_analysis_depth_ = -1;
+    bg_analysis_busy_  = false;
+    companion_path_.clear();   // nothing on disk to persist scores/marks to
+    review_path_.clear();      // L3/R3 file cycling doesn't apply here
+    is_local_game_ = false;
+
+    build_analysis_tree();
+    state_ = AppState::GAME_OVER;
+    lobby_confirm_         = false;
+    kata_suggestion_count_ = 0;
+    kata_score_lead_       = FLT_MAX;
+    kata_analysis_enabled_ = false;  // toggle on via the settings menu as usual
+    set_status("FREE ANALYSIS");
+    draw();
+}
+
+// L3/R3 while reviewing: jump straight to the previous/next SGF in the same
+// directory as the open file — cycling marked positions or study puzzles without
+// a round trip through the catalog. Files are ordered by name (case-insensitive);
+// both the marked/ and puzzles/ naming schemes start with a date+time, so name
+// order is chronological order.
+void App::review_cycle(int dir) {
+    if (state_ != AppState::GAME_OVER || review_path_.empty()) return;
+    size_t sep = review_path_.find_last_of("/\\");
+    if (sep == std::string::npos) return;
+    std::string dir_path = review_path_.substr(0, sep);
+    std::string cur_name = review_path_.substr(sep + 1);
+
+    std::vector<std::string> files;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(
+        Catalog::utf8_to_wide(Catalog::join_path(dir_path, "*")).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string name = Catalog::wide_to_utf8(fd.cFileName);
+        if (name.size() < 4) continue;
+        std::string ext = name.substr(name.size() - 4);
+        for (char& c : ext) c = (char)tolower((unsigned char)c);
+        if (ext == ".sgf") files.push_back(name);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+
+    if (files.size() < 2) {
+        flash_       = "NO OTHER FILES HERE";
+        flash_until_ = SDL_GetTicks() + 1500;
+        draw();
+        return;
+    }
+    std::sort(files.begin(), files.end(), [](const std::string& a, const std::string& b) {
+        return _stricmp(a.c_str(), b.c_str()) < 0;
+    });
+    int idx = 0;
+    for (int i = 0; i < (int)files.size(); i++)
+        if (files[i] == cur_name) { idx = i; break; }
+    int next = (idx + dir + (int)files.size()) % (int)files.size();
+
+    save_companion();  // persist this file's scores/marks before moving on
+    load_sgf_for_review(Catalog::join_path(dir_path, files[next]));
+    flash_       = "FILE " + std::to_string(next + 1) + "/" + std::to_string((int)files.size());
+    flash_until_ = SDL_GetTicks() + 1500;
+    draw();
 }
 
 void App::load_sgf_for_review(const std::string& path) {
@@ -1614,11 +2491,27 @@ void App::load_sgf_for_review(const std::string& path) {
     game_.black_secs  = -1;
     game_.white_secs  = -1;
 
-    // Push initial empty position
+    // Apply AB[]/AW[] setup stones directly to the board as a single starting
+    // position — they're facts about the position, not sequential moves, so no
+    // capture logic runs and they collapse into one history entry, not one per stone.
+    for (int i = 0; i < g.setup_count; i++) {
+        int r, f;
+        if (parse_sgf_move(g.moves[i], r, f))
+            game_.board.board[r][f] = (g.colors[i] == 1) ? 1 : 2;
+    }
+    if (g.has_pl) {
+        game_.board.turn_is_black = g.start_black;
+    } else if (g.setup_count > 0) {
+        // No explicit PL[]: fall back to the standard handicap convention —
+        // whoever placed the last setup stone, the other color moves first.
+        game_.board.turn_is_black = (g.colors[g.setup_count - 1] == 1) ? 0 : 1;
+    } else {
+        game_.board.turn_is_black = 1;
+    }
     game_.history.push_back(game_.board);
 
-    // Replay moves: trust the explicit color tags in the SGF
-    for (int i = 0; i < g.move_count; i++) {
+    // Replay actual moves: trust the explicit color tags in the SGF
+    for (int i = g.setup_count; i < g.move_count; i++) {
         int r, f;
         bool is_black = (g.colors[i] == 1);
         game_.board.turn_is_black = is_black ? 1 : 0;
@@ -1632,14 +2525,19 @@ void App::load_sgf_for_review(const std::string& path) {
 
     black_label_ = game_.black_name;
     white_label_ = game_.white_name;
+    review_komi_ = g.komi;  // from KM[] (with the Fox-Go 375→3.5 guard applied at parse time)
 
     // Reset score graph / mark storage and derive companion path
     move_scores_.assign(game_.history.size(), FLT_MAX);
     move_marked_.assign(game_.history.size(), false);
+    marked_paths_.assign(game_.history.size(), "");
+    puzzle_eval_.clear();   // reviews never generate puzzles (my_color = -1),
+    puzzle_saved_.clear();  // but don't let live-game leftovers linger either
     bg_analysis_next_  = 0;
     bg_analysis_depth_ = -1;
     bg_analysis_busy_  = false;
     companion_path_    = path.substr(0, path.rfind('.')) + ".katago";
+    review_path_       = path;  // enables L3/R3 cycling through sibling files
     load_companion();   // pre-populate scores and marks if the file exists
 
     // Build analysis tree from the replayed history
@@ -1647,15 +2545,11 @@ void App::load_sgf_for_review(const std::string& path) {
 
     // Enter GAME_OVER analysis mode
     state_ = AppState::GAME_OVER;
+    lobby_confirm_ = false;
     set_status("REVIEW — " + std::string(g.result));
     kata_suggestion_count_ = 0;
-    kata_score_lead_ = FLT_MAX;
-    if (analysis_cur_) {
-        fg_kata_pending_ = true;
-        kata_for(game_.board_size).query_moves(
-            analysis_cur_->board.board, game_.board_size,
-            analysis_cur_->board.turn_is_black == 1);
-    }
+    kata_score_lead_ = cached_analysis_score(analysis_cur_);  // instant if the companion file had it
+    kata_analysis_enabled_ = false;
 }
 
 // ── Network message handler ───────────────────────────────────────────────────
@@ -1664,7 +2558,7 @@ void App::handle_net_msg(const NetMsg& msg) {
     switch (msg.type) {
     case NetMsgType::AUTH_OK:
         state_ = AppState::LOBBY;
-        set_status("PRESS START TO FIND GAME");
+        set_status("PRESS " GLYPH_PS_CROSS " TO FIND GAME");
         load_demo_game();
         draw();
         break;
@@ -1702,16 +2596,22 @@ void App::handle_net_msg(const NetMsg& msg) {
         game_.white_name = msg.white_name;
         game_.black_rank = msg.black_rank;
         game_.white_rank = msg.white_rank;
-        // Show opponent as a random DBZ character so we play the board, not the name
-        std::string alias = random_dbz_name();
-        black_label_ = (msg.my_color == 1) ? "boris" : alias;
-        white_label_ = (msg.my_color == 0) ? "boris" : alias;
+        // Real player names. The opponent's rank stays hidden while the game is
+        // live — play the board, not the rating — and is revealed at game over.
+        black_label_ = msg.black_name;
+        white_label_ = msg.white_name;
+        if (msg.my_color == 1 && !msg.black_rank.empty())
+            black_label_ += " [" + msg.black_rank + "]";
+        if (msg.my_color == 0 && !msg.white_rank.empty())
+            white_label_ += " [" + msg.white_rank + "]";
         game_.black_secs        = msg.black_secs;
         game_.white_secs        = msg.white_secs;
         game_.black_periods     = msg.black_periods;
         game_.white_periods     = msg.white_periods;
         game_.black_period_secs = msg.black_period_secs;
         game_.white_period_secs = msg.white_period_secs;
+        game_.black_in_byo      = msg.black_in_byo;
+        game_.white_in_byo      = msg.white_in_byo;
         game_.clock_tick        = SDL_GetTicks();
         game_.cursor_r     = msg.board_size / 2;
         game_.cursor_f     = msg.board_size / 2;
@@ -1738,14 +2638,22 @@ void App::handle_net_msg(const NetMsg& msg) {
         game_.my_turn = (black_to_play && game_.my_color == 1) ||
                         (!black_to_play && game_.my_color == 0);
 
-        // Initialise score-graph / mark storage
-        move_scores_.resize(game_.history.size(), FLT_MAX);
-        move_marked_.resize(game_.history.size(), false);
+        // Initialise score-graph / mark storage. assign(), not resize() — resize
+        // never shrinks and keeps old values, which leaked the previous game's
+        // scores into this one whenever the previous game was longer.
+        move_scores_.assign(game_.history.size(), FLT_MAX);
+        move_marked_.assign(game_.history.size(), false);
+        marked_paths_.assign(game_.history.size(), "");
+        puzzle_eval_.clear();
+        puzzle_saved_.clear();
+        review_path_.clear();  // this GAME_OVER will be a live game's, not a loaded file
         bg_analysis_next_  = 0;
         bg_analysis_depth_ = -1;
         bg_analysis_busy_  = false;
+        review_komi_       = 7.5f;  // OGS standard komi; not read from server game data here
 
         state_ = AppState::PLAYING;
+        sound_.play_game_start();
         set_status(game_.my_turn ? "YOUR TURN" : "WAITING...");
         draw();
         break;
@@ -1759,12 +2667,14 @@ void App::handle_net_msg(const NetMsg& msg) {
                 game_.black_secs        = msg.black_secs;
                 game_.black_periods     = msg.black_periods;
                 game_.black_period_secs = msg.black_period_secs;
+                game_.black_in_byo      = msg.black_in_byo;
                 game_.clock_tick = SDL_GetTicks();
             }
             if (msg.white_secs >= 0) {
                 game_.white_secs        = msg.white_secs;
                 game_.white_periods     = msg.white_periods;
                 game_.white_period_secs = msg.white_period_secs;
+                game_.white_in_byo      = msg.white_in_byo;
             }
 
             if (game_.pending_col != -2) {
@@ -1776,7 +2686,7 @@ void App::handle_net_msg(const NetMsg& msg) {
                 if (msg.col >= 0) {
                     apply_move(msg.col, msg.row);
                 } else {
-                    game_.board.turn_is_black = !game_.board.turn_is_black;
+                    apply_pass();
                     flash_       = "OPPONENT PASSED";
                     flash_until_ = SDL_GetTicks() + 3000;
                 }
@@ -1794,12 +2704,14 @@ void App::handle_net_msg(const NetMsg& msg) {
             game_.black_secs        = msg.black_secs;
             game_.black_periods     = msg.black_periods;
             game_.black_period_secs = msg.black_period_secs;
+            game_.black_in_byo      = msg.black_in_byo;
             game_.clock_tick = SDL_GetTicks();
         }
         if (msg.white_secs >= 0) {
             game_.white_secs        = msg.white_secs;
             game_.white_periods     = msg.white_periods;
             game_.white_period_secs = msg.white_period_secs;
+            game_.white_in_byo      = msg.white_in_byo;
         }
         draw();
         break;
@@ -1837,29 +2749,37 @@ void App::handle_net_msg(const NetMsg& msg) {
         // Only reset if the stone set actually changed (opponent modified the markings).
         if (my_accept_sent_ && msg.text == stone_removal_all_removed_) {
             net_.cmd_accept_stones(game_.game_id);
-            set_status("ACCEPTING...");
+            accept_resend_at_ = SDL_GetTicks() + 6000;
+            set_status("ACCEPTING... WAITING FOR OPPONENT");
         } else {
             my_accept_sent_ = false;
-            set_status("PRESS A TO ACCEPT DEAD STONES");
+            set_status(stone_removal_has_ogs_territory_
+                           ? "PRESS " GLYPH_PS_CROSS " TO ACCEPT DEAD STONES"
+                           : "WAITING FOR SERVER SCORE...");
         }
         stone_removal_all_removed_ = msg.text;
-        // Ask KataGo for territory estimate only when OGS hasn't provided its own data yet.
-        // Once OGS territory arrives, KataGo results are discarded (see poll loop).
-        if (!stone_removal_has_ogs_territory_ && kata_for(game_.board_size).running())
-            kata_for(game_.board_size).query_ownership(game_.board.board, game_.board_size,
-                                                       game_.dead_stones, 7.5f);
         draw();
         break;
     }
 
     case NetMsgType::GAME_OVER:
         state_ = AppState::GAME_OVER;
+        lobby_confirm_ = false;
+        review_komi_ = 7.5f;  // OGS standard komi; not read from server game data here
         game_.result = msg.text;
+        // Game's over — reveal the opponent's rank (hidden during live play)
+        black_label_ = game_.black_name +
+                       (game_.black_rank.empty() ? "" : " [" + game_.black_rank + "]");
+        white_label_ = game_.white_name +
+                       (game_.white_rank.empty() ? "" : " [" + game_.white_rank + "]");
         save_live_game();
+        // Scan for auto study puzzles now that the game is over (positions the
+        // background sweep hasn't reached yet get checked as their results arrive)
+        for (int d = 0; d + 1 < (int)game_.history.size(); d++) check_puzzle(d);
         set_status("GAME OVER — " + msg.text);
         kata_suggestion_count_ = 0;
-        kata_score_lead_ = FLT_MAX;
         build_analysis_tree();  // populates analysis_root_ and analysis_cur_
+        kata_score_lead_ = cached_analysis_score(analysis_cur_);  // instant if already scored during play
         kata_for(game_.board_size).query_moves(
             analysis_cur_ ? analysis_cur_->board.board : game_.board.board,
             game_.board_size,
@@ -1872,19 +2792,6 @@ void App::handle_net_msg(const NetMsg& msg) {
         if (state_ == AppState::PLAYING) {
             undo_pending_     = true;
             undo_move_number_ = msg.undo_move_number;
-            draw();
-        }
-        break;
-
-    case NetMsgType::ACCEPT_STATUS:
-        if (state_ == AppState::STONE_REMOVAL) {
-            if (msg.my_accepted == 1 && msg.opp_accepted == 0)
-                set_status("WAITING FOR OPPONENT TO ACCEPT...");
-            else if (msg.my_accepted == 0 && msg.opp_accepted == 1)
-                set_status("OPPONENT ACCEPTED — PRESS A TO ACCEPT");
-            else if (msg.my_accepted == 0 && !my_accept_sent_)
-                set_status("PRESS A TO ACCEPT DEAD STONES");
-            // If my_accept_sent_ && server still shows my_accepted=0: keep "ACCEPTING..."
             draw();
         }
         break;
@@ -1902,9 +2809,17 @@ void App::handle_net_msg(const NetMsg& msg) {
             pass_confirm_     = false;
             resign_confirm_   = false;
             // If we had a pending pass that the server rejected (phase reverted to play),
-            // undo the optimistic turn flip so my_turn is computed from the correct board state.
-            if (game_.pending_col == -1 && game_.pending_row == -1)
+            // undo the optimistic turn flip and the history snapshot apply_pass() recorded
+            // for it, so my_turn and history depth are computed from the correct state.
+            if (game_.pending_col == -1 && game_.pending_row == -1) {
                 game_.board.turn_is_black = !game_.board.turn_is_black;
+                if (!game_.history.empty()) game_.history.pop_back();
+                if (!move_scores_.empty()) {
+                    move_scores_.pop_back();
+                    move_marked_.pop_back();
+                    marked_paths_.pop_back();
+                }
+            }
             game_.pending_col = -2;
             game_.pending_row = -2;
             bool btp = (game_.board.turn_is_black == 1);
@@ -1915,6 +2830,28 @@ void App::handle_net_msg(const NetMsg& msg) {
         break;
 
     case NetMsgType::DISCONNECTED:
+        // Neither a local game vs KataGo nor GAME_OVER analysis review (regardless of
+        // whether the reviewed game was local, online, or loaded from the catalog) has
+        // any live dependency on the OGS websocket — KataGo is a local subprocess and
+        // review is just walking data already in memory/on disk. Don't yank the player
+        // out of either just because the background lobby connection dropped; note it
+        // and leave everything undisturbed.
+        if (is_local_game_ || state_ == AppState::GAME_OVER) {
+            flash_       = "OGS CONNECTION LOST (unaffected)";
+            flash_until_ = SDL_GetTicks() + 3000;
+            draw();
+            break;
+        }
+        analysis_root_.reset();
+        analysis_cur_ = nullptr;
+        analysis_tree_render_.clear();
+        kata_suggestion_count_ = 0;
+        kata_score_lead_ = FLT_MAX;
+        kata_query_after_ = 0;
+        lobby_confirm_ = false;
+        resign_confirm_ = false;
+        pass_confirm_ = false;
+        mark_confirm_ = false;
         state_ = AppState::CONNECTING;
         set_status("DISCONNECTED: " + msg.text);
         draw();
@@ -1930,10 +2867,25 @@ Renderer::DrawState App::make_ds() {
     int w_secs    = game_.white_secs;
     int b_periods = game_.black_periods;
     int w_periods = game_.white_periods;
+    // "In byo-yomi" can't be derived from the displayed numbers alone (a period
+    // countdown of 0:27 x5 looks identical to 27s of main time with 5 periods
+    // banked) — use the flags the network layer determined at parse time, plus
+    // the legacy secs<=0 heuristic as a safety net.
+    bool b_in_byo = game_.black_in_byo || (game_.black_secs <= 0 && game_.black_periods > 0);
+    bool w_in_byo = game_.white_in_byo || (game_.white_secs <= 0 && game_.white_periods > 0);
+    // Byo-yomi periods reset the instant a move is played, so the player NOT to
+    // move always has a full period waiting. Without this, the clock froze at
+    // whatever the server last reported mid-period (e.g. stuck showing 0:24 after
+    // using 6s of a 30s period) until it became that player's turn again.
+    bool black_to_move = (game_.board.turn_is_black == 1);
+    if (b_in_byo && !black_to_move && game_.black_period_secs > 0)
+        b_secs = game_.black_period_secs;
+    if (w_in_byo && black_to_move && game_.white_period_secs > 0)
+        w_secs = game_.white_period_secs;
     if (state_ == AppState::PLAYING && game_.clock_tick > 0) {
         int elapsed = (int)((SDL_GetTicks() - game_.clock_tick) / 1000);
         auto tick = [](int secs, int periods, int period_secs, int elapsed,
-                       int& out_secs, int& out_periods) {
+                       int& out_secs, int& out_periods, bool& out_in_byo) {
             if (secs > 0 && elapsed < secs) {
                 // Still within the period_time_left (or main time) window.
                 out_secs    = secs - elapsed;
@@ -1950,6 +2902,7 @@ Renderer::DrawState App::make_ds() {
                 out_secs        = out_periods > 0
                                     ? period_secs - byo_elapsed % period_secs
                                     : 0;
+                out_in_byo      = true;
             } else {
                 out_secs    = std::max(0, secs - elapsed);
                 out_periods = periods;
@@ -1957,10 +2910,10 @@ Renderer::DrawState App::make_ds() {
         };
         if (game_.board.turn_is_black == 1)
             tick(game_.black_secs, game_.black_periods, game_.black_period_secs, elapsed,
-                 b_secs, b_periods);
+                 b_secs, b_periods, b_in_byo);
         else if (game_.board.turn_is_black == 0)
             tick(game_.white_secs, game_.white_periods, game_.white_period_secs, elapsed,
-                 w_secs, w_periods);
+                 w_secs, w_periods, w_in_byo);
     }
 
     // GAME_OVER is navigated through the analysis tree; PLAYING/STONE_REMOVAL use flat history.
@@ -1968,9 +2921,10 @@ Renderer::DrawState App::make_ds() {
                       && (game_.history_pos >= 0 && !game_.history.empty());
 
     const char* status_cstr = status_.empty() ? nullptr : status_.c_str();
-    if (pass_confirm_)   status_cstr = "PRESS B AGAIN TO PASS";
-    if (resign_confirm_) status_cstr = "PRESS START AGAIN TO RESIGN";
-    if (undo_pending_)   status_cstr = "UNDO REQUEST: A=Accept  B=Deny";
+    if (pass_confirm_)   status_cstr = "PRESS " GLYPH_PS_CIRCLE " AGAIN TO PASS";
+    if (resign_confirm_) status_cstr = "PRESS OPT AGAIN TO RESIGN";
+    if (lobby_confirm_)  status_cstr = "PRESS OPT AGAIN FOR LOBBY";
+    if (undo_pending_)   status_cstr = "UNDO REQUEST: " GLYPH_PS_CROSS "=ACCEPT  " GLYPH_PS_CIRCLE "=DENY";
     if (in_history) {
         hist_status_ = "MOVE " + std::to_string(game_.history_pos) + "/" +
                        std::to_string((int)game_.history.size() - 1);
@@ -2009,102 +2963,102 @@ Renderer::DrawState App::make_ds() {
                   :             BOARD_SIZE;
 
     return Renderer::DrawState{
-        /* game            */ disp_board,
-        /* analysis        */ nullptr,
-        /* analysis_mode   */ false,
-        /* game_mode       */ false,
-        /* guess_mode      */ false,
-        /* guess_score     */ 0,
-        /* chain_mode      */ chain_mode_,
-        /* free_mode       */ false,
-        /* active_board_size */ active_bs,
-        /* show_help       */ show_help_,
-        /* catalog         */ catalog_,
-        /* black_name      */ bname,
-        /* white_name      */ wname,
-        /* result_message  */ (state_ == AppState::GAME_OVER) ? game_.result : empty_str_,
-        /* game_date       */ empty_str_,
-        /* game_comment    */ empty_str_,
-        /* move_delay_ms   */ MOVE_DELAY_MS,
-        /* speed_until     */ 0,
-        /* suppress_present*/ false,
-        /* territory_drill */ false,
-        /* territory_board */ nullptr,
-        /* territory_b     */ 0,
-        /* territory_w     */ 0,
-        /* territory_ans   */ false,
-        /* territory_cor   */ false,
-        /* stone_filter    */ 0,
-        /* cursor_x        */ -1,
-        /* cursor_y        */ -1,
-        /* cursor_type     */ 0,
-        /* show_move_nums  */ false,
-        /* sgf_moves       */ nullptr,
-        /* sgf_colors      */ nullptr,
-        /* sgf_game_index  */ 0,
-        /* analysis_num    */ nullptr,
-        /* analysis_col    */ nullptr,
-        /* quit_confirm    */ quit_confirm_,
-        /* box_sel_pts     */ nullptr,
-        /* box_sel_count   */ 0,
-        /* box_drag_active */ false,
-        /* box_drag_r1     */ 0,
-        /* box_drag_f1     */ 0,
-        /* box_drag_r2     */ 0,
-        /* box_drag_f2     */ 0,
-        /* thumb_valid     */ thumb_valid_,
-        /* thumb_open      */ thumb_valid_ ? thumb_open_  : nullptr,
-        /* thumb_final     */ thumb_valid_ ? thumb_final_ : nullptr,
-        /* thumb_board_sz  */ thumb_board_size_,
-        /* flash_message   */ flash_,
-        /* flash_until     */ flash_until_,
-        /* save_input_step */ 0,
-        /* save_input_buf  */ empty_str_,
+        .game                   = disp_board,
+        .analysis               = nullptr,
+        .analysis_mode          = false,
+        .game_mode              = false,
+        .guess_mode             = false,
+        .guess_score            = 0,
+        .chain_mode             = chain_mode_,
+        .free_mode              = false,
+        .active_board_size      = active_bs,
+        .show_help              = show_help_,
+        .catalog                = catalog_,
+        .black_name             = bname,
+        .white_name             = wname,
+        .result_message         = (state_ == AppState::GAME_OVER) ? game_.result : empty_str_,
+        .game_date              = empty_str_,
+        .game_comment           = empty_str_,
+        .move_delay_ms          = MOVE_DELAY_MS,
+        .speed_message_until    = 0,
+        .suppress_present       = false,
+        .territory_drill        = false,
+        .territory_board        = nullptr,
+        .territory_b_score      = 0,
+        .territory_w_score      = 0,
+        .territory_answered     = false,
+        .territory_correct      = false,
+        .stone_filter           = 0,
+        .cursor_x               = -1,
+        .cursor_y               = -1,
+        .cursor_type            = 0,
+        .show_move_numbers      = false,
+        .sgf_moves              = nullptr,
+        .sgf_colors             = nullptr,
+        .sgf_game_index         = 0,
+        .analysis_num_grid      = nullptr,
+        .analysis_col_grid      = nullptr,
+        .quit_confirm           = quit_confirm_,
+        .box_sel_pts            = nullptr,
+        .box_sel_count          = 0,
+        .box_drag_active        = false,
+        .box_drag_r1            = 0,
+        .box_drag_f1            = 0,
+        .box_drag_r2            = 0,
+        .box_drag_f2            = 0,
+        .catalog_thumb_valid    = thumb_valid_,
+        .catalog_thumb_single   = thumb_single_,
+        .catalog_thumb_open     = thumb_valid_ ? thumb_open_  : nullptr,
+        .catalog_thumb_final    = thumb_valid_ ? thumb_final_ : nullptr,
+        .catalog_thumb_board_size = thumb_board_size_,
+        .flash_message          = flash_,
+        .flash_message_until    = flash_until_,
+        .save_input_step        = 0,
+        .save_input_buf         = empty_str_,
+
         // Live fields
-        /* live_mode       */ live,
-        /* live_cursor_r   */ (state_ == AppState::PLAYING && !in_history) ? game_.cursor_r :
-                             (state_ == AppState::GAME_OVER)              ? game_.cursor_r : -1,
-        /* live_cursor_f   */ (state_ == AppState::PLAYING && !in_history) ? game_.cursor_f :
-                             (state_ == AppState::GAME_OVER)              ? game_.cursor_f : -1,
-        /* live_my_color   */ game_.my_color,
-        /* live_my_turn    */ game_.my_turn,
-        /* live_black_secs        */ playing ? b_secs : -1,
-        /* live_white_secs        */ playing ? w_secs : -1,
-        /* live_black_periods     */ playing ? b_periods : -1,
-        /* live_white_periods     */ playing ? w_periods : -1,
-        /* live_black_period_secs */ playing ? game_.black_period_secs : -1,
-        /* live_white_period_secs */ playing ? game_.white_period_secs : -1,
-        /* live_status     */ live ? status_cstr : nullptr,
-        /* live_dead_stones     */ (state_ == AppState::STONE_REMOVAL ||
-                                    (state_ == AppState::GAME_OVER && local_result_pending_))
-                                       ? game_.dead_stones : nullptr,
-        /* live_ownership       */ (state_ == AppState::STONE_REMOVAL ||
-                                    (state_ == AppState::GAME_OVER && local_result_pending_))
-                                       ? game_.ownership   : nullptr,
-        /* live_in_history      */ in_history,
-        /* live_suggestions     */ (state_ == AppState::GAME_OVER && kata_suggestion_count_ > 0)
-                                       ? kata_suggestions_ : nullptr,
-        /* live_suggestion_count*/ (state_ == AppState::GAME_OVER) ? kata_suggestion_count_ : 0,
-        /* live_hovered_suggestion */ [&]() -> int {
+        .live_mode       = live,
+        .live_cursor_r   = (state_ == AppState::PLAYING && !in_history) ? game_.cursor_r :
+                            (state_ == AppState::GAME_OVER)              ? game_.cursor_r : -1,
+        .live_cursor_f   = (state_ == AppState::PLAYING && !in_history) ? game_.cursor_f :
+                            (state_ == AppState::GAME_OVER)              ? game_.cursor_f : -1,
+        .live_my_color   = game_.my_color,
+        .live_my_turn    = game_.my_turn,
+        .live_black_secs        = playing ? b_secs : -1,
+        .live_white_secs        = playing ? w_secs : -1,
+        .live_black_periods     = playing ? b_periods : -1,
+        .live_white_periods     = playing ? w_periods : -1,
+        .live_black_period_secs = playing ? game_.black_period_secs : -1,
+        .live_white_period_secs = playing ? game_.white_period_secs : -1,
+        .live_black_in_byo      = playing && b_in_byo,
+        .live_white_in_byo      = playing && w_in_byo,
+        .live_status     = live ? status_cstr : nullptr,
+        .live_dead_stones     = (state_ == AppState::STONE_REMOVAL) ? game_.dead_stones : nullptr,
+        .live_ownership       = (state_ == AppState::STONE_REMOVAL) ? game_.ownership   : nullptr,
+        .live_in_history      = in_history,
+        .live_suggestions     = (state_ == AppState::GAME_OVER && kata_suggestion_count_ > 0)
+                                     ? kata_suggestions_ : nullptr,
+        .live_suggestion_count = (state_ == AppState::GAME_OVER) ? kata_suggestion_count_ : 0,
+        .live_hovered_suggestion = [&]() -> int {
             if (state_ != AppState::GAME_OVER) return -1;
             for (int i = 0; i < std::min(kata_suggestion_count_, 3); i++)
                 if (kata_suggestions_[i].row == game_.cursor_r &&
                     kata_suggestions_[i].col == game_.cursor_f) return i;
             return -1;
         }(),
-        /* live_cursor_ko       */ (ko_flash_until_ > SDL_GetTicks()),
-        /* live_kata_score_lead    */ (state_ == AppState::GAME_OVER) ? kata_score_lead_ : FLT_MAX,
-        /* live_actual_move_r */ [&]() -> int {
+        .live_cursor_ko       = (ko_flash_until_ > SDL_GetTicks()),
+        .live_kata_score_lead    = (state_ == AppState::GAME_OVER) ? kata_score_lead_ : FLT_MAX,
+        .live_actual_move_r = [&]() -> int {
             if (state_ != AppState::GAME_OVER || !analysis_cur_ || analysis_cur_->children.empty())
                 return -1;
             return analysis_cur_->children[0]->move_row;
         }(),
-        /* live_actual_move_f */ [&]() -> int {
+        .live_actual_move_f = [&]() -> int {
             if (state_ != AppState::GAME_OVER || !analysis_cur_ || analysis_cur_->children.empty())
                 return -1;
             return analysis_cur_->children[0]->move_col;
         }(),
-        /* live_actual_move_score */ [&]() -> float {
+        .live_actual_move_score = [&]() -> float {
             if (state_ != AppState::GAME_OVER || !analysis_cur_ || analysis_cur_->children.empty())
                 return FLT_MAX;
             int ar = analysis_cur_->children[0]->move_row;
@@ -2115,14 +3069,46 @@ Renderer::DrawState App::make_ds() {
                     return kata_suggestions_[i].score_lead;
             return FLT_MAX;
         }(),
-        /* live_analysis_tree       */ analysis_tree_render_.empty() ? nullptr : analysis_tree_render_.data(),
-        /* live_analysis_tree_count */ (int)analysis_tree_render_.size(),
-        /* live_analysis_tree_cur_depth */ analysis_cur_ ? analysis_cur_->depth : 0,
+        .live_analysis_tree       = (state_ == AppState::GAME_OVER && !analysis_tree_render_.empty())
+                                         ? analysis_tree_render_.data() : nullptr,
+        .live_analysis_tree_count = (state_ == AppState::GAME_OVER) ? (int)analysis_tree_render_.size() : 0,
+        .live_analysis_tree_cur_depth = analysis_cur_ ? analysis_cur_->depth : 0,
+
         // Score graph
-        /* live_score_graph     */ (state_ == AppState::GAME_OVER && !move_scores_.empty())
-                                       ? move_scores_.data() : nullptr,
-        /* live_score_graph_len */ (state_ == AppState::GAME_OVER) ? (int)move_scores_.size() : 0,
-        /* live_score_graph_cur */ analysis_cur_ ? analysis_cur_->depth : 0,
+        .live_score_graph     = (state_ == AppState::GAME_OVER && !move_scores_.empty())
+                                     ? move_scores_.data() : nullptr,
+        .live_score_graph_len = (state_ == AppState::GAME_OVER) ? (int)move_scores_.size() : 0,
+        .live_score_graph_cur = analysis_cur_ ? analysis_cur_->depth : 0,
+        // Last-played-stone indicator: only shown while RT is held (previously always-on
+        // row/column lines were too distracting; now an opt-in teal circle on demand).
+        .live_last_move_r = [&]() -> int {
+            if (!rt_down_) return -1;
+            if (state_ == AppState::GAME_OVER && analysis_cur_ && analysis_cur_->parent)
+                return analysis_cur_->move_row;
+            if ((state_ == AppState::PLAYING || state_ == AppState::STONE_REMOVAL)
+                && game_.history_pos < 0)
+                return last_move_r_;
+            return -1;
+        }(),
+        .live_last_move_f = [&]() -> int {
+            if (!rt_down_) return -1;
+            if (state_ == AppState::GAME_OVER && analysis_cur_ && analysis_cur_->parent)
+                return analysis_cur_->move_col;
+            if ((state_ == AppState::PLAYING || state_ == AppState::STONE_REMOVAL)
+                && game_.history_pos < 0)
+                return last_move_f_;
+            return -1;
+        }(),
+        .live_show_coords = show_coords_,
+        .live_labels      = (state_ == AppState::GAME_OVER && analysis_cur_ &&
+                             !analysis_cur_->labels.empty())
+                                ? analysis_cur_->labels.data() : nullptr,
+        .live_label_count = (state_ == AppState::GAME_OVER && analysis_cur_)
+                                ? (int)analysis_cur_->labels.size() : 0,
+        .live_result_banner = (state_ == AppState::STONE_REMOVAL && is_local_game_ &&
+                               !local_game_score_.empty())
+                                  ? local_game_score_.c_str() : nullptr,
+        .square_stones      = square_stones_,
     };
 }
 
@@ -2130,6 +3116,19 @@ void App::draw() {
     if (state_ == AppState::MATCH_MENU) {
         renderer_->draw_match_menu(match_menu_);
         return;
+    }
+    if (catalog_.active) {
+        // Parse names for the entire listing, not just the visible window. The first
+        // frame after entering a directory pays one pass of 4KB header reads; every
+        // frame after that is a no-op flag scan (ensure_names_loaded skips entries
+        // already loaded). Covers subdirectory navigation, which doesn't go through
+        // open_game_catalog()'s own full-parse call.
+        if (!catalog_.search_mode && !catalog_.virtual_year_mode && !catalog_.virtual_player_mode)
+            catalog_.ensure_names_loaded(0, (int)catalog_.entries.size());
+        // Refresh the [BY YEAR] virtual list once the background index finishes —
+        // never called anywhere else in this file, so without it that screen was
+        // stuck on "Building index..." forever if opened before indexing completed.
+        catalog_.tick();
     }
     auto ds = make_ds();
     renderer_->draw_board(ds);
@@ -2175,8 +3174,13 @@ void App::event_loop() {
     Uint32 repeat_next_ms  = 0;
     const int REPEAT_DELAY = 400;    // ms before first repeat
     const int REPEAT_RATE  = 80;     // ms between subsequent repeats
-    bool lt_down = false, rt_down = false;  // trigger axis states
-    Uint32 js_prev_ms = SDL_GetTicks();    // for joystick dt calculation
+    // Joystick cursor repeat — snappier than the dpad's, since the whole point of
+    // using the stick (per Boris) is moving the cursor fast.
+    const int JS_REPEAT_DELAY = 130;
+    const int JS_REPEAT_RATE  = 30;
+    bool lt_down = false;  // trigger axis state (rt_down_ is a member — read by make_draw_state)
+    int    js_dir_x = 0, js_dir_y = 0;      // last committed joystick cursor direction
+    Uint32 js_move_next_ms = 0;             // next time that direction is allowed to step again
 
     while (!quit) {
         Uint32 now = SDL_GetTicks();
@@ -2193,10 +3197,11 @@ void App::event_loop() {
             wait_ms = std::min(wait_ms, (int)(repeat_next_ms - now));
         if (demo_active_ && demo_.next_tick > now)
             wait_ms = std::min(wait_ms, (int)(demo_.next_tick - now));
-        // Poll at 50 ms when the left stick is deflected so cursor moves smoothly
-        if (state_ == AppState::PLAYING && game_.history_pos < 0 &&
-            (std::abs(js_left_x_) > 8192 || std::abs(js_left_y_) > 8192))
-            wait_ms = std::min(wait_ms, 50);
+        // Wake up in time for the joystick cursor's next repeat step (same states
+        // as the js_cursor_ok gate below: live-edge PLAYING or GAME_OVER analysis)
+        if ((state_ == AppState::PLAYING || state_ == AppState::GAME_OVER) &&
+            (js_dir_x != 0 || js_dir_y != 0) && js_move_next_ms > now)
+            wait_ms = std::min(wait_ms, (int)(js_move_next_ms - now));
 
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, wait_ms)) {
@@ -2246,8 +3251,10 @@ void App::event_loop() {
                                     for (int f = 0; f < bs; f++)
                                         game_.ownership[r][f] = kata_own[r][f];
                                 // Territory is now ready; show the score + prompt
+                                // Score itself is shown as the big banner (make_ds
+                                // passes local_game_score_ as live_result_banner)
                                 if (is_local_game_ && !local_game_score_.empty())
-                                    set_status(local_game_score_ + "  —  PRESS A FOR ANALYSIS");
+                                    set_status("PRESS " GLYPH_PS_CROSS " FOR ANALYSIS");
                                 draw();
                             }
                         }
@@ -2261,16 +3268,35 @@ void App::event_loop() {
                                     if (sl != FLT_MAX && bg_analysis_depth_ >= 0 &&
                                         bg_analysis_depth_ < (int)move_scores_.size())
                                         move_scores_[bg_analysis_depth_] = sl;
+                                    // Keep the top-2 suggestions for study-puzzle detection
+                                    if (count > 0 && bg_analysis_depth_ >= 0) {
+                                        PuzzleEval pe;
+                                        pe.best_sl = kata_suggestions_[0].score_lead;
+                                        pe.best_r  = kata_suggestions_[0].row;
+                                        pe.best_f  = kata_suggestions_[0].col;
+                                        if (count > 1) pe.second_sl = kata_suggestions_[1].score_lead;
+                                        puzzle_eval_[bg_analysis_depth_] = pe;
+                                        // Evaluate only after the game — a fresh score at depth D
+                                        // can also complete the check for D-1 (needs score[D]).
+                                        if (state_ == AppState::GAME_OVER) {
+                                            check_puzzle(bg_analysis_depth_);
+                                            check_puzzle(bg_analysis_depth_ - 1);
+                                        }
+                                    }
                                     bg_analysis_busy_ = false;
                                     if (state_ == AppState::GAME_OVER) draw();
                                 } else {
                                     fg_kata_pending_ = false;
                                     kata_score_lead_ = sl;
-                                    // Persist score in the current analysis node and graph
+                                    // Persist score on the node always; only feed the
+                                    // depth-indexed graph array when this node is genuinely
+                                    // on the main line — a branch node at the same depth as
+                                    // a main-line move is a different position and would
+                                    // otherwise clobber that move's real graph value.
                                     if (analysis_cur_ && sl != FLT_MAX) {
                                         analysis_cur_->score_lead = sl;
                                         int d = analysis_cur_->depth;
-                                        if (d < (int)move_scores_.size())
+                                        if (analysis_cur_->is_main_line && d < (int)move_scores_.size())
                                             move_scores_[d] = sl;
                                     }
                                     // Filter out illegal suggestions (ko, suicide, occupied)
@@ -2313,14 +3339,15 @@ void App::event_loop() {
                             handle_controller_button(vbtn);
                             repeat_btn     = vbtn;
                             repeat_next_ms = SDL_GetTicks() + REPEAT_DELAY;
-                        } else if (repeat_btn == vbtn) {
-                            repeat_btn = 0xFF;
+                        } else {
+                            if (repeat_btn == vbtn) repeat_btn = 0xFF;
+                            draw();  // e.g. RT release should hide the last-move indicator promptly
                         }
                     };
                     if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
                         on_trigger(0xFD, lt_down, e.caxis.value);
                     else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-                        on_trigger(0xFE, rt_down, e.caxis.value);
+                        on_trigger(0xFE, rt_down_, e.caxis.value);
                     else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
                         js_left_x_ = e.caxis.value;
                     else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
@@ -2361,29 +3388,85 @@ void App::event_loop() {
                         quit_confirm_ = false;
                         draw();
                     }
-                    // Keyboard shortcut mirrors for controller buttons:
-                    else if (k == SDLK_RETURN) {
-                        SDL_Event fake{};
-                        fake.type = SDL_CONTROLLERBUTTONDOWN;
-                        fake.cbutton.button = SDL_CONTROLLER_BUTTON_A;
-                        handle_controller_button(fake.cbutton.button);
-                    } else if (k == SDLK_p) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_B);
-                    } else if (k == SDLK_r) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_START);
-                    } else if (k == SDLK_f) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_START);
-                    } else if (k == SDLK_UP) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_DPAD_UP);
-                    } else if (k == SDLK_DOWN) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-                    } else if (k == SDLK_LEFT) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-                    } else if (k == SDLK_RIGHT) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-                    } else if (k == SDLK_TAB) {
-                        handle_controller_button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+                    // Keyboard shortcut mirrors for controller buttons — a full
+                    // substitute for when the pad is unplugged or out of battery.
+                    else {
+                        Uint8 mapped = 0xFF;
+                        switch (k) {
+                        case SDLK_RETURN: case SDLK_SPACE:
+                                              mapped = SDL_CONTROLLER_BUTTON_A;             break;
+                        case SDLK_b: case SDLK_p:
+                                              mapped = SDL_CONTROLLER_BUTTON_B;             break;
+                        case SDLK_c:          mapped = SDL_CONTROLLER_BUTTON_X;             break;
+                        case SDLK_m:          mapped = SDL_CONTROLLER_BUTTON_Y;             break;
+                        case SDLK_s:          mapped = SDL_CONTROLLER_BUTTON_BACK;          break;
+                        case SDLK_r: case SDLK_f:
+                                              mapped = SDL_CONTROLLER_BUTTON_START;         break;
+                        case SDLK_UP:         mapped = SDL_CONTROLLER_BUTTON_DPAD_UP;       break;
+                        case SDLK_DOWN:       mapped = SDL_CONTROLLER_BUTTON_DPAD_DOWN;     break;
+                        case SDLK_LEFT:       mapped = SDL_CONTROLLER_BUTTON_DPAD_LEFT;     break;
+                        case SDLK_RIGHT:      mapped = SDL_CONTROLLER_BUTTON_DPAD_RIGHT;    break;
+                        case SDLK_TAB: case SDLK_LEFTBRACKET:
+                                              mapped = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;  break;
+                        case SDLK_RIGHTBRACKET:
+                                              mapped = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER; break;
+                        case SDLK_COMMA:      mapped = 0xFD; break;  // LT — step back
+                        case SDLK_PERIOD:     mapped = 0xFE; break;  // RT — step forward
+                        case SDLK_PAGEUP:     mapped = SDL_CONTROLLER_BUTTON_LEFTSTICK;     break;
+                        case SDLK_PAGEDOWN:   mapped = SDL_CONTROLLER_BUTTON_RIGHTSTICK;    break;
+                        default: break;
+                        }
+                        if (mapped != 0xFF) handle_controller_button(mapped);
                     }
+
+                } else if (e.type == SDL_MOUSEMOTION) {
+                    // Snap the board cursor to the hovered grid point (mouse and pad
+                    // coexist — the cursor just follows whichever moved last)
+                    if (!catalog_.active && state_ != AppState::MATCH_MENU &&
+                        ((state_ == AppState::PLAYING && game_.history_pos < 0) ||
+                         state_ == AppState::GAME_OVER)) {
+                        BoardView view;
+                        renderer_->get_board_view(view, game_.board_size);
+                        int mr, mf;
+                        if (renderer_->screen_to_board(view, e.motion.x, e.motion.y, mr, mf) &&
+                            (mr != game_.cursor_r || mf != game_.cursor_f)) {
+                            game_.cursor_r = mr;
+                            game_.cursor_f = mf;
+                            draw();
+                        }
+                    }
+
+                } else if (e.type == SDL_MOUSEBUTTONDOWN) {
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        bool board_state = !catalog_.active && state_ != AppState::MATCH_MENU &&
+                            (state_ == AppState::PLAYING || state_ == AppState::GAME_OVER);
+                        if (board_state) {
+                            // Only place when the click actually lands on a grid point —
+                            // clicking panels/dead space must not drop a stone at the
+                            // last cursor position. (STONE_REMOVAL deliberately excluded:
+                            // accepting a score shouldn't happen from a stray click.)
+                            BoardView view;
+                            renderer_->get_board_view(view, game_.board_size);
+                            int mr, mf;
+                            if (renderer_->screen_to_board(view, e.button.x, e.button.y, mr, mf)) {
+                                game_.cursor_r = mr;
+                                game_.cursor_f = mf;
+                                handle_controller_button(SDL_CONTROLLER_BUTTON_A);
+                            }
+                        } else if (catalog_.active || state_ == AppState::MATCH_MENU) {
+                            handle_controller_button(SDL_CONTROLLER_BUTTON_A);
+                        }
+                    } else if (e.button.button == SDL_BUTTON_RIGHT) {
+                        handle_controller_button(SDL_CONTROLLER_BUTTON_B);
+                    }
+
+                } else if (e.type == SDL_MOUSEWHEEL) {
+                    // Wheel: scroll lists in the catalog/menu, step moves on a board
+                    bool list_ctx = catalog_.active || state_ == AppState::MATCH_MENU;
+                    Uint8 up_btn   = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_UP   : (Uint8)0xFD;
+                    Uint8 down_btn = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_DOWN : (Uint8)0xFE;
+                    for (int s = e.wheel.y; s > 0; s--) handle_controller_button(up_btn);
+                    for (int s = e.wheel.y; s < 0; s++) handle_controller_button(down_btn);
 
                 } else if (e.type == SDL_WINDOWEVENT) {
                     if (e.window.event == SDL_WINDOWEVENT_EXPOSED ||
@@ -2401,46 +3484,43 @@ void App::event_loop() {
             repeat_next_ms = now + REPEAT_RATE;
         }
 
-        // Left-stick joystick cursor (PLAYING state, live view only)
-        if (state_ == AppState::PLAYING && game_.history_pos < 0) {
-            const Sint16 DEAD  = 8192;
-            const float  RANGE = (float)(32767 - DEAD);
-            float dt = (float)(now - js_prev_ms) * 0.001f;
-            if (dt > 0.2f) dt = 0.2f;  // clamp in case of long pause
-            auto accum = [&](Sint16 val, float& acc) {
-                if (std::abs(val) > DEAD) {
-                    float spd = ((float)(std::abs(val) - DEAD) / RANGE) * 15.f * dt;
-                    acc += (val > 0) ? spd : -spd;
-                } else {
-                    acc = 0.f;
+        // Left-stick joystick cursor — live play (at the live edge) and GAME_OVER
+        // analysis (placing branch stones / labels), but not while the catalog or
+        // the result freeze-screen is up.
+        // Snap the stick to one of 8 directions (45-degree sectors) so a tilt
+        // near a diagonal commits firmly to that diagonal instead of racing
+        // between axes, then step the cursor at a fixed repeat rate (same
+        // delay/rate as the dpad buttons) instead of accelerating continuously.
+        bool js_cursor_ok =
+            !catalog_.active &&
+            ((state_ == AppState::PLAYING && game_.history_pos < 0) ||
+             state_ == AppState::GAME_OVER);
+        if (js_cursor_ok) {
+            const float DEAD    = 8192.f;
+            const float TAN22_5 = 0.41421356f;  // tan(22.5 deg)
+            float x = (float)js_left_x_, y = (float)js_left_y_;
+            float ax = std::fabs(x), ay = std::fabs(y);
+            int dx = 0, dy = 0;
+            if (std::sqrt(x * x + y * y) > DEAD) {
+                dx = (x > 0.f) ? 1 : (x < 0.f ? -1 : 0);
+                dy = (y > 0.f) ? 1 : (y < 0.f ? -1 : 0);
+                if (ax > 0.f && ay / ax < TAN22_5) dy = 0;       // within 22.5 deg of horizontal
+                else if (ay > 0.f && ax / ay < TAN22_5) dx = 0;  // within 22.5 deg of vertical
+            }
+            if (dx != 0 || dy != 0) {
+                bool changed = (dx != js_dir_x || dy != js_dir_y);
+                if (changed || now >= js_move_next_ms) {
+                    int n = game_.board_size - 1;
+                    game_.cursor_f = std::max(0, std::min(n, game_.cursor_f + dx));
+                    game_.cursor_r = std::max(0, std::min(n, game_.cursor_r + dy));
+                    js_move_next_ms = now + (changed ? JS_REPEAT_DELAY : JS_REPEAT_RATE);
                 }
-            };
-            accum(js_left_x_, js_acc_x_);
-            accum(js_left_y_, js_acc_y_);
-            int dx = (int)js_acc_x_, dy = (int)js_acc_y_;
-            // Diagonal assist: when one axis fires a full step, pull the other along
-            // if it's already past halfway — gives natural diagonal movement.
-            bool x_active = std::abs(js_left_x_) > DEAD;
-            bool y_active = std::abs(js_left_y_) > DEAD;
-            if (dx != 0 && y_active && dy == 0 && std::abs(js_acc_y_) >= 0.5f) {
-                dy = (js_acc_y_ >= 0.f) ? 1 : -1;
-                js_acc_y_ -= (float)dy;
             }
-            if (dy != 0 && x_active && dx == 0 && std::abs(js_acc_x_) >= 0.5f) {
-                dx = (js_acc_x_ >= 0.f) ? 1 : -1;
-                js_acc_x_ -= (float)dx;
-            }
-            if (dx || dy) {
-                int n = game_.board_size - 1;
-                game_.cursor_f = std::max(0, std::min(n, game_.cursor_f + dx));
-                game_.cursor_r = std::max(0, std::min(n, game_.cursor_r + dy));
-                js_acc_x_ -= (float)dx;
-                js_acc_y_ -= (float)dy;
-            }
+            js_dir_x = dx;
+            js_dir_y = dy;
         } else {
-            js_acc_x_ = js_acc_y_ = 0.f;
+            js_dir_x = js_dir_y = 0;
         }
-        js_prev_ms = now;
 
         // Advance demo screensaver when idle (not in a live game)
         bool idle = (state_ == AppState::LOBBY || state_ == AppState::SEARCHING ||
@@ -2456,6 +3536,16 @@ void App::event_loop() {
             }
         }
 
+        // Stone removal: our accept may not have reached the server (seen in practice —
+        // no protocol error, the send just doesn't always take effect first try). Don't
+        // wait solely on the server's own removed_stones re-broadcast (can take 20-30s);
+        // proactively resend a few seconds after our own accept if nothing's changed yet.
+        if (state_ == AppState::STONE_REMOVAL && my_accept_sent_ &&
+            now >= accept_resend_at_) {
+            net_.cmd_accept_stones(game_.game_id);
+            accept_resend_at_ = now + 6000;
+        }
+
         // Fire deferred KataGo query once the user has settled on a position
         if (kata_query_after_ > 0 && now >= kata_query_after_) {
             kata_query_after_ = 0;
@@ -2464,8 +3554,18 @@ void App::event_loop() {
                 fg_kata_pending_  = true;
                 kata_for(game_.board_size).query_moves(
                     analysis_cur_->board.board, game_.board_size,
-                    analysis_cur_->board.turn_is_black == 1);
+                    analysis_cur_->board.turn_is_black == 1, review_komi_);
             }
+        }
+
+        // If a background query's response never arrives (lost/corrupted on the way
+        // back from KataGo — has happened; see katago.cpp's stderr-pipe fix), bg_analysis_busy_
+        // would otherwise stay stuck true forever, silently blocking every subsequent
+        // depth for the rest of the session. Give up on it after a generous timeout so
+        // the sweep can move on — that one depth just stays unscored instead of
+        // everything after it.
+        if (bg_analysis_busy_ && now - bg_analysis_started_at_ > 15000) {
+            bg_analysis_busy_ = false;
         }
 
         // Background scoring — fill move_scores_[] with low-visit KataGo queries.
@@ -2483,9 +3583,10 @@ void App::event_loop() {
                 bg_analysis_next_ < (int)game_.history.size()) {
                 const GameState& hs = game_.history[bg_analysis_next_];
                 kata_for(game_.board_size).query_moves(
-                    hs.board, game_.board_size, hs.turn_is_black == 1, 7.5f, 50);
-                bg_analysis_depth_ = bg_analysis_next_++;
-                bg_analysis_busy_  = true;
+                    hs.board, game_.board_size, hs.turn_is_black == 1, review_komi_, 50);
+                bg_analysis_depth_      = bg_analysis_next_++;
+                bg_analysis_busy_       = true;
+                bg_analysis_started_at_ = now;
             }
         }
 
@@ -2518,6 +3619,7 @@ int App::run() {
     kata_exe_          = kata_exe;
     kata_model_        = kata_model;
     kata_human_model_  = kata_human_model;
+    load_adaptive();   // restore the adaptive KataGo strength from previous sessions
     if (!kata_exe.empty() && !kata_model.empty() && !kata_cfg.empty())
         kata_.start(kata_exe, kata_model, kata_cfg);
     if (!kata_exe.empty() && !kata_model_9x9.empty() && !kata_cfg.empty())
@@ -2547,6 +3649,24 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 ep->ExceptionRecord->ExceptionAddress,
                 (unsigned long)GetCurrentThreadId());
         fflush(stderr);
+        // stderr alone is lost when the app is launched without an attached console
+        // (e.g. double-clicked) — persist the same line to disk so a crash leaves a
+        // forensic trail regardless of how it was started. Opened/closed immediately
+        // (rather than an fd kept open for the app's lifetime) since this only ever
+        // fires once, right before the process goes down.
+        time_t t = time(nullptr);
+        struct tm* tm_info = localtime(&t);
+        char ts[32];
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm_info);
+        FILE* cf = fopen("crash.log", "a");
+        if (cf) {
+            fprintf(cf, "[%s] SEH 0x%08lX at %p thread=%lu\n",
+                    ts,
+                    (unsigned long)ep->ExceptionRecord->ExceptionCode,
+                    ep->ExceptionRecord->ExceptionAddress,
+                    (unsigned long)GetCurrentThreadId());
+            fclose(cf);
+        }
         return EXCEPTION_CONTINUE_SEARCH;
     });
 #endif

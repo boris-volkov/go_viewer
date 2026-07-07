@@ -23,6 +23,7 @@ add_executable(ogs_client
     main.cpp
     ogs_net.cpp
     katago.cpp
+    sound.cpp
     # Reuse shared Go logic from the parent directory
     ../go_rules.cpp
     ../game_state.cpp

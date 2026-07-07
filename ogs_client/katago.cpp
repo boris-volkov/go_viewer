@@ -48,6 +48,14 @@ static bool from_gtp(const std::string& gtp, int board_size, int& row_out, int& 
     if (letter == 'I') return false;
     int col = (letter >= 'J') ? (letter - 'A' - 1) : (letter - 'A');
     if (col < 0 || col >= board_size) return false;
+    // "pass" (and anything else that isn't a coordinate) has a non-numeric remainder,
+    // which would make stoi() below throw. Reject up front rather than relying on an
+    // exception to unwind — a thrown exception here previously escaped all the way out
+    // of reader_loop's per-line try/catch and discarded the *entire* response (not just
+    // the pass entry), silently losing analysis for any position where KataGo suggested
+    // a pass among its top moves or principal variations (common in the endgame).
+    for (size_t i = 1; i < gtp.size(); i++)
+        if (!isdigit((unsigned char)gtp[i])) return false;
     int gtp_row = std::stoi(gtp.substr(1));
     int row = board_size - gtp_row;
     if (row < 0 || row >= board_size) return false;
@@ -56,13 +64,14 @@ static bool from_gtp(const std::string& gtp, int board_size, int& row_out, int& 
     return true;
 }
 
-// KataGo ownership array indexing: ownership[y * boardXSize + x]
-// where x=0 is left and y=0 is the BOTTOM of the board.
-// Maps to our (row, col) where row=0 is TOP:
-//   our (r, c) = kata (x=c, y=board_size-1-r)
-//   kata index  = (board_size-1-r) * board_size + c
+// KataGo ownership array indexing: ownership[y * boardXSize + x], row-major
+// "starting at the top-left of the board (e.g. A19) and going to the bottom
+// right (e.g. T1)" (KataGo docs/Analysis_Engine.md) — so y=0 is the TOP row,
+// same as our row convention (unlike GTP coordinates, where row 1 is the
+// bottom — that difference is what to_gtp/from_gtp handle, and misreading
+// ownership as if it shared GTP's orientation vertically mirrors the map).
 static inline int kata_idx(int r, int c, int bs) {
-    return (bs - 1 - r) * bs + c;
+    return r * bs + c;
 }
 
 // ── Process management ────────────────────────────────────────────────────────
@@ -75,15 +84,29 @@ bool KatagoProc::start(const std::string& exe, const std::string& model, const s
     sa.nLength        = sizeof(sa);
     sa.bInheritHandle = TRUE;
 
-    HANDLE h_stdin_r = NULL, h_stdout_w = NULL;
+    HANDLE h_stdin_r = NULL, h_stdout_w = NULL, h_stderr_w = NULL;
     if (!CreatePipe(&h_stdin_r, &h_write_, &sa, 0))        return false;
     if (!CreatePipe(&h_read_,   &h_stdout_w, &sa, 0)) {
         CloseHandle(h_stdin_r); CloseHandle(h_write_); h_write_ = NULL;
         return false;
     }
+    // Separate pipe for stderr — sharing one pipe between stdout and stderr lets KataGo's
+    // own writes to each stream interleave at the byte level (observed in practice:
+    // warning text and JSON response bytes getting spliced together), corrupting the
+    // JSON-lines protocol reader_loop() depends on. A corrupted/lost response never sets
+    // moves_ready_/result_ready_, which permanently wedges bg_analysis_busy_ or
+    // fg_kata_pending_ in main.cpp — analysis silently stops advancing for the rest of
+    // the session. Keeping stderr on its own pipe (read by stderr_reader_loop(), which
+    // just logs raw text) keeps stdout's stream pure JSON.
+    if (!CreatePipe(&h_stderr_read_, &h_stderr_w, &sa, 0)) {
+        CloseHandle(h_stdin_r); CloseHandle(h_write_); CloseHandle(h_read_); CloseHandle(h_stdout_w);
+        h_write_ = h_read_ = NULL;
+        return false;
+    }
     // Make our (parent) ends non-inheritable
-    SetHandleInformation(h_write_, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(h_read_,  HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(h_write_,       HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(h_read_,        HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(h_stderr_read_, HANDLE_FLAG_INHERIT, 0);
 
     std::string cmd = "\"" + exe + "\" analysis"
                     + " -model \"" + model + "\""
@@ -104,7 +127,7 @@ bool KatagoProc::start(const std::string& exe, const std::string& model, const s
     si.dwFlags    = STARTF_USESTDHANDLES;
     si.hStdInput  = h_stdin_r;
     si.hStdOutput = h_stdout_w;
-    si.hStdError  = h_stdout_w;   // merge stderr so we see errors too
+    si.hStdError  = h_stderr_w;   // own pipe — see comment above on why not merged with stdout
 
     BOOL ok = CreateProcessA(nullptr, cmd_buf.data(),
                              nullptr, nullptr, TRUE,
@@ -112,16 +135,19 @@ bool KatagoProc::start(const std::string& exe, const std::string& model, const s
                              &si, &proc_);
     CloseHandle(h_stdin_r);
     CloseHandle(h_stdout_w);
+    CloseHandle(h_stderr_w);
     if (!ok) {
         kata_logf("CreateProcess FAILED (error %lu)", GetLastError());
-        CloseHandle(h_write_); CloseHandle(h_read_); h_write_ = h_read_ = NULL;
+        CloseHandle(h_write_); CloseHandle(h_read_); CloseHandle(h_stderr_read_);
+        h_write_ = h_read_ = h_stderr_read_ = NULL;
         return false;
     }
 #endif
 
-    kata_log("process created — reader thread starting");
+    kata_log("process created — reader threads starting");
     running_.store(true);
-    reader_ = std::thread([this]() { reader_loop(); });
+    reader_        = std::thread([this]() { reader_loop(); });
+    stderr_reader_ = std::thread([this]() { stderr_reader_loop(); });
 
     // Send a minimal 1-visit ping so we can measure how long init takes.
     // The ping response will be logged as "moves response id=0 ...".
@@ -153,7 +179,9 @@ void KatagoProc::stop() {
 #ifdef _WIN32
     if (h_write_) { CloseHandle(h_write_); h_write_ = NULL; }  // EOF → katago exits
     if (reader_.joinable()) reader_.join();
-    if (h_read_)  { CloseHandle(h_read_);  h_read_  = NULL; }
+    if (stderr_reader_.joinable()) stderr_reader_.join();
+    if (h_read_)         { CloseHandle(h_read_);         h_read_         = NULL; }
+    if (h_stderr_read_)  { CloseHandle(h_stderr_read_);  h_stderr_read_  = NULL; }
     if (proc_.hProcess) { TerminateProcess(proc_.hProcess, 0);
                           CloseHandle(proc_.hProcess); proc_.hProcess = NULL; }
     if (proc_.hThread)  { CloseHandle(proc_.hThread);  proc_.hThread  = NULL; }
@@ -245,8 +273,10 @@ void KatagoProc::query_moves(const char board[][MAX_BOARD_SIZE], int board_size,
         {"boardXSize",     board_size},
         {"boardYSize",     board_size},
         {"maxVisits",      max_visits},
-        {"analyzeTurns",   {0}},
-        {"includePV",      true}
+        {"analyzeTurns",   {0}}
+        // NOTE: no "includePV" field — KataGo's analysis engine already includes a
+        // "pv" array in every moveInfo by default; this key isn't a real query field
+        // and previously just triggered a "do you have a typo?" warning on every query.
     };
     kata_logf("moves query id=%d bs=%d %s stones=%d visits=%d",
               qid, board_size, black_to_play ? "B" : "W", (int)stones.size(), max_visits);
@@ -435,6 +465,30 @@ void KatagoProc::reader_loop() {
     kata_log("reader thread exited");
 }
 
+// Drains katago's stderr on its own pipe/thread — plain text logging only, never
+// touches the JSON response stream. Exits quietly once the pipe closes (normal on stop()).
+void KatagoProc::stderr_reader_loop() {
+#ifdef _WIN32
+    std::string buf;
+    char tmp[8192];
+    while (running_.load()) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(h_stderr_read_, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail == 0) { Sleep(20); continue; }
+        DWORD nread = 0;
+        if (!ReadFile(h_stderr_read_, tmp, sizeof(tmp) - 1, &nread, nullptr) || nread == 0) break;
+        tmp[nread] = '\0';
+        buf.append(tmp, nread);
+        size_t pos;
+        while ((pos = buf.find('\n')) != std::string::npos) {
+            std::string line = buf.substr(0, pos);
+            buf.erase(0, pos + 1);
+            if (!line.empty()) kata_logf("katago(stderr): %s", line.c_str());
+        }
+    }
+#endif
+}
+
 // ── KataGoGtp ─────────────────────────────────────────────────────────────────
 
 static FILE* g_gtp_log = nullptr;
@@ -498,11 +552,14 @@ std::string KataGoGtp::make_temp_cfg(const std::string& profile) {
         "logSearchInfo = false\n"
         "logToStderr = false\n"
         "rules = chinese\n"
+        // Resignation matches KataGo's official gtp_human5k_example.cfg: a weaker
+        // human keeps fighting far longer than a strong bot would, and an early-
+        // resigning bot hands out free wins that make it feel weaker than its rank.
         "allowResignation = true\n"
-        "resignThreshold = -0.95\n"
-        "resignConsecTurns = 5\n"
-        "resignMinScoreDifference = 10\n"
-        "resignMinMovesPerBoardArea = 0.2\n"
+        "resignThreshold = -0.99\n"
+        "resignConsecTurns = 20\n"
+        "resignMinScoreDifference = 40\n"
+        "resignMinMovesPerBoardArea = 0.4\n"
         "maxVisits = 40\n"
         "numSearchThreads = 1\n"
         "lagBuffer = 1.0\n"
@@ -518,10 +575,17 @@ std::string KataGoGtp::make_temp_cfg(const std::string& profile) {
         "humanSLOppExploreProbWeightful = 0.0\n"
         "humanSLCpuctExploration = 0.50\n"
         "humanSLCpuctPermanent = 0.2\n"
-        "chosenMoveTemperatureEarly = 0.85\n"
-        "chosenMoveTemperature = 0.70\n"
+        // Sharper than the official example's 0.85/0.70-below-1%-only sampling.
+        // Per Analysis_Engine.md "How to get stronger human-style play": setting
+        // OnlyBelowProb to 1.0 and lowering the temperatures shifts the bot from
+        // "realistic individual of this rank, blunders included" toward "majority
+        // vote of players at this rank" — same style, but it stops gifting the
+        // rank's typical blunders (Boris found the realistic setting too easy for
+        // the claimed rank). Raise temps back toward 0.85/0.70 for more blunders.
+        "chosenMoveTemperatureEarly = 0.65\n"
+        "chosenMoveTemperature = 0.50\n"
         "chosenMoveTemperatureHalflife = 80\n"
-        "chosenMoveTemperatureOnlyBelowProb = 0.01\n"
+        "chosenMoveTemperatureOnlyBelowProb = 1.0\n"
         "chosenMoveSubtract = 0\n"
         "chosenMovePrune = 0\n"
         "nnCacheSizePowerOfTwo = 17\n"
@@ -556,14 +620,22 @@ bool KataGoGtp::start(const std::string& exe, const std::string& model,
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
 
-    HANDLE h_stdin_r = NULL, h_stdout_w = NULL;
+    HANDLE h_stdin_r = NULL, h_stdout_w = NULL, h_stderr_w = NULL;
     if (!CreatePipe(&h_stdin_r, &h_write_, &sa, 0))        return false;
     if (!CreatePipe(&h_read_, &h_stdout_w, &sa, 0)) {
         CloseHandle(h_stdin_r); CloseHandle(h_write_); h_write_ = NULL;
         return false;
     }
-    SetHandleInformation(h_write_, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(h_read_,  HANDLE_FLAG_INHERIT, 0);
+    // Separate pipe for stderr — see the matching comment in KatagoProc::start() for why
+    // merging it with stdout risks corrupting the response stream.
+    if (!CreatePipe(&h_stderr_read_, &h_stderr_w, &sa, 0)) {
+        CloseHandle(h_stdin_r); CloseHandle(h_write_); CloseHandle(h_read_); CloseHandle(h_stdout_w);
+        h_write_ = h_read_ = NULL;
+        return false;
+    }
+    SetHandleInformation(h_write_,       HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(h_read_,        HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(h_stderr_read_, HANDLE_FLAG_INHERIT, 0);
 
     std::string cmd = "\"" + exe + "\" gtp"
                     + " -model \"" + model + "\""
@@ -583,7 +655,7 @@ bool KataGoGtp::start(const std::string& exe, const std::string& model,
     si.dwFlags   = STARTF_USESTDHANDLES;
     si.hStdInput  = h_stdin_r;
     si.hStdOutput = h_stdout_w;
-    si.hStdError  = h_stdout_w;   // merge stderr so startup errors appear in log
+    si.hStdError  = h_stderr_w;   // own pipe — see comment above
 
     BOOL ok = CreateProcessA(nullptr, cmd_buf.data(),
                              nullptr, nullptr, TRUE,
@@ -591,15 +663,18 @@ bool KataGoGtp::start(const std::string& exe, const std::string& model,
                              &si, &proc_);
     CloseHandle(h_stdin_r);
     CloseHandle(h_stdout_w);
+    CloseHandle(h_stderr_w);
     if (!ok) {
         gtp_logf("CreateProcess FAILED (error %lu)", GetLastError());
-        CloseHandle(h_write_); CloseHandle(h_read_); h_write_ = h_read_ = NULL;
+        CloseHandle(h_write_); CloseHandle(h_read_); CloseHandle(h_stderr_read_);
+        h_write_ = h_read_ = h_stderr_read_ = NULL;
         return false;
     }
 #endif
 
     running_.store(true);
-    reader_ = std::thread([this]() { reader_loop(); });
+    reader_        = std::thread([this]() { reader_loop(); });
+    stderr_reader_ = std::thread([this]() { stderr_reader_loop(); });
 
     // Send initial board setup — KataGo queues these and processes after loading.
     char komi_buf[16];
@@ -618,7 +693,9 @@ void KataGoGtp::stop() {
 #ifdef _WIN32
     if (h_write_) { CloseHandle(h_write_); h_write_ = NULL; }
     if (reader_.joinable()) reader_.join();
-    if (h_read_)  { CloseHandle(h_read_);  h_read_  = NULL; }
+    if (stderr_reader_.joinable()) stderr_reader_.join();
+    if (h_read_)        { CloseHandle(h_read_);        h_read_        = NULL; }
+    if (h_stderr_read_) { CloseHandle(h_stderr_read_); h_stderr_read_ = NULL; }
     if (proc_.hProcess) { TerminateProcess(proc_.hProcess, 0);
                           CloseHandle(proc_.hProcess); proc_.hProcess = NULL; }
     if (proc_.hThread)  { CloseHandle(proc_.hThread);  proc_.hThread  = NULL; }
@@ -639,6 +716,11 @@ void KataGoGtp::send_play(int color, int row, int col, int board_size) {
     if (!running_.load()) return;
     const char* clr = (color == 1) ? "B" : "W";
     write_line(std::string("play ") + clr + " " + gtp_coord(row, col, board_size));
+}
+
+void KataGoGtp::send_undo() {
+    if (!running_.load()) return;
+    write_line("undo");
 }
 
 void KataGoGtp::request_genmove(int color) {
@@ -775,4 +857,27 @@ void KataGoGtp::reader_loop() {
     }
     running_.store(false);
     gtp_log("GTP reader thread exited");
+}
+
+// Drains katago's stderr on its own pipe/thread — see KatagoProc::stderr_reader_loop().
+void KataGoGtp::stderr_reader_loop() {
+#ifdef _WIN32
+    std::string buf;
+    char tmp[8192];
+    while (running_.load()) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(h_stderr_read_, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail == 0) { Sleep(20); continue; }
+        DWORD nread = 0;
+        if (!ReadFile(h_stderr_read_, tmp, sizeof(tmp) - 1, &nread, nullptr) || nread == 0) break;
+        tmp[nread] = '\0';
+        buf.append(tmp, nread);
+        size_t pos;
+        while ((pos = buf.find('\n')) != std::string::npos) {
+            std::string line = buf.substr(0, pos);
+            buf.erase(0, pos + 1);
+            if (!line.empty()) gtp_logf("katago(stderr): %s", line.c_str());
+        }
+    }
+#endif
 }

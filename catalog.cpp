@@ -33,6 +33,36 @@ bool Catalog::has_sgf_ext(const std::string& name) {
 }
 
 // ---------------------------------------------------------------------------
+// Unicode-safe file I/O (see catalog.hpp for why this exists)
+
+#ifdef _WIN32
+std::wstring Catalog::utf8_to_wide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w((size_t)len, L'\0');
+    if (len > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], len);
+    return w;
+}
+
+std::string Catalog::wide_to_utf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s((size_t)len, '\0');
+    if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], len, nullptr, nullptr);
+    return s;
+}
+
+FILE* Catalog::fopen_utf8(const std::string& path, const char* mode) {
+    std::wstring wmode(mode, mode + strlen(mode));
+    return _wfopen(utf8_to_wide(path).c_str(), wmode.c_str());
+}
+#else
+std::wstring Catalog::utf8_to_wide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+std::string  Catalog::wide_to_utf8(const std::wstring& w) { return std::string(w.begin(), w.end()); }
+FILE* Catalog::fopen_utf8(const std::string& path, const char* mode) { return fopen(path.c_str(), mode); }
+#endif
+
+// ---------------------------------------------------------------------------
 // SGF name extraction
 
 // Read the first chunk of an SGF file and extract PB[] and PW[].
@@ -41,8 +71,10 @@ bool Catalog::has_sgf_ext(const std::string& name) {
 static bool sgf_player_names(const std::string& path,
                               std::string& black_out,
                               std::string& white_out,
-                              std::string& date_out) {
-    FILE* fp = fopen(path.c_str(), "rb");
+                              std::string& date_out,
+                              std::string& black_rank_out,
+                              std::string& white_rank_out) {
+    FILE* fp = Catalog::fopen_utf8(path, "rb");
     if (!fp) return false;
     char buf[4096];
     size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
@@ -79,9 +111,13 @@ static bool sgf_player_names(const std::string& path,
     black_out.clear();
     white_out.clear();
     date_out.clear();
+    black_rank_out.clear();
+    white_rank_out.clear();
     extract("PB[", "pb[", black_out);
     extract("PW[", "pw[", white_out);
     extract("DT[", "dt[", date_out);
+    extract("BR[", "br[", black_rank_out);
+    extract("WR[", "wr[", white_rank_out);
     return !black_out.empty() || !white_out.empty();
 }
 
@@ -107,15 +143,16 @@ static std::string make_display_name(const std::string& filename,
 bool Catalog::list_recursive(const std::string& dir, const std::string& base,
                              std::vector<std::string>& out) {
     std::string search = join_path(dir, "*");
-    WIN32_FIND_DATAA data;
-    HANDLE h = FindFirstFileA(search.c_str(), &data);
+    WIN32_FIND_DATAW data;
+    HANDLE h = FindFirstFileW(utf8_to_wide(search).c_str(), &data);
     if (h == INVALID_HANDLE_VALUE) return false;
     do {
-        if (strcmp(data.cFileName, ".") == 0 || strcmp(data.cFileName, "..") == 0) continue;
-        std::string full = join_path(dir, data.cFileName);
+        std::string fname = wide_to_utf8(data.cFileName);
+        if (fname == "." || fname == "..") continue;
+        std::string full = join_path(dir, fname);
         if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             list_recursive(full, base, out);
-        } else if (has_sgf_ext(data.cFileName)) {
+        } else if (has_sgf_ext(fname)) {
             // Store path relative to base
             std::string rel = full;
             if (full.size() > base.size() && full.substr(0, base.size()) == base) {
@@ -125,7 +162,7 @@ bool Catalog::list_recursive(const std::string& dir, const std::string& base,
             }
             out.push_back(rel);
         }
-    } while (FindNextFileA(h, &data));
+    } while (FindNextFileW(h, &data));
     FindClose(h);
     return true;
 }
@@ -181,20 +218,21 @@ bool Catalog::load_entries() {
 
 #ifdef _WIN32
     std::string search = join_path(dir_path, "*");
-    WIN32_FIND_DATAA data;
-    HANDLE h = FindFirstFileA(search.c_str(), &data);
+    WIN32_FIND_DATAW data;
+    HANDLE h = FindFirstFileW(utf8_to_wide(search).c_str(), &data);
     if (h == INVALID_HANDLE_VALUE) return false;
     do {
-        if (strcmp(data.cFileName, ".") == 0 || strcmp(data.cFileName, "..") == 0) continue;
+        std::string fname = wide_to_utf8(data.cFileName);
+        if (fname == "." || fname == "..") continue;
         if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            dirs_vec.push_back({data.cFileName, "", true, 1});
-        } else if (has_sgf_ext(data.cFileName)) {
-            CatalogEntry e; e.name = data.cFileName; e.type = 0;
+            dirs_vec.push_back({fname, "", true, 1});
+        } else if (has_sgf_ext(fname)) {
+            CatalogEntry e; e.name = fname; e.type = 0;
             e.mtime = ((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32)
                     |  (uint64_t)data.ftLastWriteTime.dwLowDateTime;
             files_vec.push_back(std::move(e));
         }
-    } while (FindNextFileA(h, &data));
+    } while (FindNextFileW(h, &data));
     FindClose(h);
 #else
     DIR* d = opendir(dir_path.c_str());
@@ -240,8 +278,10 @@ bool Catalog::load_entries() {
         const GameIndexEntry* ge = game_index.find(rel);
         if (ge) {
             e.display_name = make_display_name(e.name, ge->black, ge->white);
-            e.player_black = ge->black;
-            e.player_white = ge->white;
+            e.player_black      = ge->black;
+            e.player_white      = ge->white;
+            e.player_black_rank = ge->black_rank;
+            e.player_white_rank = ge->white_rank;
             e.date         = ge->date;
             e.name_loaded  = true;
         } else {
@@ -263,16 +303,48 @@ bool Catalog::load_entries() {
     });
 
     // Parent entry first when inside a subdirectory.
-    // At root level, offer the virtual [BY YEAR] browser.
+    // At root level, offer the virtual [BY YEAR] browser and pull the "marked"
+    // subdirectory (if present) out into its own pinned category, rather than
+    // letting it sort alphabetically among ordinary subdirectories.
     if (!current_subdir.empty()) {
         entries.push_back({"..", "..", true, 2});
     } else {
+        // Special subdirectories get pulled out of the alphabetical listing and
+        // pinned at the top under their own labels.
+        auto pin_special = [&](const char* dirname, const char* label) {
+            for (size_t i = 0; i < dirs_vec.size(); i++) {
+#ifdef _WIN32
+                bool hit = _stricmp(dirs_vec[i].name.c_str(), dirname) == 0;
+#else
+                bool hit = strcasecmp(dirs_vec[i].name.c_str(), dirname) == 0;
+#endif
+                if (hit) {
+                    CatalogEntry e = dirs_vec[i];
+                    e.display_name = label;
+                    e.name_loaded  = true;
+                    entries.push_back(e);
+                    dirs_vec.erase(dirs_vec.begin() + i);
+                    return;
+                }
+            }
+        };
+        pin_special("marked",  "[MARKED POSITIONS]");
+        pin_special("puzzles", "[STUDY PUZZLES]");
+        pin_special("katago",  "[VS KATAGO GAMES]");
+
         CatalogEntry by_year;
         by_year.name         = "[BY YEAR]";
         by_year.display_name = "[BY YEAR]";
         by_year.name_loaded  = true;
         by_year.type         = 4;
         entries.push_back(by_year);
+
+        CatalogEntry by_player;
+        by_player.name         = "[BY PLAYER]";
+        by_player.display_name = "[BY PLAYER]";
+        by_player.name_loaded  = true;
+        by_player.type         = 7;
+        entries.push_back(by_player);
     }
     for (auto& e : dirs_vec) {
         e.display_name = e.name;
@@ -375,8 +447,10 @@ void Catalog::load_player_games(const std::string& player) {
         size_t sep = ge->rel_path.find_last_of("/\\");
         e.name         = (sep == std::string::npos) ? ge->rel_path : ge->rel_path.substr(sep + 1);
         e.display_name = make_display_name(e.name, ge->black, ge->white);
-        e.player_black = ge->black;
-        e.player_white = ge->white;
+        e.player_black      = ge->black;
+        e.player_white      = ge->white;
+        e.player_black_rank = ge->black_rank;
+        e.player_white_rank = ge->white_rank;
         e.date         = ge->date;
         e.name_loaded  = true;
         e.type         = 0;
@@ -460,8 +534,10 @@ void Catalog::load_year_games(const std::string& year) {
         size_t sep = ge->rel_path.find_last_of("/\\");
         e.name = (sep == std::string::npos) ? ge->rel_path : ge->rel_path.substr(sep + 1);
         e.display_name = make_display_name(e.name, ge->black, ge->white);
-        e.player_black = ge->black;
-        e.player_white = ge->white;
+        e.player_black      = ge->black;
+        e.player_white      = ge->white;
+        e.player_black_rank = ge->black_rank;
+        e.player_white_rank = ge->white_rank;
         e.date         = ge->date;
         e.name_loaded  = true;
         e.type         = 0;
@@ -503,8 +579,10 @@ void Catalog::apply_search() {
         size_t sep = ge->rel_path.find_last_of("/\\");
         e.name = (sep == std::string::npos) ? ge->rel_path : ge->rel_path.substr(sep + 1);
         e.display_name = make_display_name(e.name, ge->black, ge->white);
-        e.player_black = ge->black;
-        e.player_white = ge->white;
+        e.player_black      = ge->black;
+        e.player_white      = ge->white;
+        e.player_black_rank = ge->black_rank;
+        e.player_white_rank = ge->white_rank;
         e.date         = ge->date;
         e.name_loaded  = true;
         e.type         = 0;
@@ -602,11 +680,13 @@ void Catalog::ensure_names_loaded(int from, int count) {
     for (int i = std::max(0, from); i < end; i++) {
         CatalogEntry& e = entries[i];
         if (e.name_loaded || e.type != 0) continue;
-        std::string bname, wname, dname;
-        sgf_player_names(join_path(dir_path, e.name), bname, wname, dname);
+        std::string bname, wname, dname, brank, wrank;
+        sgf_player_names(join_path(dir_path, e.name), bname, wname, dname, brank, wrank);
         e.display_name = make_display_name(e.name, bname, wname);
-        e.player_black = bname;
-        e.player_white = wname;
+        e.player_black      = bname;
+        e.player_white      = wname;
+        e.player_black_rank = brank;
+        e.player_white_rank = wrank;
         e.date         = dname;
         e.name_loaded  = true;
     }
@@ -644,26 +724,20 @@ void Catalog::select() {
                 virtual_year.clear();
                 load_year_list();
             } else {
-                // Exit year browser back to player list
+                // Exit year browser back to the directory root — the year browser
+                // is entered from there, so ".." should retrace the same path.
                 virtual_year_mode    = false;
-                virtual_player_mode  = true;
-                virtual_player.clear();
-                player_needs_refresh = false;
-                load_player_list();
+                virtual_player_mode  = false;
+                current_subdir       = "";
+                load_entries();
             }
             index = 0; scroll = 0;
             return;
         }
+        // Real directory tree: ".." just walks up. The directory root is the
+        // catalog's home view; the player browser is reachable via [BY PLAYER].
         dir_up();
-        if (current_subdir.empty()) {
-            // Back at root of directory tree — return to player list
-            virtual_player_mode  = true;
-            virtual_player.clear();
-            player_needs_refresh = false;
-            load_player_list();
-        } else {
-            load_entries();
-        }
+        load_entries();
         index = 0; scroll = 0;
         return;
     }
@@ -683,6 +757,17 @@ void Catalog::select() {
         virtual_player_mode = false;
         current_subdir      = "";
         load_entries();
+        index = 0; scroll = 0;
+        return;
+    }
+
+    // [BY PLAYER] meta-entry — enter the virtual player browser
+    if (e.type == 7) {
+        virtual_year_mode    = false;
+        virtual_player_mode  = true;
+        virtual_player.clear();
+        player_needs_refresh = false;
+        load_player_list();
         index = 0; scroll = 0;
         return;
     }

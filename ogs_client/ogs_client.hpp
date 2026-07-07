@@ -17,7 +17,6 @@ enum class NetMsgType {
     UNDO_REQUESTED,  // opponent requested undo; undo_move_number holds the move to undo
     RESUME_PLAY,     // stone removal cancelled; game returned to play phase
     DISCONNECTED,    // connection lost unexpectedly
-    ACCEPT_STATUS,   // stone removal: one or both players accepted; check my_accepted/opp_accepted
 };
 
 struct NetMsg {
@@ -54,6 +53,11 @@ struct NetMsg {
     int white_periods     = -1;
     int black_period_secs = -1;  // seconds per byo-yomi period
     int white_period_secs = -1;
+    // Main time exhausted — the player is living on byo-yomi periods. Determined at
+    // parse time (period_time_left present, or thinking_time 0 with periods left);
+    // the display values alone can't distinguish byo-yomi from low main time.
+    bool black_in_byo     = false;
+    bool white_in_byo     = false;
 
     // UNDO_REQUESTED: move number the opponent wants to undo
     int undo_move_number = 0;
@@ -63,22 +67,18 @@ struct NetMsg {
 
     // STONE_REMOVAL: raw JSON ownership array (2D, [row][col]: 1=black, -1=white, 0=neutral)
     std::string ownership_json;
-
-    // ACCEPT_STATUS: -1=unknown, 0=not accepted, 1=accepted
-    int my_accepted  = -1;
-    int opp_accepted = -1;
 };
 
 // ── Match preferences (used to build automatch payload) ───────────────────
 
 struct MatchPrefs {
     // Board sizes — index 0=9x9, 1=13x13, 2=19x19
-    bool sizes[3]  = {true, false, false};
-    // Speeds    — index 0=blitz, 1=live, 2=rapid  (OGS mode only)
-    bool speeds[3] = {false, true, false};
+    bool sizes[3]  = {false, false, true};
+    // Speeds    — index 0=blitz (fast), 1=rapid (medium), 2=live (slow)  (OGS mode only)
+    bool speeds[3] = {false, true, true};
     // Local play vs KataGo human SL model
     bool katago_mode = false;
-    int  katago_str  = 2;   // index into strength table (0=20k … 6=5d)
+    int  katago_str  = 7;   // index into strength table (0=20k … 6=5d, 7=adaptive)
 };
 
 // ── Outbound: main thread → network thread ─────────────────────────────────

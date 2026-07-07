@@ -74,7 +74,6 @@ private:
     int         active_game_id_   = 0;
     std::string removed_stones_;   // dead-stone list from server's stone removal event
     std::string game_result_;      // outcome string from last gamedata (e.g. "W+Resign")
-    bool        in_stone_removal_ = false;
 
     // Automatch UUID (kept for cancellation)
     std::string match_uuid_;

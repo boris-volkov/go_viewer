@@ -47,12 +47,15 @@ public:
 
 private:
 #ifdef _WIN32
-    HANDLE h_write_ = NULL;   // write end of katago's stdin pipe
-    HANDLE h_read_  = NULL;   // read end of katago's stdout pipe
+    HANDLE h_write_        = NULL;   // write end of katago's stdin pipe
+    HANDLE h_read_         = NULL;   // read end of katago's stdout pipe (JSON responses only)
+    HANDLE h_stderr_read_  = NULL;   // read end of katago's stderr pipe (diagnostics only)
     PROCESS_INFORMATION proc_{};
 #endif
     std::atomic<bool> running_{ false };
     std::thread       reader_;
+    std::thread       stderr_reader_;  // drains stderr separately so it can never
+                                        // interleave with and corrupt the stdout JSON stream
 
     std::mutex mu_;
     // Ownership result (query_ownership / poll_ownership)
@@ -72,6 +75,7 @@ private:
 
     void write_line(const std::string& s);
     void reader_loop();
+    void stderr_reader_loop();
 };
 
 // ── GTP subprocess for local play vs the human SL model ──────────────────────
@@ -95,6 +99,10 @@ public:
     // Send "play B/W <coord>" (row=-1/col=-1 → "pass").  color: 1=Black, 0=White.
     void send_play(int color, int row, int col, int board_size);
 
+    // Send GTP "undo" — undoes exactly one ply on KataGo's own internal board.
+    // Call once per ply popped from our own history to keep KataGo in sync.
+    void send_undo();
+
     // Send "genmove B/W".
     void request_genmove(int color);
 
@@ -113,12 +121,14 @@ public:
 
 private:
 #ifdef _WIN32
-    HANDLE h_write_ = NULL;
-    HANDLE h_read_  = NULL;
+    HANDLE h_write_       = NULL;
+    HANDLE h_read_        = NULL;   // stdout only — GTP responses
+    HANDLE h_stderr_read_ = NULL;   // stderr only — diagnostics, kept off the response stream
     PROCESS_INFORMATION proc_{};
 #endif
     std::atomic<bool> running_{ false };
     std::thread reader_;
+    std::thread stderr_reader_;
     std::mutex mu_;
     bool move_ready_ = false;
     int  move_row_   = 0;
@@ -136,4 +146,5 @@ private:
     static std::string make_temp_cfg(const std::string& profile);
     void write_line(const std::string& s);
     void reader_loop();
+    void stderr_reader_loop();
 };
