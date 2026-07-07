@@ -116,8 +116,11 @@ bool ogs_fetch_puzzle_collections(int page, int page_size,
                                   std::vector<OgsPuzzleCollection>& out,
                                   int& total_out) {
     json j;
+    // Most-viewed first — page 1 starts with the classics (Cho Chikun etc.)
+    // instead of the API's arbitrary default order.
     if (!http_get_json("https://online-go.com/api/v1/puzzles/collections/?page="
-                       + std::to_string(page) + "&page_size=" + std::to_string(page_size), j))
+                       + std::to_string(page) + "&page_size=" + std::to_string(page_size)
+                       + "&ordering=-view_count", j))
         return false;
     if (!j.contains("results") || !j["results"].is_array()) return false;
 
