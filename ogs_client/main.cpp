@@ -2681,7 +2681,9 @@ void App::pz_build_tree_render() {
             // Root has no move; odd depths are the solver's moves
             rn.move_color   = (depth == 0) ? -1
                             : (depth % 2 == 1) ? player_black : 1 - player_black;
-            rn.marked       = node->correct;
+            rn.goal         = node->correct;   // green halo on the node itself —
+                                               // full-row marked highlights read as
+                                               // noise when several goals coexist
             pz_tree_render_.push_back(rn);
             for (int i = 0; i < (int)node->branches.size(); i++) {
                 int child_col = (i == 0) ? col : ++max_col;

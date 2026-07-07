@@ -26,7 +26,8 @@ struct AnalysisTreeRenderNode {
     int  parent_depth = -1;  // -1 for root
     int  parent_col   = 0;
     int  move_color   = -1;  // 1=black stone, 0=white stone, -1=root (no move)
-    bool marked       = false; // flagged for special analysis attention
+    bool marked       = false; // flagged for special analysis attention (full-row highlight)
+    bool goal         = false; // solution endpoint (puzzle trees) — green halo on the node
 };
 
 class Renderer {

@@ -2017,6 +2017,10 @@ void Renderer::render_analysis_tree(const BoardView& view, const DrawState& ds) 
         if (n.current) {
             SDL_SetRenderDrawColor(sdl, 255, 235, 80, 255);
             fill_circle(nx, ny, r_node + std::max(2, r_node / 4));
+        } else if (n.goal) {
+            // Solution endpoint — green halo on the node (puzzle trees)
+            SDL_SetRenderDrawColor(sdl, 70, 205, 130, 255);
+            fill_circle(nx, ny, r_node + std::max(2, r_node / 4));
         }
 
         if (n.move_color == 1) {
@@ -2320,6 +2324,7 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
             mix8(uint8_t(tn.col));
             mix8(uint8_t(tn.current));
             mix8(uint8_t(tn.marked));
+            mix8(uint8_t(tn.goal));
         }
         // Score graph
         if (ds.live_score_graph) {
