@@ -1940,10 +1940,19 @@ void Renderer::render_analysis_tree(const BoardView& view, const DrawState& ds) 
 
     SDL_RenderSetClipRect(sdl, &panel_rect);
 
-    const int pad    = 10;
-    const int row_h  = 45;   // taller rows for bigger nodes
-    const int col_w  = 42;
-    const int r_node = 15;   // 50% larger than before
+    const int pad = 10;
+    // Node geometry scales down for wide trees so every column fits the panel
+    // instead of clipping off the right edge (some OGS puzzles fan out 20+ ways).
+    int max_col = 0;
+    for (int i = 0; i < ds.live_analysis_tree_count; i++)
+        max_col = std::max(max_col, ds.live_analysis_tree[i].col);
+    int inner_w = panel_w - 2 * pad;
+    int col_w   = 42;
+    if ((max_col + 1) * col_w > inner_w)
+        col_w = std::max(8, inner_w / (max_col + 1));
+    int r_node = std::min(15, std::max(3, col_w / 2 - 2));
+    int row_h  = std::max(18, r_node * 3);   // rows shrink with the nodes
+    int thick  = std::max(1, r_node / 5);    // connector line weight follows too
 
     int inner_h    = panel_h - 2 * pad;
     int visible_rows = inner_h / row_h;
@@ -1988,12 +1997,12 @@ void Renderer::render_analysis_tree(const BoardView& view, const DrawState& ds) 
         if (ny > vis_bottom && py > vis_bottom) continue;
 
         if (n.col == n.parent_col) {
-            draw_thick_line(nx, py, nx, ny, 3, line_col);
+            draw_thick_line(nx, py, nx, ny, thick, line_col);
         } else {
             int bend_y = py + row_h / 2;
-            draw_thick_line(px, py, px, bend_y, 3, line_col);
-            draw_thick_line(px, bend_y, nx, bend_y, 3, line_col);
-            draw_thick_line(nx, bend_y, nx, ny, 3, line_col);
+            draw_thick_line(px, py, px, bend_y, thick, line_col);
+            draw_thick_line(px, bend_y, nx, bend_y, thick, line_col);
+            draw_thick_line(nx, bend_y, nx, ny, thick, line_col);
         }
     }
 
@@ -2007,7 +2016,7 @@ void Renderer::render_analysis_tree(const BoardView& view, const DrawState& ds) 
 
         if (n.current) {
             SDL_SetRenderDrawColor(sdl, 255, 235, 80, 255);
-            fill_circle(nx, ny, r_node + 4);
+            fill_circle(nx, ny, r_node + std::max(2, r_node / 4));
         }
 
         if (n.move_color == 1) {
@@ -2021,7 +2030,7 @@ void Renderer::render_analysis_tree(const BoardView& view, const DrawState& ds) 
             SDL_SetRenderDrawColor(sdl, 85, 100, 120, 255);
             fill_circle(nx, ny, r_node);
             SDL_SetRenderDrawColor(sdl, Palette::BOARD.r, Palette::BOARD.g, Palette::BOARD.b, 255);
-            fill_circle(nx, ny, r_node - 3);
+            fill_circle(nx, ny, std::max(1, r_node - 3));
         }
     }
 
