@@ -599,6 +599,14 @@ private:
     bool        pz_done_   = false;            // solved or failed — judging over
     bool        pz_solved_ = false;
     bool        pz_explore_ = false;           // off the authored tree — free sandbox, no judging
+    std::vector<BoardLabel> pz_marks_;         // current node's author marks (letter renderer)
+    void pz_refresh_marks() {
+        pz_marks_.clear();
+        if (!pz_node_) return;
+        for (const auto& m : pz_node_->marks)
+            if (m.y >= 0 && m.y < game_.board_size && m.x >= 0 && m.x < game_.board_size)
+                pz_marks_.push_back({m.y, m.x, m.ch});
+    }
     std::string pz_banner_;                    // "SOLVED!" / "WRONG" big banner
     std::string pz_comment_;                   // author's comment at the current node
 
@@ -2606,6 +2614,7 @@ void App::pz_start() {
     pz_done_    = false;
     pz_solved_  = false;
     pz_explore_ = false;
+    pz_refresh_marks();   // root-node marks annotate the initial position
     pz_banner_.clear();
     pz_comment_  = pz_.description;   // the author's task statement
     black_label_ = game_.black_name;
@@ -2621,6 +2630,7 @@ void App::pz_start() {
 void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
     pz_node_ = node;
     if (!node->text.empty()) pz_comment_ = node->text;
+    if (!node->marks.empty()) pz_refresh_marks();   // new annotations replace the old
 
     if (node->correct) {
         pz_done_   = true;
@@ -3514,9 +3524,13 @@ Renderer::DrawState App::make_ds() {
         .live_show_coords = show_coords_,
         .live_labels      = (state_ == AppState::GAME_OVER && analysis_cur_ &&
                              !analysis_cur_->labels.empty())
-                                ? analysis_cur_->labels.data() : nullptr,
+                                ? analysis_cur_->labels.data()
+                          : (state_ == AppState::PUZZLE_PLAY && !pz_marks_.empty())
+                                ? pz_marks_.data() : nullptr,
         .live_label_count = (state_ == AppState::GAME_OVER && analysis_cur_)
-                                ? (int)analysis_cur_->labels.size() : 0,
+                                ? (int)analysis_cur_->labels.size()
+                          : (state_ == AppState::PUZZLE_PLAY)
+                                ? (int)pz_marks_.size() : 0,
         .live_result_banner = (state_ == AppState::STONE_REMOVAL && is_local_game_ &&
                                !local_game_score_.empty())
                                   ? local_game_score_.c_str()

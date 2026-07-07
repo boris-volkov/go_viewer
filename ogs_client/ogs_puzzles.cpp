@@ -68,6 +68,40 @@ static void parse_move_tree(const json& j, PuzzleMoveNode& node) {
     node.correct = j.value("correct_answer", false);
     node.wrong   = j.value("wrong_answer",   false);
     node.text    = j.value("text", std::string());
+    // Author annotations: goban serializes marks as [{x, y, marks:{letter|cross|
+    // circle|triangle|square…}}]. Letters keep their first character; shape marks
+    // are reduced to a character (triangle/square use the PS-glyph shapes our
+    // bitmap font already has).
+    if (j.contains("marks") && j["marks"].is_array()) {
+        for (const auto& m : j["marks"]) {
+            if (!m.is_object() || !m.contains("marks") || !m["marks"].is_object())
+                continue;
+            PuzzleMark pm;
+            pm.x = m.value("x", -1);
+            pm.y = m.value("y", -1);
+            if (pm.x < 0 || pm.y < 0) continue;
+            const auto& mk = m["marks"];
+            // Mark values vary between bools and strings across goban versions
+            auto truthy = [&mk](const char* key) {
+                if (!mk.contains(key)) return false;
+                const auto& v = mk[key];
+                if (v.is_boolean()) return v.get<bool>();
+                if (v.is_string())  return !v.get<std::string>().empty();
+                return !v.is_null();
+            };
+            std::string letter;
+            if (mk.contains("letter") && mk["letter"].is_string())
+                letter = mk["letter"].get<std::string>();
+            if (!letter.empty())
+                pm.ch = (char)toupper((unsigned char)letter[0]);
+            else if (truthy("cross"))    pm.ch = 'X';
+            else if (truthy("circle"))   pm.ch = 'O';
+            else if (truthy("triangle")) pm.ch = '^';   // triangle glyph
+            else if (truthy("square"))   pm.ch = '#';   // square glyph
+            else continue;
+            node.marks.push_back(pm);
+        }
+    }
     if (j.contains("branches") && j["branches"].is_array()) {
         for (const auto& b : j["branches"]) {
             node.branches.emplace_back();

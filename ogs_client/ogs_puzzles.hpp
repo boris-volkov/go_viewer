@@ -12,6 +12,13 @@
 //
 // All fetchers are blocking (libcurl) — call from a worker thread, not the UI loop.
 
+// A board annotation the author placed at this node — letter labels ("A", "X",
+// "O"…) or shape marks reduced to a display character.
+struct PuzzleMark {
+    int  x = -1, y = -1;
+    char ch = '?';
+};
+
 // One node of the authored solution tree. Root is the initial position (x=y=-1);
 // each child is a move. correct/wrong flags mark judged endpoints; text carries
 // the author's comment for that node (often "why this fails" on wrong branches).
@@ -20,6 +27,7 @@ struct PuzzleMoveNode {
     bool correct = false;
     bool wrong   = false;
     std::string text;
+    std::vector<PuzzleMark>     marks;   // annotations to show while at this node
     std::vector<PuzzleMoveNode> branches;
 };
 
