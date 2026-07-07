@@ -16,6 +16,16 @@ const Renderer::Glyph Renderer::font_glyphs[] = {
     {'=', {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00}},
     {'!', {0x04,0x04,0x04,0x04,0x04,0x00,0x04}},
     {'*', {0x00,0x00,0x00,0x0C,0x0C,0x00,0x00}},  // centered dot — menu focus cursor
+    {'"', {0x0A,0x0A,0x00,0x00,0x00,0x00,0x00}},
+    {';', {0x00,0x04,0x00,0x00,0x04,0x04,0x08}},
+    {'<', {0x02,0x04,0x08,0x10,0x08,0x04,0x02}},
+    {'>', {0x08,0x04,0x02,0x01,0x02,0x04,0x08}},
+    {'&', {0x08,0x14,0x14,0x08,0x15,0x12,0x0D}},
+    {'$', {0x04,0x0F,0x14,0x0E,0x05,0x1E,0x04}},
+    {'|', {0x04,0x04,0x04,0x04,0x04,0x04,0x04}},
+    {'`', {0x08,0x04,0x00,0x00,0x00,0x00,0x00}},
+    {'{', {0x06,0x04,0x04,0x08,0x04,0x04,0x06}},
+    {'}', {0x0C,0x04,0x04,0x02,0x04,0x04,0x0C}},
     // PlayStation face-button shapes, reachable via the GLYPH_PS_* placeholder
     // strings (renderer.hpp). Kept vertically centered with blank top/bottom rows
     // so the four read as a matched set at any scale.
@@ -83,18 +93,35 @@ const unsigned char* Renderer::get_glyph_rows(char c) {
     return font_glyphs[0].rows; // unreachable: '?' is always present
 }
 
-// The bitmap font is single-byte/ASCII only. Status text throughout the app uses a
-// UTF-8 em dash (U+2014, 3 bytes: E2 80 94) as a decorative separator; render it as
-// a hyphen (same 5x7 cell) rather than 3 back-to-back missing-glyph boxes, and advance
-// the read cursor past all 3 bytes. Any other multi-byte sequence just falls through
-// to get_glyph_rows() byte-by-byte (rendered as the '?' fallback per byte).
-// Caller guarantees p[0] != '\0'; each subsequent byte is only read once the prior
-// one is confirmed non-null, so this never reads past the string's terminator.
-static bool is_utf8_em_dash(const char* p) {
-    if ((unsigned char)p[0] != 0xE2) return false;
-    if (p[1] == 0 || (unsigned char)p[1] != 0x80) return false;
-    if (p[2] == 0 || (unsigned char)p[2] != 0x94) return false;
-    return true;
+// The bitmap font is single-byte/ASCII only, but the strings we render (status
+// separators, OGS puzzle texts and names) carry UTF-8: em/en dashes, curly quotes,
+// ellipses, and CJK. Map each sequence to one display character — typographic
+// punctuation to its ASCII cousin, anything unknown to a single '?' per character
+// (instead of one '?' per BYTE, which turned each CJK char into ???).
+// Caller guarantees p[0] != '\0'; subsequent bytes are only read after the prior
+// one is confirmed non-null, so this never reads past the terminator.
+static char utf8_display_char(const char* p, int& bytes) {
+    unsigned char c0 = (unsigned char)p[0];
+    bytes = 1;
+    if (c0 < 0x80) return (char)c0;
+
+    // U+2013..U+2026 punctuation family (E2 80 xx)
+    if (c0 == 0xE2 && p[1] && (unsigned char)p[1] == 0x80 && p[2]) {
+        bytes = 3;
+        switch ((unsigned char)p[2]) {
+        case 0x93: case 0x94: return '-';    // – —
+        case 0x98: case 0x99: return '\'';   // ' '
+        case 0x9C: case 0x9D: return '"';    // " "
+        case 0xA2:            return '*';    // bullet
+        case 0xA6:            return '.';    // …
+        default:              return '?';
+        }
+    }
+    // Any other multi-byte sequence: consume it whole, show one '?'
+    if ((c0 & 0xE0) == 0xC0)      bytes = p[1] ? 2 : 1;
+    else if ((c0 & 0xF0) == 0xE0) bytes = (p[1] && p[2]) ? 3 : 1;
+    else if ((c0 & 0xF8) == 0xF0) bytes = (p[1] && p[2] && p[3]) ? 4 : 1;
+    return '?';
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +170,11 @@ bool Renderer::screen_to_board(const BoardView& view, int mx, int my, int& r, in
 
 int Renderer::text_width_px(const char* text, int scale) const {
     int count = 0;
-    for (const char* p = text; *p; count++)
-        p += is_utf8_em_dash(p) ? 3 : 1;
+    for (const char* p = text; *p; count++) {
+        int bytes;
+        utf8_display_char(p, bytes);
+        p += bytes;
+    }
     if (count <= 0) return 0;
     return (count * 6 - 1) * scale;
 }
@@ -166,10 +196,10 @@ void Renderer::draw_text(int x, int y, int scale, const char* text, SDL_Color co
     SDL_SetRenderDrawColor(sdl, color.r, color.g, color.b, color.a);
     int pen_x = x;
     for (const char* p = text; *p; ) {
-        bool em_dash = is_utf8_em_dash(p);
-        char c = em_dash ? '-' : *p;
+        int bytes;
+        char c = utf8_display_char(p, bytes);
         const unsigned char* rows = get_glyph_rows(c);
-        p += em_dash ? 3 : 1;
+        p += bytes;
         SDL_Color pc;
         bool ps = ps_button_color(c, pc);
         if (ps) SDL_SetRenderDrawColor(sdl, pc.r, pc.g, pc.b, pc.a);
