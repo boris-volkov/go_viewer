@@ -596,8 +596,9 @@ private:
 
     OgsPuzzle             pz_;                 // puzzle being solved
     const PuzzleMoveNode* pz_node_  = nullptr; // current position in the solution tree
-    bool        pz_done_   = false;            // solved or failed — board locked
+    bool        pz_done_   = false;            // solved or failed — judging over
     bool        pz_solved_ = false;
+    bool        pz_explore_ = false;           // off the authored tree — free sandbox, no judging
     std::string pz_banner_;                    // "SOLVED!" / "WRONG" big banner
     std::string pz_comment_;                   // author's comment at the current node
 
@@ -2598,9 +2599,10 @@ void App::pz_start() {
     game_.history.push_back(game_.board);
     last_move_r_ = last_move_f_ = -1;
 
-    pz_node_   = &pz_.tree;
-    pz_done_   = false;
-    pz_solved_ = false;
+    pz_node_    = &pz_.tree;
+    pz_done_    = false;
+    pz_solved_  = false;
+    pz_explore_ = false;
     pz_banner_.clear();
     pz_comment_  = pz_.description;   // the author's task statement
     black_label_ = game_.black_name;
@@ -2655,15 +2657,14 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
     draw();
 }
 
-// Player plays at (r, f): match against the current node's branches.
+// Player plays at (r, f): match against the current node's branches — or, once
+// off the authored tree (or after a verdict), free exploration: stones alternate
+// colors with no judging and no auto-opponent, so lines the author didn't cover
+// can be tested by playing both sides. Circle restarts the judged attempt.
 void App::pz_place(int r, int f) {
-    if (pz_done_ || !pz_node_) return;
+    if (!pz_node_) return;
     if (r < 0 || f < 0 || r >= game_.board_size || f >= game_.board_size) return;
     if (game_.board.board[r][f] != 0) return;
-
-    const PuzzleMoveNode* hit = nullptr;
-    for (const auto& b : pz_node_->branches)
-        if (b.x == f && b.y == r) { hit = &b; break; }
 
     // Place the stone (captures apply) so the player sees their move either way
     int is_black = (game_.board.turn_is_black == 1);
@@ -2674,13 +2675,27 @@ void App::pz_place(int r, int f) {
     last_move_r_ = r;
     last_move_f_ = f;
 
+    if (pz_explore_ || pz_done_) {
+        // Already exploring (or continuing past a verdict) — sandbox move
+        if (!pz_explore_) {
+            pz_explore_ = true;
+            pz_banner_.clear();   // drop the SOLVED!/WRONG banner once exploring
+        }
+        set_status("EXPLORING — " GLYPH_PS_CIRCLE " RESTARTS PUZZLE");
+        draw();
+        return;
+    }
+
+    const PuzzleMoveNode* hit = nullptr;
+    for (const auto& b : pz_node_->branches)
+        if (b.x == f && b.y == r) { hit = &b; break; }
+
     if (!hit) {
-        // Off the authored tree entirely — judged wrong, per OGS semantics
-        pz_done_    = true;
-        pz_solved_  = false;
-        pz_banner_  = "WRONG";
-        pz_comment_ = "NOT THE SOLUTION LINE";
-        set_status("PRESS " GLYPH_PS_CIRCLE " TO RETRY");
+        // Off the authored tree: not judged, just warned — free exploration from
+        // here on (both sides played manually; there is no authored reply anyway).
+        pz_explore_ = true;
+        pz_comment_ = "OFF THE SOLUTION TREE — FREE PLAY, BOTH SIDES";
+        set_status("OFF TREE — " GLYPH_PS_CIRCLE " RESTARTS PUZZLE");
         draw();
         return;
     }
@@ -3412,10 +3427,10 @@ Renderer::DrawState App::make_ds() {
         .live_mode       = live,
         .live_cursor_r   = (state_ == AppState::PLAYING && !in_history) ? game_.cursor_r :
                             (state_ == AppState::GAME_OVER)              ? game_.cursor_r :
-                            (state_ == AppState::PUZZLE_PLAY && !pz_done_) ? game_.cursor_r : -1,
+                            (state_ == AppState::PUZZLE_PLAY)            ? game_.cursor_r : -1,
         .live_cursor_f   = (state_ == AppState::PLAYING && !in_history) ? game_.cursor_f :
                             (state_ == AppState::GAME_OVER)              ? game_.cursor_f :
-                            (state_ == AppState::PUZZLE_PLAY && !pz_done_) ? game_.cursor_f : -1,
+                            (state_ == AppState::PUZZLE_PLAY)            ? game_.cursor_f : -1,
         .live_my_color   = game_.my_color,
         .live_my_turn    = game_.my_turn,
         .live_black_secs        = playing ? b_secs : -1,
@@ -3903,7 +3918,7 @@ void App::event_loop() {
             !catalog_.active &&
             ((state_ == AppState::PLAYING && game_.history_pos < 0) ||
              state_ == AppState::GAME_OVER ||
-             (state_ == AppState::PUZZLE_PLAY && !pz_done_));
+             state_ == AppState::PUZZLE_PLAY);
         if (js_cursor_ok) {
             const float DEAD    = 8192.f;
             const float TAN22_5 = 0.41421356f;  // tan(22.5 deg)
