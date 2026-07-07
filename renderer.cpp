@@ -913,6 +913,7 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
             {GLYPH_PS_CROSS,"ENTER / F",    "FIND GAME"},
             {GLYPH_PS_SQUARE,"C",           "OPEN CATALOG"},
             {GLYPH_PS_TRIANGLE,"M",         "FREE ANALYSIS"},
+            {GLYPH_PS_CIRCLE,"B",           "OGS PUZZLES"},
             {"SHARE",       "S",            "MATCH SETTINGS"},
             {"",            "",             ""},
             {nullptr,       nullptr,        "GAME"},
@@ -935,6 +936,12 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
             {"L3/R3",       "PGUP/PGDN",    "PREV/NEXT FILE"},
             {"OPT x2",      "R x2",         "BACK TO LOBBY"},
             {"SHARE",       "S",            "SETTINGS MENU"},
+            {"",            "",             ""},
+            {nullptr,       nullptr,        "OGS PUZZLES"},
+            {GLYPH_PS_CROSS,"ENTER/CLICK",  "PLAY MOVE / OPEN"},
+            {GLYPH_PS_CIRCLE,"B",           "RETRY / BACK"},
+            {GLYPH_PS_SQUARE,"C",           "BACK TO LIST"},
+            {"L3/R3",       "PGUP/PGDN",    "PREV/NEXT PUZZLE"},
             {"",            "",             ""},
             {nullptr,       nullptr,        "CATALOG"},
             {"UP/DOWN",     "ARROWS/WHEEL", "NAVIGATE"},
@@ -1289,6 +1296,55 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
             }
         }
     }
+
+    SDL_RenderPresent(sdl);
+}
+
+void Renderer::draw_list_screen(const char* title, const std::vector<std::string>& lines,
+                                int index, const char* footer) {
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
+    SDL_Rect bg = {0, 0, sw, sh};
+    SDL_RenderFillRect(sdl, &bg);
+
+    int scale    = (sw >= 900) ? 3 : 2;
+    int th       = 7 * scale;
+    int line_gap = (scale >= 3) ? 8 : 5;
+    int line_h   = th + line_gap;
+    int hpad     = 80;
+
+    int ty = hpad / 2;
+    draw_text(hpad, ty, scale, title, Palette::ACCENT);
+    ty += th + line_gap * 3;
+
+    // Visible window keeps the highlighted row on screen
+    int avail_h   = sh - ty - hpad;   // leave room for the footer
+    int max_lines = std::max(4, avail_h / line_h);
+    int total     = (int)lines.size();
+    int scroll    = 0;
+    if (index >= max_lines) scroll = index - max_lines + 1;
+    if (scroll > std::max(0, total - max_lines)) scroll = std::max(0, total - max_lines);
+
+    for (int i = 0; i < max_lines; i++) {
+        int li = scroll + i;
+        if (li >= total) break;
+        if (li == index) {
+            SDL_Rect hi = {hpad - 6, ty - 3, sw - hpad * 2 + 12, th + 6};
+            SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
+                                   Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
+            SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+            SDL_RenderFillRect(sdl, &hi);
+        }
+        draw_text(hpad, ty, scale, lines[li].c_str(),
+                  li == index ? Palette::ACCENT : Palette::TEXT_WHITE);
+        ty += line_h;
+    }
+
+    if (footer && footer[0])
+        draw_text(hpad, sh - hpad / 2 - th, scale, footer, Palette::TEXT_DIM);
 
     SDL_RenderPresent(sdl);
 }

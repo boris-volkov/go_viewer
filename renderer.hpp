@@ -175,6 +175,11 @@ public:
     };
     void draw_match_menu(const MatchMenu& menu);
 
+    // Full-screen scrollable list with a highlighted row and a footer hint line —
+    // generic (used by the OGS puzzle browser). Presents the frame itself.
+    void draw_list_screen(const char* title, const std::vector<std::string>& lines,
+                          int index, const char* footer);
+
     void get_board_view(BoardView& view, int active_size = BOARD_SIZE) const;
     bool screen_to_board(const BoardView& view, int mx, int my, int& r, int& f) const;
     void board_to_screen(const BoardView& view, int br, int bf, int& x, int& y) const;

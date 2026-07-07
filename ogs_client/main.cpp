@@ -15,6 +15,8 @@
 #include "ogs_net.hpp"
 #include "katago.hpp"
 #include "sound.hpp"
+#include "ogs_puzzles.hpp"
+#include <atomic>
 
 #include "json.hpp"
 #include <cmath>
@@ -87,6 +89,8 @@ enum class AppState {
     PLAYING,           // live game active
     STONE_REMOVAL,     // game ended, awaiting stone removal acceptance
     GAME_OVER,         // game finished, showing result
+    PUZZLE_BROWSE,     // browsing OGS puzzle collections / puzzle lists
+    PUZZLE_PLAY,       // solving an OGS puzzle against its authored solution tree
 };
 
 // Live game state
@@ -562,6 +566,50 @@ private:
     // live game). Enables L3/R3 cycling through sibling files without the catalog.
     std::string review_path_;
     void review_cycle(int dir);
+
+    // ── OGS puzzle browsing / solving ─────────────────────────────────────────
+    // Fetches run on detached worker threads (blocking libcurl); results land in a
+    // shared buffer and wake the event loop with the net event. A superseded fetch's
+    // buffer just gets dropped when its shared_ptr no longer matches pz_fetch_.
+    struct PuzzleFetch {
+        std::atomic<bool> ready{false};
+        bool ok   = false;
+        int  kind = 0;  // 1=collections page, 2=puzzle, 3=collection siblings
+        std::vector<OgsPuzzleCollection> collections;
+        int  total = 0;
+        OgsPuzzle puzzle;
+        std::vector<std::pair<int, std::string>> siblings;
+    };
+    std::shared_ptr<PuzzleFetch> pz_fetch_;
+    bool pz_loading_ = false;
+
+    enum class PzView { COLLECTIONS, PUZZLES };
+    PzView pz_view_ = PzView::COLLECTIONS;
+    static constexpr int PZ_PAGE_SIZE = 15;
+    std::vector<OgsPuzzleCollection> pz_collections_;   // current page
+    int  pz_col_total_ = 0;
+    int  pz_col_page_  = 1;                             // 1-based
+    std::vector<std::pair<int, std::string>> pz_list_;  // puzzles in open collection
+    std::string pz_list_title_;
+    int  pz_index_  = 0;                                // browser cursor (per view)
+    int  pz_list_pos_ = -1;                             // playing puzzle's index in pz_list_
+
+    OgsPuzzle             pz_;                 // puzzle being solved
+    const PuzzleMoveNode* pz_node_  = nullptr; // current position in the solution tree
+    bool        pz_done_   = false;            // solved or failed — board locked
+    bool        pz_solved_ = false;
+    std::string pz_banner_;                    // "SOLVED!" / "WRONG" big banner
+    std::string pz_comment_;                   // author's comment at the current node
+
+    void open_puzzle_browser();
+    void pz_launch_fetch(int kind, int arg);   // spawn worker for one of the 3 fetchers
+    void poll_puzzle_fetch();                  // consume a finished fetch (event loop)
+    void pz_start();                           // (re)set the board to pz_'s initial position
+    void pz_place(int r, int f);               // player move → tree matching + feedback
+    void pz_advance(const PuzzleMoveNode* node, bool opponent_follows);
+    void pz_step(int dir);                     // prev/next puzzle within the collection
+    void handle_puzzle_button(Uint8 btn);      // PUZZLE_BROWSE + PUZZLE_PLAY input
+    void draw_puzzle_browser();
 
     // Returns the best available KataGo process for the given board size.
     KatagoProc& kata_for(int bs) {
@@ -1220,12 +1268,19 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
+    if (state_ == AppState::PUZZLE_BROWSE || state_ == AppState::PUZZLE_PLAY) {
+        handle_puzzle_button(btn);
+        return;
+    }
+
     if (state_ == AppState::LOBBY) {
         if (btn == SDL_CONTROLLER_BUTTON_X) {
             open_game_catalog();
             draw();
         } else if (btn == SDL_CONTROLLER_BUTTON_Y) {
             start_free_analysis();
+        } else if (btn == SDL_CONTROLLER_BUTTON_B) {
+            open_puzzle_browser();
         } else if (btn == SDL_CONTROLLER_BUTTON_START || btn == SDL_CONTROLLER_BUTTON_A) {
             net_.cmd_find_match(match_prefs_);
             state_ = AppState::SEARCHING;
@@ -2424,6 +2479,342 @@ void App::start_free_analysis() {
     draw();
 }
 
+// ── OGS puzzle browser / player ───────────────────────────────────────────────
+
+// OGS rank number → display string: 1..29 = 29k..1k, 30+ = 1d+. 0 = unrated.
+static std::string ogs_rank_str(int r) {
+    if (r <= 0)  return "?";
+    if (r < 30)  return std::to_string(30 - r) + "K";
+    return std::to_string(r - 29) + "D";
+}
+
+void App::open_puzzle_browser() {
+    save_companion();  // persist any open review before switching away
+    analysis_root_.reset();
+    analysis_cur_ = nullptr;
+    analysis_tree_render_.clear();
+    is_local_game_ = false;
+    state_    = AppState::PUZZLE_BROWSE;
+    pz_view_  = PzView::COLLECTIONS;
+    pz_index_ = 0;
+    if (pz_collections_.empty())
+        pz_launch_fetch(1, pz_col_page_);   // first visit — load page 1
+    else
+        draw();                              // reuse the cached page
+}
+
+void App::pz_launch_fetch(int kind, int arg) {
+    if (pz_loading_) return;
+    pz_loading_ = true;
+    auto res  = std::make_shared<PuzzleFetch>();
+    pz_fetch_ = res;
+    int page_size = PZ_PAGE_SIZE;
+    std::thread([res, kind, arg, page_size] {
+        switch (kind) {
+        case 1: res->ok = ogs_fetch_puzzle_collections(arg, page_size,
+                                                       res->collections, res->total); break;
+        case 2: res->ok = ogs_fetch_puzzle(arg, res->puzzle);            break;
+        case 3: res->ok = ogs_fetch_collection_puzzles(arg, res->siblings); break;
+        }
+        res->kind = kind;
+        res->ready.store(true);
+        SDL_Event ev{};
+        ev.type = g_net_event_type;   // wake the event loop
+        SDL_PushEvent(&ev);
+    }).detach();
+    draw();   // repaint with the LOADING row
+}
+
+void App::poll_puzzle_fetch() {
+    if (!pz_fetch_ || !pz_fetch_->ready.load()) return;
+    auto res = pz_fetch_;
+    pz_fetch_.reset();
+    pz_loading_ = false;
+    // User may have left for another state while the fetch was in flight
+    if (state_ != AppState::PUZZLE_BROWSE && state_ != AppState::PUZZLE_PLAY) return;
+    if (!res->ok) {
+        flash_       = "OGS FETCH FAILED";
+        flash_until_ = SDL_GetTicks() + 2500;
+        draw();
+        return;
+    }
+    switch (res->kind) {
+    case 1:
+        pz_collections_ = std::move(res->collections);
+        pz_col_total_   = res->total;
+        pz_view_        = PzView::COLLECTIONS;
+        pz_index_       = std::min(pz_index_, std::max(0, (int)pz_collections_.size() - 1));
+        break;
+    case 2:
+        pz_ = std::move(res->puzzle);
+        pz_list_pos_ = -1;
+        for (int i = 0; i < (int)pz_list_.size(); i++)
+            if (pz_list_[i].first == pz_.id) { pz_list_pos_ = i; break; }
+        pz_start();
+        return;   // pz_start draws
+    case 3:
+        pz_list_  = std::move(res->siblings);
+        pz_view_  = PzView::PUZZLES;
+        pz_index_ = 0;
+        break;
+    }
+    draw();
+}
+
+// Set the board to the puzzle's initial position and enter PUZZLE_PLAY.
+// Also serves as "retry" — everything is rebuilt from pz_.
+void App::pz_start() {
+    if (pz_.width != pz_.height || pz_.width < 2 || pz_.width > MAX_BOARD_SIZE) {
+        flash_       = "UNSUPPORTED BOARD SIZE";
+        flash_until_ = SDL_GetTicks() + 2500;
+        state_ = AppState::PUZZLE_BROWSE;
+        draw();
+        return;
+    }
+    game_.history.clear();
+    game_.history_pos = -1;
+    game_.board_size  = pz_.width;
+    game_.board.reset();
+    game_.board.board_size    = pz_.width;
+    game_.board.turn_is_black = pz_.black_to_play ? 1 : 0;
+    game_.my_color   = pz_.black_to_play ? 1 : 0;
+    game_.my_turn    = true;
+    game_.black_name = "BLACK";
+    game_.white_name = "WHITE";
+    game_.black_rank = game_.white_rank = "";
+    game_.black_secs = game_.white_secs = -1;
+    game_.cursor_r = game_.cursor_f = pz_.width / 2;
+    auto apply_stones = [&](const std::string& coords, char stone) {
+        for (size_t i = 0; i + 1 < coords.size(); i += 2) {
+            int f = coords[i]     - 'a';
+            int r = coords[i + 1] - 'a';
+            if (r >= 0 && r < pz_.width && f >= 0 && f < pz_.width)
+                game_.board.board[r][f] = stone;
+        }
+    };
+    apply_stones(pz_.initial_black, 1);
+    apply_stones(pz_.initial_white, 2);
+    game_.board.save_snapshot();
+    game_.history.push_back(game_.board);
+    last_move_r_ = last_move_f_ = -1;
+
+    pz_node_   = &pz_.tree;
+    pz_done_   = false;
+    pz_solved_ = false;
+    pz_banner_.clear();
+    pz_comment_  = pz_.description;   // the author's task statement
+    black_label_ = game_.black_name;
+    white_label_ = game_.white_name;
+    state_ = AppState::PUZZLE_PLAY;
+    std::string rank = (pz_.rank > 0) ? "  (" + ogs_rank_str(pz_.rank) + ")" : "";
+    set_status("YOU ARE " + std::string(pz_.black_to_play ? "BLACK" : "WHITE") + rank);
+    draw();
+}
+
+// Land on a solution-tree node (just reached by whoever moved), judge it, and
+// let the automatic opponent respond when the line continues.
+void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
+    pz_node_ = node;
+    if (!node->text.empty()) pz_comment_ = node->text;
+
+    if (node->correct) {
+        pz_done_   = true;
+        pz_solved_ = true;
+        pz_banner_ = "SOLVED!";
+        set_status("R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST");
+        draw();
+        return;
+    }
+    if (node->wrong || node->branches.empty()) {
+        pz_done_   = true;
+        pz_solved_ = false;
+        pz_banner_ = "WRONG";
+        set_status("PRESS " GLYPH_PS_CIRCLE " TO RETRY");
+        draw();
+        return;
+    }
+    if (opponent_follows && pz_.opponent_auto) {
+        // Opponent resists along a random authored branch (varies on retries)
+        const PuzzleMoveNode* reply =
+            &node->branches[rand() % (int)node->branches.size()];
+        if (reply->x >= 0 && reply->y >= 0 &&
+            reply->y < game_.board_size && reply->x < game_.board_size &&
+            game_.board.board[reply->y][reply->x] == 0) {
+            int opp_black = (game_.board.turn_is_black == 1);
+            game_.board.save_snapshot();
+            game_.board.place_stone(reply->y, reply->x, opp_black);
+            game_.board.turn_is_black = opp_black ? 0 : 1;
+            game_.history.push_back(game_.board);
+            last_move_r_ = reply->y;
+            last_move_f_ = reply->x;
+        }
+        pz_advance(reply, false);
+        return;
+    }
+    set_status("YOUR MOVE");
+    draw();
+}
+
+// Player plays at (r, f): match against the current node's branches.
+void App::pz_place(int r, int f) {
+    if (pz_done_ || !pz_node_) return;
+    if (r < 0 || f < 0 || r >= game_.board_size || f >= game_.board_size) return;
+    if (game_.board.board[r][f] != 0) return;
+
+    const PuzzleMoveNode* hit = nullptr;
+    for (const auto& b : pz_node_->branches)
+        if (b.x == f && b.y == r) { hit = &b; break; }
+
+    // Place the stone (captures apply) so the player sees their move either way
+    int is_black = (game_.board.turn_is_black == 1);
+    game_.board.save_snapshot();
+    game_.board.place_stone(r, f, is_black);
+    game_.board.turn_is_black = is_black ? 0 : 1;
+    game_.history.push_back(game_.board);
+    last_move_r_ = r;
+    last_move_f_ = f;
+
+    if (!hit) {
+        // Off the authored tree entirely — judged wrong, per OGS semantics
+        pz_done_    = true;
+        pz_solved_  = false;
+        pz_banner_  = "WRONG";
+        pz_comment_ = "NOT THE SOLUTION LINE";
+        set_status("PRESS " GLYPH_PS_CIRCLE " TO RETRY");
+        draw();
+        return;
+    }
+    pz_advance(hit, /*opponent_follows=*/true);
+}
+
+// L3/R3: previous/next puzzle within the open collection.
+void App::pz_step(int dir) {
+    if (pz_list_.empty() || pz_list_pos_ < 0 || pz_loading_) return;
+    int n    = (int)pz_list_.size();
+    int next = (pz_list_pos_ + dir + n) % n;
+    pz_launch_fetch(2, pz_list_[next].first);
+}
+
+void App::draw_puzzle_browser() {
+    std::vector<std::string> lines;
+    std::string title, footer;
+    if (pz_view_ == PzView::COLLECTIONS) {
+        int pages = std::max(1, (pz_col_total_ + PZ_PAGE_SIZE - 1) / PZ_PAGE_SIZE);
+        title = "OGS PUZZLES — PAGE " + std::to_string(pz_col_page_)
+              + "/" + std::to_string(pages);
+        for (const auto& c : pz_collections_) {
+            std::string ln = c.name + "  —  " + std::to_string(c.puzzle_count) + " PUZZLES";
+            if (c.min_rank > 0 || c.max_rank > 0)
+                ln += "  " + ogs_rank_str(c.min_rank) + "-" + ogs_rank_str(c.max_rank);
+            if (c.rating > 0.f) {
+                char rb[16];
+                snprintf(rb, sizeof(rb), "  R%.1f", c.rating);
+                ln += rb;
+            }
+            ln += "  BY " + c.owner;
+            lines.push_back(ln);
+        }
+        footer = GLYPH_PS_CROSS " OPEN   LEFT/RIGHT: PAGE   " GLYPH_PS_CIRCLE " LOBBY";
+    } else {
+        title = "PUZZLES — " + pz_list_title_;
+        for (const auto& p : pz_list_)
+            lines.push_back(p.second);
+        footer = GLYPH_PS_CROSS " SOLVE   " GLYPH_PS_CIRCLE " COLLECTIONS";
+    }
+    if (pz_loading_)
+        lines.push_back("LOADING...");
+    renderer_->draw_list_screen(title.c_str(), lines, pz_index_, footer.c_str());
+}
+
+// Input for both puzzle states (called from handle_controller_button).
+void App::handle_puzzle_button(Uint8 btn) {
+    if (state_ == AppState::PUZZLE_BROWSE) {
+        int total = (pz_view_ == PzView::COLLECTIONS) ? (int)pz_collections_.size()
+                                                      : (int)pz_list_.size();
+        switch (btn) {
+        case SDL_CONTROLLER_BUTTON_DPAD_UP:
+            if (pz_index_ > 0) { pz_index_--; draw(); }
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+            if (pz_index_ + 1 < total) { pz_index_++; draw(); }
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+            if (pz_view_ == PzView::COLLECTIONS && pz_col_page_ > 1 && !pz_loading_) {
+                pz_col_page_--;
+                pz_index_ = 0;
+                pz_launch_fetch(1, pz_col_page_);
+            }
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+            if (pz_view_ == PzView::COLLECTIONS && !pz_loading_ &&
+                pz_col_page_ * PZ_PAGE_SIZE < pz_col_total_) {
+                pz_col_page_++;
+                pz_index_ = 0;
+                pz_launch_fetch(1, pz_col_page_);
+            }
+            break;
+        case SDL_CONTROLLER_BUTTON_A:
+            if (pz_loading_ || total == 0 || pz_index_ >= total) break;
+            if (pz_view_ == PzView::COLLECTIONS) {
+                const auto& c = pz_collections_[pz_index_];
+                if (c.starting_puzzle_id > 0) {
+                    pz_list_title_ = c.name;
+                    pz_launch_fetch(3, c.starting_puzzle_id);
+                }
+            } else {
+                pz_launch_fetch(2, pz_list_[pz_index_].first);
+            }
+            break;
+        case SDL_CONTROLLER_BUTTON_B:
+        case SDL_CONTROLLER_BUTTON_X:
+            if (pz_view_ == PzView::PUZZLES) {
+                pz_view_  = PzView::COLLECTIONS;
+                pz_index_ = 0;
+                draw();
+            } else {
+                state_ = AppState::LOBBY;
+                set_status("PRESS " GLYPH_PS_CROSS " TO FIND GAME");
+                draw();
+            }
+            break;
+        default: break;
+        }
+        return;
+    }
+
+    // PUZZLE_PLAY
+    int n = game_.board_size - 1;
+    switch (btn) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        game_.cursor_r = std::max(0, game_.cursor_r - 1); draw(); break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        game_.cursor_r = std::min(n, game_.cursor_r + 1); draw(); break;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        game_.cursor_f = std::max(0, game_.cursor_f - 1); draw(); break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        game_.cursor_f = std::min(n, game_.cursor_f + 1); draw(); break;
+    case SDL_CONTROLLER_BUTTON_A:
+        pz_place(game_.cursor_r, game_.cursor_f);
+        break;
+    case SDL_CONTROLLER_BUTTON_B:
+        pz_start();                       // retry from the top
+        break;
+    case SDL_CONTROLLER_BUTTON_X:
+        state_    = AppState::PUZZLE_BROWSE;
+        pz_view_  = pz_list_.empty() ? PzView::COLLECTIONS : PzView::PUZZLES;
+        pz_index_ = std::max(0, pz_list_pos_);
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+        pz_step(-1);
+        break;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+        pz_step(+1);
+        break;
+    default: break;
+    }
+}
+
 // L3/R3 while reviewing: jump straight to the previous/next SGF in the same
 // directory as the open file — cycling marked positions or study puzzles without
 // a round trip through the catalog. Files are ordered by name (case-insensitive);
@@ -2937,7 +3328,8 @@ Renderer::DrawState App::make_ds() {
         status_cstr = hist_status_.c_str();
     }
 
-    bool playing = (state_ == AppState::PLAYING || state_ == AppState::STONE_REMOVAL || state_ == AppState::GAME_OVER);
+    bool playing = (state_ == AppState::PLAYING || state_ == AppState::STONE_REMOVAL ||
+                    state_ == AppState::GAME_OVER || state_ == AppState::PUZZLE_PLAY);
     bool live    = (state_ != AppState::CREDENTIAL_PROMPT);
 
     // When reviewing history, display the historical board state;
@@ -2978,7 +3370,7 @@ Renderer::DrawState App::make_ds() {
         .white_name             = wname,
         .result_message         = (state_ == AppState::GAME_OVER) ? game_.result : empty_str_,
         .game_date              = empty_str_,
-        .game_comment           = empty_str_,
+        .game_comment           = (state_ == AppState::PUZZLE_PLAY) ? pz_comment_ : empty_str_,
         .move_delay_ms          = MOVE_DELAY_MS,
         .speed_message_until    = 0,
         .suppress_present       = false,
@@ -3019,9 +3411,11 @@ Renderer::DrawState App::make_ds() {
         // Live fields
         .live_mode       = live,
         .live_cursor_r   = (state_ == AppState::PLAYING && !in_history) ? game_.cursor_r :
-                            (state_ == AppState::GAME_OVER)              ? game_.cursor_r : -1,
+                            (state_ == AppState::GAME_OVER)              ? game_.cursor_r :
+                            (state_ == AppState::PUZZLE_PLAY && !pz_done_) ? game_.cursor_r : -1,
         .live_cursor_f   = (state_ == AppState::PLAYING && !in_history) ? game_.cursor_f :
-                            (state_ == AppState::GAME_OVER)              ? game_.cursor_f : -1,
+                            (state_ == AppState::GAME_OVER)              ? game_.cursor_f :
+                            (state_ == AppState::PUZZLE_PLAY && !pz_done_) ? game_.cursor_f : -1,
         .live_my_color   = game_.my_color,
         .live_my_turn    = game_.my_turn,
         .live_black_secs        = playing ? b_secs : -1,
@@ -3107,7 +3501,10 @@ Renderer::DrawState App::make_ds() {
                                 ? (int)analysis_cur_->labels.size() : 0,
         .live_result_banner = (state_ == AppState::STONE_REMOVAL && is_local_game_ &&
                                !local_game_score_.empty())
-                                  ? local_game_score_.c_str() : nullptr,
+                                  ? local_game_score_.c_str()
+                            : (state_ == AppState::PUZZLE_PLAY && pz_done_ &&
+                               !pz_banner_.empty())
+                                  ? pz_banner_.c_str() : nullptr,
         .square_stones      = square_stones_,
     };
 }
@@ -3115,6 +3512,10 @@ Renderer::DrawState App::make_ds() {
 void App::draw() {
     if (state_ == AppState::MATCH_MENU) {
         renderer_->draw_match_menu(match_menu_);
+        return;
+    }
+    if (state_ == AppState::PUZZLE_BROWSE) {
+        draw_puzzle_browser();
         return;
     }
     if (catalog_.active) {
@@ -3198,8 +3599,9 @@ void App::event_loop() {
         if (demo_active_ && demo_.next_tick > now)
             wait_ms = std::min(wait_ms, (int)(demo_.next_tick - now));
         // Wake up in time for the joystick cursor's next repeat step (same states
-        // as the js_cursor_ok gate below: live-edge PLAYING or GAME_OVER analysis)
-        if ((state_ == AppState::PLAYING || state_ == AppState::GAME_OVER) &&
+        // as the js_cursor_ok gate below)
+        if ((state_ == AppState::PLAYING || state_ == AppState::GAME_OVER ||
+             state_ == AppState::PUZZLE_PLAY) &&
             (js_dir_x != 0 || js_dir_y != 0) && js_move_next_ms > now)
             wait_ms = std::min(wait_ms, (int)(js_move_next_ms - now));
 
@@ -3213,6 +3615,8 @@ void App::event_loop() {
                     NetMsg msg;
                     while (net_.poll_msg(msg))
                         handle_net_msg(msg);
+                    // OGS puzzle fetch results (worker threads wake us with this event)
+                    poll_puzzle_fetch();
                     // KataGo GTP move (local game)
                     if (is_local_game_ && state_ == AppState::PLAYING) {
                         int gtp_row, gtp_col;
@@ -3424,7 +3828,8 @@ void App::event_loop() {
                     // coexist — the cursor just follows whichever moved last)
                     if (!catalog_.active && state_ != AppState::MATCH_MENU &&
                         ((state_ == AppState::PLAYING && game_.history_pos < 0) ||
-                         state_ == AppState::GAME_OVER)) {
+                         state_ == AppState::GAME_OVER ||
+                         state_ == AppState::PUZZLE_PLAY)) {
                         BoardView view;
                         renderer_->get_board_view(view, game_.board_size);
                         int mr, mf;
@@ -3439,7 +3844,8 @@ void App::event_loop() {
                 } else if (e.type == SDL_MOUSEBUTTONDOWN) {
                     if (e.button.button == SDL_BUTTON_LEFT) {
                         bool board_state = !catalog_.active && state_ != AppState::MATCH_MENU &&
-                            (state_ == AppState::PLAYING || state_ == AppState::GAME_OVER);
+                            (state_ == AppState::PLAYING || state_ == AppState::GAME_OVER ||
+                             state_ == AppState::PUZZLE_PLAY);
                         if (board_state) {
                             // Only place when the click actually lands on a grid point —
                             // clicking panels/dead space must not drop a stone at the
@@ -3453,7 +3859,8 @@ void App::event_loop() {
                                 game_.cursor_f = mf;
                                 handle_controller_button(SDL_CONTROLLER_BUTTON_A);
                             }
-                        } else if (catalog_.active || state_ == AppState::MATCH_MENU) {
+                        } else if (catalog_.active || state_ == AppState::MATCH_MENU ||
+                                   state_ == AppState::PUZZLE_BROWSE) {
                             handle_controller_button(SDL_CONTROLLER_BUTTON_A);
                         }
                     } else if (e.button.button == SDL_BUTTON_RIGHT) {
@@ -3461,8 +3868,9 @@ void App::event_loop() {
                     }
 
                 } else if (e.type == SDL_MOUSEWHEEL) {
-                    // Wheel: scroll lists in the catalog/menu, step moves on a board
-                    bool list_ctx = catalog_.active || state_ == AppState::MATCH_MENU;
+                    // Wheel: scroll lists in the catalog/menu/browser, step moves on a board
+                    bool list_ctx = catalog_.active || state_ == AppState::MATCH_MENU ||
+                                    state_ == AppState::PUZZLE_BROWSE;
                     Uint8 up_btn   = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_UP   : (Uint8)0xFD;
                     Uint8 down_btn = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_DOWN : (Uint8)0xFE;
                     for (int s = e.wheel.y; s > 0; s--) handle_controller_button(up_btn);
@@ -3494,7 +3902,8 @@ void App::event_loop() {
         bool js_cursor_ok =
             !catalog_.active &&
             ((state_ == AppState::PLAYING && game_.history_pos < 0) ||
-             state_ == AppState::GAME_OVER);
+             state_ == AppState::GAME_OVER ||
+             (state_ == AppState::PUZZLE_PLAY && !pz_done_));
         if (js_cursor_ok) {
             const float DEAD    = 8192.f;
             const float TAN22_5 = 0.41421356f;  // tan(22.5 deg)
