@@ -1638,26 +1638,28 @@ void Renderer::render_box_selection(const BoardView& view, const DrawState& ds) 
 void Renderer::render_game_comment(const BoardView& view, const DrawState& ds) {
     if (ds.game_comment.empty() || ds.catalog.active) return;
 
-    int scale    = 2;
-    int th       = 7 * scale;
-    int line_gap = scale + 2;
-    int lh       = th + line_gap;
-    int pad      = 10;
+    int pad     = 10;   // gap between screen/board edges and the box
+    int box_pad = 14;   // interior padding of the box
 
-    // Space to the left of the board background
+    // The box fills the gutter to the left of the board background
     int right_x = view.offset_x - view.margin - pad;
     int left_x  = pad;
-    int avail_w = right_x - left_x;
-    if (avail_w < text_width_px("XXXX", scale)) return;  // too narrow to be useful
+    int box_w   = right_x - left_x;
+    int inner_w = box_w - box_pad * 2;
+    if (inner_w < 60) return;  // too narrow to be useful
 
-    // Word-wrap the comment into lines that fit avail_w
-    std::vector<std::string> lines;
-    {
+    int bg_top    = view.offset_y - view.margin;
+    int bg_bottom = view.offset_y + view.board_px + view.margin;
+    int avail_h   = (bg_bottom - bg_top) - box_pad * 2;
+
+    // Word-wrap at a given scale; returns the wrapped lines.
+    auto wrap = [&](int scale) {
+        std::vector<std::string> lines;
         std::string current, word;
         auto flush_word = [&]() {
             if (word.empty()) return;
             std::string candidate = current.empty() ? word : current + " " + word;
-            if (text_width_px(candidate.c_str(), scale) <= avail_w) {
+            if (text_width_px(candidate.c_str(), scale) <= inner_w) {
                 current = std::move(candidate);
             } else {
                 if (!current.empty()) lines.push_back(current);
@@ -1675,7 +1677,7 @@ void Renderer::render_game_comment(const BoardView& view, const DrawState& ds) {
             } else {
                 // If a single word is wider than the column, break it mid-word
                 word += c;
-                if (text_width_px(word.c_str(), scale) > avail_w && word.size() > 1) {
+                if (text_width_px(word.c_str(), scale) > inner_w && word.size() > 1) {
                     word.pop_back();
                     lines.push_back(word);
                     word.clear();
@@ -1685,17 +1687,46 @@ void Renderer::render_game_comment(const BoardView& view, const DrawState& ds) {
         }
         flush_word();
         if (!current.empty()) lines.push_back(current);
+        return lines;
+    };
+
+    // Biggest font whose wrapped block still fits the gutter height
+    std::vector<std::string> lines;
+    int scale = 2;
+    for (int s = 4; s >= 2; s--) {
+        auto wrapped = wrap(s);
+        int lh      = 7 * s + s + 2;
+        int total_h = (int)wrapped.size() * lh - (s + 2);
+        if (total_h <= avail_h || s == 2) {
+            scale = s;
+            lines = std::move(wrapped);
+            break;
+        }
     }
     if (lines.empty()) return;
 
-    // Vertically centre the block in the board background area
-    int bg_top    = view.offset_y - view.margin;
-    int bg_bottom = view.offset_y + view.board_px + view.margin;
-    int total_h   = (int)lines.size() * lh - line_gap;
-    int ty        = bg_top + (bg_bottom - bg_top - total_h) / 2;
+    int th       = 7 * scale;
+    int line_gap = scale + 2;
+    int lh       = th + line_gap;
+    int total_h  = (int)lines.size() * lh - line_gap;
+    if (total_h > avail_h) total_h = avail_h;  // clip pathological walls of text
 
+    // Box vertically centred in the board's span
+    int box_h = total_h + box_pad * 2;
+    int box_y = bg_top + (bg_bottom - bg_top - box_h) / 2;
+    SDL_Rect box = {left_x, box_y, box_w, box_h};
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(sdl, Palette::OVERLAY_DARK.r, Palette::OVERLAY_DARK.g,
+                           Palette::OVERLAY_DARK.b, Palette::OVERLAY_DARK.a);
+    SDL_RenderFillRect(sdl, &box);
+    SDL_SetRenderDrawColor(sdl, Palette::TEXT_DIM.r, Palette::TEXT_DIM.g,
+                           Palette::TEXT_DIM.b, 160);
+    SDL_RenderDrawRect(sdl, &box);
+
+    int ty = box_y + box_pad;
     for (const auto& line : lines) {
-        draw_text(left_x, ty, scale, line.c_str(), Palette::TEXT_DIM);
+        if (ty + th > box_y + box_h - box_pad) break;  // never draw past the box
+        draw_text(left_x + box_pad, ty, scale, line.c_str(), Palette::TEXT_SECONDARY);
         ty += lh;
     }
 }
