@@ -19,6 +19,7 @@
 #include <atomic>
 
 #include "json.hpp"
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -599,6 +600,15 @@ private:
     bool        pz_done_   = false;            // solved or failed — judging over
     bool        pz_solved_ = false;
     bool        pz_explore_ = false;           // off the authored tree — free sandbox, no judging
+    // Opponent-branch visit counts for the loaded puzzle: retries walk the LEAST
+    // visited resistance line, so repeated attempts sweep every authored variation
+    // in order instead of sampling randomly. Cleared when a new puzzle loads.
+    std::map<const PuzzleMoveNode*, int> pz_visits_;
+    bool pz_more_lines_ = false;               // this run skipped an unvisited alternative
+    // Solution tree rendered in the left panel via the analysis-tree renderer
+    std::vector<AnalysisTreeRenderNode> pz_tree_render_;
+    int  pz_cur_depth_ = 0;
+    void pz_build_tree_render();
     std::vector<BoardLabel> pz_marks_;         // current node's author marks (letter renderer)
     void pz_refresh_marks() {
         pz_marks_.clear();
@@ -2556,6 +2566,7 @@ void App::poll_puzzle_fetch() {
         break;
     case 2:
         pz_ = std::move(res->puzzle);
+        pz_visits_.clear();   // fresh puzzle — line coverage starts over
         pz_list_pos_ = -1;
         for (int i = 0; i < (int)pz_list_.size(); i++)
             if (pz_list_[i].first == pz_.id) { pz_list_pos_ = i; break; }
@@ -2610,11 +2621,13 @@ void App::pz_start() {
     game_.history.push_back(game_.board);
     last_move_r_ = last_move_f_ = -1;
 
-    pz_node_    = &pz_.tree;
-    pz_done_    = false;
-    pz_solved_  = false;
-    pz_explore_ = false;
-    pz_refresh_marks();   // root-node marks annotate the initial position
+    pz_node_       = &pz_.tree;
+    pz_done_       = false;
+    pz_solved_     = false;
+    pz_explore_    = false;
+    pz_more_lines_ = false;
+    pz_refresh_marks();       // root-node marks annotate the initial position
+    pz_build_tree_render();   // solution tree in the left panel
     pz_banner_.clear();
     pz_comment_  = pz_.description;   // the author's task statement
     black_label_ = game_.black_name;
@@ -2625,18 +2638,51 @@ void App::pz_start() {
     draw();
 }
 
+// Project the puzzle's solution tree into the analysis-tree renderer's node
+// format (same column-assignment walk as build_analysis_tree_render). Correct-
+// answer nodes get the "marked" highlight so solution endpoints are visible.
+void App::pz_build_tree_render() {
+    pz_tree_render_.clear();
+    pz_cur_depth_ = 0;
+    int max_col      = 0;
+    int player_black = pz_.black_to_play ? 1 : 0;
+    std::function<void(const PuzzleMoveNode*, int, int, int, int)> dfs =
+        [&](const PuzzleMoveNode* node, int depth, int col, int parent_col, int parent_depth) {
+            AnalysisTreeRenderNode rn;
+            rn.depth        = depth;
+            rn.col          = col;
+            rn.current      = (node == pz_node_);
+            if (rn.current) pz_cur_depth_ = depth;
+            rn.parent_depth = parent_depth;
+            rn.parent_col   = parent_col;
+            // Root has no move; odd depths are the solver's moves
+            rn.move_color   = (depth == 0) ? -1
+                            : (depth % 2 == 1) ? player_black : 1 - player_black;
+            rn.marked       = node->correct;
+            pz_tree_render_.push_back(rn);
+            for (int i = 0; i < (int)node->branches.size(); i++) {
+                int child_col = (i == 0) ? col : ++max_col;
+                dfs(&node->branches[i], depth + 1, child_col, col, depth);
+            }
+        };
+    dfs(&pz_.tree, 0, 0, 0, -1);
+}
+
 // Land on a solution-tree node (just reached by whoever moved), judge it, and
 // let the automatic opponent respond when the line continues.
 void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
     pz_node_ = node;
     if (!node->text.empty()) pz_comment_ = node->text;
     if (!node->marks.empty()) pz_refresh_marks();   // new annotations replace the old
+    pz_build_tree_render();                          // move the tree-panel highlight
 
     if (node->correct) {
         pz_done_   = true;
         pz_solved_ = true;
         pz_banner_ = "SOLVED!";
-        set_status("R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST");
+        set_status(pz_more_lines_
+                       ? GLYPH_PS_CIRCLE ": MORE RESISTANCE LINES REMAIN"
+                       : "R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST");
         draw();
         return;
     }
@@ -2649,9 +2695,18 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
         return;
     }
     if (opponent_follows && pz_.opponent_auto) {
-        // Opponent resists along a random authored branch (varies on retries)
-        const PuzzleMoveNode* reply =
-            &node->branches[rand() % (int)node->branches.size()];
+        // Opponent resists along the LEAST-VISITED authored branch — replaying the
+        // puzzle sweeps every variation in order until the whole tree is covered.
+        const PuzzleMoveNode* reply = nullptr;
+        int fewest = INT_MAX;
+        for (const auto& b : node->branches) {
+            int v = pz_visits_[&b];   // default-constructs 0 for unseen branches
+            if (v < fewest) { fewest = v; reply = &b; }
+        }
+        for (const auto& b : node->branches)
+            if (&b != reply && pz_visits_[&b] == 0) { pz_more_lines_ = true; break; }
+        pz_visits_[reply]++;
+
         if (reply->x >= 0 && reply->y >= 0 &&
             reply->y < game_.board_size && reply->x < game_.board_size &&
             game_.board.board[reply->y][reply->x] == 0) {
@@ -3492,9 +3547,13 @@ Renderer::DrawState App::make_ds() {
             return FLT_MAX;
         }(),
         .live_analysis_tree       = (state_ == AppState::GAME_OVER && !analysis_tree_render_.empty())
-                                         ? analysis_tree_render_.data() : nullptr,
-        .live_analysis_tree_count = (state_ == AppState::GAME_OVER) ? (int)analysis_tree_render_.size() : 0,
-        .live_analysis_tree_cur_depth = analysis_cur_ ? analysis_cur_->depth : 0,
+                                         ? analysis_tree_render_.data()
+                                  : (state_ == AppState::PUZZLE_PLAY && !pz_tree_render_.empty())
+                                         ? pz_tree_render_.data() : nullptr,
+        .live_analysis_tree_count = (state_ == AppState::GAME_OVER)   ? (int)analysis_tree_render_.size()
+                                  : (state_ == AppState::PUZZLE_PLAY) ? (int)pz_tree_render_.size() : 0,
+        .live_analysis_tree_cur_depth = (state_ == AppState::PUZZLE_PLAY) ? pz_cur_depth_
+                                      : analysis_cur_ ? analysis_cur_->depth : 0,
 
         // Score graph
         .live_score_graph     = (state_ == AppState::GAME_OVER && !move_scores_.empty())
@@ -3538,6 +3597,7 @@ Renderer::DrawState App::make_ds() {
                                !pz_banner_.empty())
                                   ? pz_banner_.c_str() : nullptr,
         .square_stones      = square_stones_,
+        .puzzle_mode        = (state_ == AppState::PUZZLE_PLAY),
     };
 }
 

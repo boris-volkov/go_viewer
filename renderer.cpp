@@ -726,6 +726,7 @@ void Renderer::render_guess_score(const BoardView& view, bool guess_mode, int sc
 }
 
 void Renderer::render_player_labels(const BoardView& view, const DrawState& ds) {
+    if (ds.puzzle_mode) return;   // right gutter belongs to the puzzle text box
     int margin   = (view.square >= 30) ? 16 : 8;
     // Anchor to background right edge (one view.margin outside the grid)
     int right_x0 = view.offset_x + view.board_px + view.margin + margin;
@@ -1671,10 +1672,17 @@ void Renderer::render_game_comment(const BoardView& view, const DrawState& ds) {
     int pad     = 10;   // gap between screen/board edges and the box
     int box_pad = 14;   // interior padding of the box
 
-    // The box fills the gutter to the left of the board background
-    int right_x = view.offset_x - view.margin - pad;
-    int left_x  = pad;
-    int box_w   = right_x - left_x;
+    // The box fills the gutter beside the board: left normally, RIGHT in puzzle
+    // mode (the solution tree occupies the left panel there)
+    int left_x, right_x;
+    if (ds.puzzle_mode) {
+        left_x  = view.offset_x + view.board_px + view.margin + pad;
+        right_x = view.screen_w - pad;
+    } else {
+        left_x  = pad;
+        right_x = view.offset_x - view.margin - pad;
+    }
+    int box_w = right_x - left_x;
     int inner_w = box_w - box_pad * 2;
     if (inner_w < 60) return;  // too narrow to be useful
 
@@ -2186,6 +2194,7 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix8(uint8_t(ds.chain_mode));
     mix8(uint8_t(ds.free_mode));
     mix8(uint8_t(ds.square_stones));
+    mix8(uint8_t(ds.puzzle_mode));
     mix64(uint64_t(ds.active_board_size));
     mix8(uint8_t(ds.show_help));
     mix8(uint8_t(ds.territory_drill));

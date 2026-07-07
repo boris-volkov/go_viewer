@@ -153,6 +153,10 @@ public:
         // Square stone mode: board stones render as beveled tiles instead of
         // shaded circles (settings menu DISPLAY toggle; off = classic round)
         bool              square_stones = false;
+        // OGS puzzle solving: solution tree occupies the left panel (via the
+        // live_analysis_tree fields), so the comment box moves to the RIGHT
+        // gutter and the player labels/clocks are suppressed.
+        bool              puzzle_mode = false;
     };
 
     // Match search settings menu (live client only) — also doubles as a general
