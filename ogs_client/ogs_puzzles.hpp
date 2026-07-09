@@ -72,3 +72,30 @@ bool ogs_fetch_puzzle(int puzzle_id, OgsPuzzle& out);
 // drives next/previous navigation while solving.
 bool ogs_fetch_collection_puzzles(int puzzle_id,
                                   std::vector<std::pair<int, std::string>>& out);
+
+// ── OGS Joseki Explorer ("OJE") — https://online-go.com/oje/ ─────────────────
+//
+// A public position graph walked one node at a time: fetch a node, get its
+// commentary plus every known continuation with a quality category. Sequences
+// are stored in canonical orientation (first move in the top-right corner,
+// Black first). Node ids are strings ("root" or a numeric id).
+
+struct JosekiNextMove {
+    std::string placement;        // pretty coordinate ("Q16"), or "pass"
+    std::string category;         // IDEAL / GOOD / MISTAKE / TRICK / QUESTION
+    std::string variation_label;  // "1".."9" main lines, "_" unlabelled
+    std::string node_id;
+};
+
+struct JosekiPosition {
+    std::string node_id;
+    std::string placement;    // move that created this node ("root" at the top)
+    std::string category;
+    std::string description;  // markdown commentary
+    std::string source_desc;  // joseki_source description ("" if none)
+    int         child_count = 0;
+    std::vector<JosekiNextMove> next_moves;
+};
+
+// Fetch one OJE node. node_id: "root" or a numeric id string.
+bool ogs_fetch_joseki(const std::string& node_id, JosekiPosition& out);

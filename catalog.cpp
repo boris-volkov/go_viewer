@@ -652,10 +652,14 @@ void Catalog::close() {
 }
 
 std::string Catalog::selected_entry_path() const {
-    if (index < 0 || index >= (int)entries.size()) return {};
-    const CatalogEntry& e = entries[index];
+    return entry_path(index);
+}
+
+std::string Catalog::entry_path(int i) const {
+    if (i < 0 || i >= (int)entries.size()) return {};
+    const CatalogEntry& e = entries[i];
     if (e.type != 0) return {};  // directory or ".." — no path
-    if (!e.full_path.empty()) return e.full_path;  // search-results entry
+    if (!e.full_path.empty()) return e.full_path;  // search-results / virtual-view entry
     std::string dir = base_dir;
     if (!current_subdir.empty())
         dir = join_path(base_dir, current_subdir);

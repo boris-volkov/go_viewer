@@ -1174,9 +1174,9 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     if (menu.ingame)
         draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   " GLYPH_PS_CIRCLE "=CLOSE", Palette::TEXT_DIM);
     else if (menu.katago_mode)
-        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=SELECT   DPAD=NAVIGATE   L1=OGS MODE   OPT=PLAY", Palette::TEXT_DIM);
+        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=SELECT   DPAD=NAVIGATE   L1=OGS MODE   OPT=CLOSE", Palette::TEXT_DIM);
     else
-        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   L1=VS KATAGO  OPT=SEARCH", Palette::TEXT_DIM);
+        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   L1=VS KATAGO  OPT=CLOSE", Palette::TEXT_DIM);
     ty += th + line_gap * 4;
 
     int col_ty[3] = {ty, ty, ty};
@@ -1186,8 +1186,8 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     static const char* str_labels[7]   = {
         "20 KYU", "15 KYU", "10 KYU", "5 KYU", "1 KYU", "1 DAN", "5 DAN"
     };
-    static const char* display_labels[4] = {"SHOW COORDINATES", "ENGINE ANALYSIS", "CHAIN LINKS",
-                                            "SQUARE STONES"};
+    static const char* display_labels[5] = {"SHOW COORDINATES", "ENGINE ANALYSIS", "CHAIN LINKS",
+                                            "SQUARE STONES", "SQUARE GRID"};
 
     if (!menu.ingame) {
         // Column 0 header: BOARD SIZE
@@ -1204,18 +1204,21 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     draw_text(hpad + display_col * col_w, col_ty[display_col], scale, "DISPLAY", Palette::ACCENT);
     col_ty[display_col] += line_h + line_gap;
 
-    // checkbox item (multi-select)
-    auto draw_check = [&](int col, int row, const char* label, bool selected) {
+    // checkbox item (multi-select). disabled: always dim regardless of focus/
+    // selection — used for rows that are present but currently inert (e.g.
+    // ENGINE ANALYSIS with no KataGo process running).
+    auto draw_check = [&](int col, int row, const char* label, bool selected, bool disabled = false) {
         int x = hpad + col * col_w;
         int y = col_ty[col] + row * line_h;
         bool focused = (menu.focus_col == col && menu.focus_row == row);
-        draw_text(x, y, scale, focused ? "*" : " ", focused ? Palette::ACCENT : Palette::TEXT_DIM);
+        draw_text(x, y, scale, focused ? "*" : " ", (focused && !disabled) ? Palette::ACCENT : Palette::TEXT_DIM);
         int cx = x + (scale >= 3 ? 14 : 10);
         draw_text(cx, y, scale, selected ? "[X]" : "[ ]",
-                  selected ? Palette::ACCENT : Palette::TEXT_WHITE);
+                  (selected && !disabled) ? Palette::ACCENT : Palette::TEXT_WHITE);
         int lx = cx + text_width_px("[X]", scale) + scale * 3;
         draw_text(lx, y, scale, label,
-                  focused ? Palette::ACCENT : selected ? Palette::TEXT_WHITE : Palette::TEXT_DIM);
+                  disabled ? Palette::TEXT_DIM
+                           : focused ? Palette::ACCENT : selected ? Palette::TEXT_WHITE : Palette::TEXT_DIM);
     };
 
     // radio item (single-select)
@@ -1258,9 +1261,10 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     }
 
     draw_check(display_col, 0, display_labels[0], menu.show_coords_sel);
-    draw_check(display_col, 1, display_labels[1], menu.analysis_sel);
+    draw_check(display_col, 1, display_labels[1], menu.analysis_sel, !menu.analysis_available);
     draw_check(display_col, 2, display_labels[2], menu.chain_sel);
     draw_check(display_col, 3, display_labels[3], menu.square_sel);
+    draw_check(display_col, 4, display_labels[4], menu.square_grid_sel);
 
     // ── Controls reference — fills the otherwise-unused bottom of the menu ──────
     // Three columns mirroring the ESC help overlay, in PlayStation button glyphs,
@@ -1270,7 +1274,7 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
         static const CRow game_rows[] = {
             {GLYPH_PS_CROSS,        "PLACE STONE"},
             {GLYPH_PS_CIRCLE " x2", "PASS"},
-            {"OPT x2",          "RESIGN"},
+            {"OPTIONS",             "GAME MENU"},
             {GLYPH_PS_TRIANGLE " x2","MARK MOVE"},
             {GLYPH_PS_SQUARE,       "UNDO (VS KATAGO)"},
             {"L2/R2",               "STEP HISTORY"},
@@ -1285,11 +1289,12 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
             {GLYPH_PS_TRIANGLE " x2","MARK/UNMARK MOVE"},
             {GLYPH_PS_SQUARE,       "OPEN CATALOG"},
             {"L3/R3",               "PREV/NEXT FILE"},
-            {"OPT x2",          "BACK TO LOBBY"},
+            {"OPTIONS",             "GAME MENU"},
         };
         static const CRow catalog_rows[] = {
             {"UP/DOWN",             "NAVIGATE"},
             {GLYPH_PS_CROSS,        "OPEN GAME"},
+            {GLYPH_PS_SQUARE,       "AUTOPLAY FROM HERE"},
             {GLYPH_PS_TRIANGLE " x2","DELETE GAME"},
             {GLYPH_PS_CIRCLE,       "CLOSE"},
         };
@@ -1332,7 +1337,8 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
 }
 
 void Renderer::draw_list_screen(const char* title, const std::vector<std::string>& lines,
-                                int index, const char* footer) {
+                                int index, const char* footer, bool present,
+                                const SDL_Color* line_colors) {
     int sw, sh;
     SDL_GetRendererOutputSize(sdl, &sw, &sh);
 
@@ -1369,15 +1375,75 @@ void Renderer::draw_list_screen(const char* title, const std::vector<std::string
             SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
             SDL_RenderFillRect(sdl, &hi);
         }
-        draw_text(hpad, ty, scale, lines[li].c_str(),
-                  li == index ? Palette::ACCENT : Palette::TEXT_WHITE);
+        SDL_Color tc = (li == index) ? Palette::ACCENT : Palette::TEXT_WHITE;
+        if (line_colors && line_colors[li].a != 0) tc = line_colors[li];
+        draw_text(hpad, ty, scale, lines[li].c_str(), tc);
         ty += line_h;
     }
 
     if (footer && footer[0])
         draw_text(hpad, sh - hpad / 2 - th, scale, footer, Palette::TEXT_DIM);
 
-    SDL_RenderPresent(sdl);
+    if (present)
+        SDL_RenderPresent(sdl);
+}
+
+void Renderer::draw_popup_menu(const char* title, const std::string* items,
+                               int count, int index) {
+    if (!items || count <= 0) return;
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    // Dim whatever is already on the backbuffer
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(sdl, 0, 0, 0, 140);
+    SDL_Rect dim = {0, 0, sw, sh};
+    SDL_RenderFillRect(sdl, &dim);
+
+    int scale    = (sw >= 900) ? 3 : 2;
+    int th       = 7 * scale;
+    int line_gap = (scale >= 3) ? 10 : 6;
+    int line_h   = th + line_gap;
+    int pad      = line_gap * 3;
+
+    const char* hint = GLYPH_PS_CROSS "=SELECT   " GLYPH_PS_CIRCLE "=CLOSE";
+    int w = text_width_px(hint, scale);
+    if (title && title[0]) w = std::max(w, text_width_px(title, scale));
+    for (int i = 0; i < count; i++)
+        w = std::max(w, text_width_px(items[i].c_str(), scale));
+
+    int box_w = w + pad * 2;
+    int box_h = pad * 2 + count * line_h + line_gap + th
+              + ((title && title[0]) ? line_h + line_gap : 0);
+    int bx = (sw - box_w) / 2;
+    int by = (sh - box_h) / 2;
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
+    SDL_Rect box = {bx, by, box_w, box_h};
+    SDL_RenderFillRect(sdl, &box);
+    SDL_SetRenderDrawColor(sdl, Palette::ACCENT.r, Palette::ACCENT.g, Palette::ACCENT.b, 255);
+    SDL_RenderDrawRect(sdl, &box);
+
+    int ty = by + pad;
+    if (title && title[0]) {
+        draw_text(bx + pad, ty, scale, title, Palette::ACCENT);
+        ty += line_h + line_gap;
+    }
+    for (int i = 0; i < count; i++) {
+        if (i == index) {
+            SDL_Rect hi = {bx + pad - 6, ty - 3, box_w - pad * 2 + 12, th + 6};
+            SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
+                                   Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
+            SDL_RenderFillRect(sdl, &hi);
+        }
+        draw_text(bx + pad, ty, scale, items[i].c_str(),
+                  i == index ? Palette::ACCENT : Palette::TEXT_WHITE);
+        ty += line_h;
+    }
+    ty += line_gap;
+    draw_text(bx + pad, ty, scale, hint, Palette::TEXT_DIM);
 }
 
 void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds) {
@@ -1404,18 +1470,39 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     int ty = pad;
 
     // --- Header ---
-    char title_buf[128];
+    // Close hint matches the input device: go_viewer's mouse/keyboard catalog
+    // still says ESC; ogs_client (live_mode) has no keyboard here, so it's the
+    // PS glyph instead (same live_mode-gated pattern render_help_overlay uses).
+    const char* close_hint = ds.live_mode ? GLYPH_PS_CIRCLE "=CLOSE" : "ESC to close";
+    char title_buf[160];
     const char* title;
     if (cat.search_mode) {
         title = "CATALOG  (ESC to clear search)";
     } else if (cat.virtual_player_mode && !cat.virtual_player.empty()) {
-        snprintf(title_buf, sizeof(title_buf), "GAMES: %s  (ESC to close)", cat.virtual_player.c_str());
+        snprintf(title_buf, sizeof(title_buf), "GAMES: %s  %s", cat.virtual_player.c_str(), close_hint);
         title = title_buf;
     } else {
-        title = "CATALOG  (ESC to close)";
+        // Read-only pro game library gets its own title so it's never mistaken
+        // for the user's own (deletable) catalog.
+        snprintf(title_buf, sizeof(title_buf), "%s  %s%s",
+                 ds.catalog_readonly ? "PRO GAME LIBRARY" : "CATALOG",
+                 close_hint, ds.catalog_readonly ? "  (READ-ONLY)" : "");
+        title = title_buf;
     }
     draw_text(tx, ty, scale, title, Palette::ACCENT);
     ty += th + header_gap;
+
+    // Button legend — gamepad only (go_viewer's mouse/keyboard catalog has no
+    // equivalent scheme). Shown inline, in-context, so which physical button does
+    // what is never a guessing game while actually browsing.
+    if (ds.live_mode) {
+        std::string legend = GLYPH_PS_CROSS "=OPEN   " GLYPH_PS_SQUARE "=AUTOPLAY   ";
+        if (!ds.catalog_readonly)
+            legend += GLYPH_PS_TRIANGLE "x2=DELETE   ";
+        legend += close_hint;
+        draw_text(tx, ty, scale, legend.c_str(), Palette::TEXT_DIM);
+        ty += th + header_gap;
+    }
 
     // --- Index status / search bar ---
     bool index_ready   = cat.game_index.loaded();
@@ -2207,6 +2294,7 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix8(uint8_t(ds.chain_mode));
     mix8(uint8_t(ds.free_mode));
     mix8(uint8_t(ds.square_stones));
+    mix8(uint8_t(ds.square_grid));
     mix8(uint8_t(ds.puzzle_mode));
     mix64(uint64_t(ds.active_board_size));
     mix8(uint8_t(ds.show_help));
@@ -2240,6 +2328,7 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
         mix_str(ds.catalog.current_subdir);
         mix_str(ds.catalog.search_query);
         mix64(uint64_t(ds.catalog.entries.size()));
+        mix8(uint8_t(ds.catalog_readonly));
     }
 
     // HUD text
@@ -2406,27 +2495,56 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     int n          = view.active_size;
     int normal_t   = (view.square >= 30) ? 2 : 1;
     int boundary_t = normal_t * 2;
-    int boundary_idx[2] = {0, n - 1};
-    for (int bi = 0; bi < 2; bi++) {
-        int i = boundary_idx[bi];
-        int y = view.offset_y + i * view.square + view.square / 2;
-        draw_thick_line(view.offset_x + boundary_t/2, y,
-                        view.offset_x + view.board_px - boundary_t/2, y,
-                        boundary_t, grid_color);
-        int x = view.offset_x + i * view.square + view.square / 2;
-        draw_thick_line(x, view.offset_y + boundary_t/2,
-                        x, view.offset_y + view.board_px - boundary_t/2,
-                        boundary_t, grid_color);
-    }
-    for (int i = 1; i < n - 1; i++) {
-        int y  = view.offset_y + i * view.square + view.square / 2;
-        int x0 = view.offset_x + view.square / 2;
-        int x1 = view.offset_x + (n - 1) * view.square + view.square / 2;
-        draw_thick_line(x0, y, x1, y, normal_t, grid_color);
-        int x  = view.offset_x + i * view.square + view.square / 2;
-        int y0 = view.offset_y + view.square / 2;
-        int y1 = view.offset_y + (n - 1) * view.square + view.square / 2;
-        draw_thick_line(x, y0, x, y1, normal_t, grid_color);
+
+    if (ds.square_grid) {
+        // Alternate layout: point (r,f) sits at the centre of its own square
+        // cell instead of at a crossing of grid lines. The pixel formula for
+        // a point's centre — offset + coord*square + square/2 — is exactly
+        // the same as the crossing-line layout below, so every stone/marker/
+        // cursor draw call elsewhere needs no changes at all; only the board
+        // structure underneath differs, drawn here. Cells stay the same flat
+        // Palette::BOARD colour already filled in above — just the hairline
+        // separators between them.
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(sdl, grid_color.r, grid_color.g, grid_color.b, 255);
+        for (int i = 0; i <= n; i++) {
+            int y = view.offset_y + i * view.square;
+            SDL_RenderDrawLine(sdl, view.offset_x, y, view.offset_x + view.board_px, y);
+            int x = view.offset_x + i * view.square;
+            SDL_RenderDrawLine(sdl, x, view.offset_y, x, view.offset_y + view.board_px);
+        }
+        // Thicker outer boundary, matching the crossing-line layout's weight
+        draw_thick_line(view.offset_x, view.offset_y,
+                        view.offset_x + view.board_px, view.offset_y, boundary_t, grid_color);
+        draw_thick_line(view.offset_x, view.offset_y + view.board_px,
+                        view.offset_x + view.board_px, view.offset_y + view.board_px, boundary_t, grid_color);
+        draw_thick_line(view.offset_x, view.offset_y,
+                        view.offset_x, view.offset_y + view.board_px, boundary_t, grid_color);
+        draw_thick_line(view.offset_x + view.board_px, view.offset_y,
+                        view.offset_x + view.board_px, view.offset_y + view.board_px, boundary_t, grid_color);
+    } else {
+        int boundary_idx[2] = {0, n - 1};
+        for (int bi = 0; bi < 2; bi++) {
+            int i = boundary_idx[bi];
+            int y = view.offset_y + i * view.square + view.square / 2;
+            draw_thick_line(view.offset_x + boundary_t/2, y,
+                            view.offset_x + view.board_px - boundary_t/2, y,
+                            boundary_t, grid_color);
+            int x = view.offset_x + i * view.square + view.square / 2;
+            draw_thick_line(x, view.offset_y + boundary_t/2,
+                            x, view.offset_y + view.board_px - boundary_t/2,
+                            boundary_t, grid_color);
+        }
+        for (int i = 1; i < n - 1; i++) {
+            int y  = view.offset_y + i * view.square + view.square / 2;
+            int x0 = view.offset_x + view.square / 2;
+            int x1 = view.offset_x + (n - 1) * view.square + view.square / 2;
+            draw_thick_line(x0, y, x1, y, normal_t, grid_color);
+            int x  = view.offset_x + i * view.square + view.square / 2;
+            int y0 = view.offset_y + view.square / 2;
+            int y1 = view.offset_y + (n - 1) * view.square + view.square / 2;
+            draw_thick_line(x, y0, x, y1, normal_t, grid_color);
+        }
     }
 
     // Star points (hoshi) — computed for the active board size
@@ -2915,6 +3033,23 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
 
     if (board_on_screen) render_box_selection(view, ds);
 
+    // Colored point markers (joseki continuation dots) — filled circle with a
+    // dark rim so every category color reads against the board background
+    if (board_on_screen && ds.live_markers && ds.live_marker_count > 0) {
+        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
+        int rad = std::max(3, view.square * 3 / 10);
+        for (int i = 0; i < ds.live_marker_count; i++) {
+            const PointMarker& m = ds.live_markers[i];
+            int cx = view.offset_x + m.f * view.square + view.square / 2;
+            int cy = view.offset_y + m.r * view.square + view.square / 2;
+            SDL_SetRenderDrawColor(sdl, m.color.r, m.color.g, m.color.b,
+                                   m.color.a ? m.color.a : 255);
+            fill_circle(cx, cy, rad);
+            SDL_SetRenderDrawColor(sdl, 20, 20, 20, 200);
+            draw_circle(cx, cy, rad);
+        }
+    }
+
     // Live board cursor — yellow X drawn at the grid intersection (45° rotated, bold).
     if (board_on_screen && ds.live_mode && ds.live_cursor_r >= 0 && ds.live_cursor_f >= 0) {
         int cx = view.offset_x + ds.live_cursor_f * view.square + view.square / 2;
@@ -2942,6 +3077,8 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     }
 
     render_board_coordinates(view, ds);
+    if (ds.popup_items && ds.popup_count > 0)
+        draw_popup_menu(ds.popup_title, ds.popup_items, ds.popup_count, ds.popup_index);
     render_software_cursor(view, ds);
     if (!ds.suppress_present)
         SDL_RenderPresent(sdl);

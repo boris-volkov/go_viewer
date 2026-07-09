@@ -199,3 +199,42 @@ bool ogs_fetch_collection_puzzles(int puzzle_id,
     }
     return true;
 }
+
+bool ogs_fetch_joseki(const std::string& node_id, JosekiPosition& out) {
+    json j;
+    if (!http_get_json("https://online-go.com/oje/position?id=" + node_id, j))
+        return false;
+    if (!j.is_object()) return false;
+
+    try {
+        out = JosekiPosition{};
+        // node_id arrives as a string for "root" fetches and a number elsewhere
+        if (j.contains("node_id")) {
+            const auto& n = j["node_id"];
+            out.node_id = n.is_string() ? n.get<std::string>()
+                                        : std::to_string(n.get<long long>());
+        }
+        out.placement   = j.value("placement", std::string());
+        out.category    = j.value("category", std::string());
+        out.child_count = j.value("child_count", 0);
+        if (j.contains("description") && j["description"].is_string())
+            out.description = j["description"].get<std::string>();
+        if (j.contains("joseki_source") && j["joseki_source"].is_object())
+            out.source_desc = j["joseki_source"].value("description", std::string());
+        if (j.contains("next_moves") && j["next_moves"].is_array()) {
+            for (const auto& m : j["next_moves"]) {
+                JosekiNextMove nm;
+                nm.placement       = m.value("placement", std::string());
+                nm.category        = m.value("category", std::string());
+                nm.variation_label = m.value("variation_label", std::string());
+                const auto& n = m["node_id"];
+                nm.node_id = n.is_string() ? n.get<std::string>()
+                                           : std::to_string(n.get<long long>());
+                out.next_moves.push_back(std::move(nm));
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    return true;
+}

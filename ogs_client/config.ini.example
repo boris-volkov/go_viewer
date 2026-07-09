@@ -6,12 +6,15 @@ password=your-ogs-password
 # jwt=eyJ...
 
 # Optional: KataGo analysis engine. All three fields required to enable analysis.
-# katago_exe=C:\path\to\katago.exe
-# katago_model=C:\path\to\model.bin.gz
-# katago_config=C:\path\to\analysis_example.cfg
-# katago_model_9x9=C:\path\to\model_9x9.bin.gz
+# Paths may be absolute (C:\path\to\...) or relative — a relative path resolves
+# against the folder ogs_client.exe itself is in, regardless of how it's launched.
+# Recommended: drop KataGo into a "katago" folder next to ogs_client.exe and use:
+# katago_exe=katago\katago.exe
+# katago_model=katago\model.bin.gz
+# katago_config=katago\analysis_example.cfg
+# katago_model_9x9=katago\model_9x9.bin.gz
 
 # Optional: path to the human SL model (humanv0.bin.gz) to enable "VS KATAGO"
 # local games at adjustable strength (20k to 5d).
 # Download from: https://github.com/lightvector/KataGo/releases/tag/v1.15.0
-# katago_human_model=C:\path\to\humanv0.bin.gz
+# katago_human_model=katago\humanv0.bin.gz

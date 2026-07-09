@@ -94,6 +94,11 @@ public:
     // or empty string if the selection is a directory or parent link.
     std::string selected_entry_path() const;
 
+    // Same, for an arbitrary index into entries — lets a caller resolve every
+    // file-type row currently shown (e.g. to build a play list), not just
+    // whichever one is highlighted.
+    std::string entry_path(int i) const;
+
     // Parse SGF player names for entries in [from, from+count) that haven't
     // been loaded yet.
     void ensure_names_loaded(int from, int count);

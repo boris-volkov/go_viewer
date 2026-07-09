@@ -17,6 +17,9 @@
 // A letter mark ("A", "B", …) placed on a board point during analysis.
 struct BoardLabel { int r = 0; int f = 0; char ch = 'A'; };
 
+// A colored dot drawn on an empty intersection (joseki continuation markers).
+struct PointMarker { int r = 0; int f = 0; SDL_Color color = {}; };
+
 // Describes one node in the analysis tree for rendering (produced by ogs_client,
 // consumed by render_analysis_tree — a plain POD so renderer.hpp stays dependency-free).
 struct AnalysisTreeRenderNode {
@@ -50,6 +53,10 @@ public:
         int   active_board_size  = BOARD_SIZE;  // passed to get_board_view
         bool  show_help      = false;
         const Catalog&        catalog;
+        // True while `catalog` is the read-only pro game library (ogs_client) —
+        // render_catalog_overlay shows this in the title and disables the
+        // "delete" hint; go_viewer's own catalog never sets this.
+        bool                  catalog_readonly = false;
         const std::string&    black_name;
         const std::string&    white_name;
         const std::string&    result_message;
@@ -154,10 +161,27 @@ public:
         // Square stone mode: board stones render as beveled tiles instead of
         // shaded circles (settings menu DISPLAY toggle; off = classic round)
         bool              square_stones = false;
+        // Square grid mode: points sit at the centre of a checkerboard cell
+        // instead of at a crossing of grid lines (settings menu DISPLAY toggle).
+        // Purely how render_board_content draws the board underneath — every
+        // stone/marker/cursor already renders at the same point-centre pixel
+        // regardless of this flag, so nothing else needs to know about it.
+        bool              square_grid = false;
         // OGS puzzle solving: solution tree occupies the left panel (via the
         // live_analysis_tree fields), so the comment box moves to the RIGHT
         // gutter and the player labels/clocks are suppressed.
         bool              puzzle_mode = false;
+        // START popup action menu (live client): a small centered command list
+        // drawn over the dimmed screen, outside the board cache. popup_items
+        // points at popup_count display labels; popup_index is the highlighted row.
+        const std::string* popup_items = nullptr;
+        int                popup_count = 0;
+        int                popup_index = 0;
+        const char*        popup_title = nullptr;
+        // Colored continuation dots (joseki explorer) — drawn on empty points,
+        // outside the board cache like the cursor
+        const PointMarker* live_markers      = nullptr;
+        int                live_marker_count = 0;
     };
 
     // Match search settings menu (live client only) — also doubles as a general
@@ -173,17 +197,30 @@ public:
         std::string adaptive_label; // display text for the adaptive row, e.g. "ADAPTIVE (8 KYU)"
         bool show_coords_sel = false; // mirrors App::show_coords_ while the menu is open
         bool analysis_sel    = false; // mirrors App::kata_analysis_enabled_ while the menu is open
+        bool analysis_available = true; // false = no KataGo process running at all —
+                                         // ENGINE ANALYSIS row renders greyed out, inert
         bool chain_sel       = false; // mirrors App::chain_mode_ (visual links between chained stones)
         bool square_sel      = false; // mirrors App::square_stones_ (tile-style stones)
+        bool square_grid_sel = false; // mirrors App::square_grid_ (checkerboard cell layout)
         bool ingame       = false; // opened mid-game — hide search/mode controls, board
                                    // size/speed shown read-only for reference only
     };
     void draw_match_menu(const MatchMenu& menu);
 
     // Full-screen scrollable list with a highlighted row and a footer hint line —
-    // generic (used by the OGS puzzle browser). Presents the frame itself.
+    // generic (used by the OGS puzzle browser). Presents the frame itself unless
+    // the caller wants to layer more on top first (present = false).
+    // line_colors: optional per-row text-color overrides, parallel to `lines`;
+    // alpha 0 = no override (row keeps the normal white/accent scheme).
     void draw_list_screen(const char* title, const std::vector<std::string>& lines,
-                          int index, const char* footer);
+                          int index, const char* footer, bool present = true,
+                          const SDL_Color* line_colors = nullptr);
+
+    // START popup action menu: dims the current backbuffer contents and draws a
+    // centered command list on top. Draw-only (no present) — draw_board layers it
+    // via the DrawState popup fields; list screens call it directly and present.
+    void draw_popup_menu(const char* title, const std::string* items,
+                         int count, int index);
 
     void get_board_view(BoardView& view, int active_size = BOARD_SIZE) const;
     bool screen_to_board(const BoardView& view, int mx, int my, int& r, int& f) const;

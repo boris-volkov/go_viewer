@@ -194,6 +194,14 @@ void OgsNet::fetch_sgf(int game_id, const std::string& path) {
                  std::to_string(game_id)).c_str());
         return;
     }
+    // Cancelled/annulled games export with RE[Void] and no real moves — OGS's own
+    // marker for "this game doesn't count." Nothing worth reviewing, no result to
+    // record — don't let it into the personal archive at all.
+    if (data.find("RE[Void]") != std::string::npos) {
+        net_log(("fetch_sgf: game " + std::to_string(game_id) +
+                 " was cancelled (RE[Void]) — not saving").c_str());
+        return;
+    }
     FILE* fp = fopen(path.c_str(), "wb");
     if (!fp) { net_log(("fetch_sgf: cannot write " + path).c_str()); return; }
     fwrite(data.data(), 1, data.size(), fp);
