@@ -1,4 +1,4 @@
-go_viewer_index_v2	46
+go_viewer_index_v2	52
 20260628-boris-volkov-AG_Park.sgf	boris-volkov	AG Park	2026-06-28	B+R	22k	17k
 20260628-boris-volkov-Acetone.sgf	boris-volkov	Acetone	2026-06-28	W+16.5	21k	20k
 20260628-boris-volkov-Lucky-dog.sgf	boris-volkov	Lucky-dog	2026-06-29	B+10.5	21k	16k
@@ -29,7 +29,11 @@ go_viewer_index_v2	46
 20260702-boris-volkov-kingwill.sgf	boris-volkov	kingwill	2026-07-03	B+R	21k	18k
 20260703-boris-volkov-BigBeefNose2.sgf	boris-volkov	BigBeefNose2	2026-07-03	B+43.5	20k	18k
 20260705-boris-volkov-mrdermis.sgf	boris-volkov	mrdermis	2026-07-05	B+15.5	20k	14k
+20260706-boris-volkov-Atari_Potter.sgf	boris-volkov	Atari Potter	2026-07-07	B+29.5	19k	15k
 20260706-boris-volkov-golday.sgf	golday	boris-volkov	2026-07-06	W+21.5	19k	20k
+20260706-boris-volkov-phillydude.sgf	boris-volkov	phillydude	2026-07-06	B+41.5	19k	18k
+20260706-boris-volkov-zoren_TwT.sgf	boris-volkov	zoren TwT	2026-07-07	B+R	19k	18k
+20260708-boris-volkov-robertzonzon.sgf	boris-volkov	robertzonzon	2026-07-08	W+21.5	19k	18k
 88401355-219-???-boris-volkov.sgf						
 [??]vs[boris33]1782955937030031102.sgf						
 [??]vs[boris33]1782956716030031529.sgf						
@@ -41,7 +45,9 @@ katago\20260705-132123-boris-volkov-ADAPTIVE_12_KYU.sgf	boris-volkov	ADAPTIVE (1
 katago\20260705-133627-boris-volkov-ADAPTIVE_12_KYU.sgf	boris-volkov	ADAPTIVE (12 KYU)	2026-07-05	W+R		
 katago\20260705-150637-boris-volkov-ADAPTIVE_12_KYU.sgf	ADAPTIVE (12 KYU)	boris-volkov	2026-07-05	B+73.5		
 katago\20260705-151037-boris-volkov-ADAPTIVE_11_KYU.sgf	ADAPTIVE (11 KYU)	boris-volkov	2026-07-05	B+15.5		
+katago\20260707-195236-boris-volkov-ADAPTIVE_11_KYU.sgf	ADAPTIVE (11 KYU)	boris-volkov	2026-07-07	B+R		
 marked\20260704-boris-volkov-move94.sgf	boris-volkov	ForeLL	2026-07-04			
 marked\20260705-mrdermis-move162.sgf	boris-volkov	mrdermis	2026-07-05			
 marked\20260706-boris-volkov-move121.sgf	boris-volkov	mrdermis	2026-07-06			
 puzzles\20260706-042318-golday-move107.sgf	golday	boris-volkov	2026-07-06			
+puzzles\20260708-044222-robertzonzon-move256.sgf	boris-volkov	robertzonzon	2026-07-08			
