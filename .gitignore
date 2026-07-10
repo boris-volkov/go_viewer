@@ -66,8 +66,8 @@ build2/
 build_cpp/
 
 # Compiled executables (no extension = Linux/macOS binary)
-go_viewer
-go
+/go_viewer
+/go
 
 # Per-user runtime state
 adaptive_level.txt

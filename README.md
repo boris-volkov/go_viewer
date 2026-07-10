@@ -1,12 +1,39 @@
-# Go Viewer
+# go_viewer
 
-A Go game viewer for studying professional games, written in C++ with SDL2.
+A personal Go toolkit written in C++ with SDL2: a viewer for studying
+professional games, and an online-go.com client with local KataGo analysis
+built on top of it. Both are shaped around my own workflow and preferences
+rather than general-purpose polish, so treat rough edges or missing
+onboarding outside the paths described here as expected rather than bugs.
 
 ![Go Viewer Screenshot](screenshot.png)
 
+## What's here
+
+This is a small monorepo: a shared Go engine + SDL renderer (`engine/`), and
+two apps built on it (`apps/`).
+
+| Path | What it is |
+|------|------------|
+| `engine/` | Shared Go rules, game state, SGF catalog browser, SDL renderer |
+| `apps/go_viewer/` | Standalone viewer for the pro game library in `games/` |
+| `apps/ogs_client/` | Online-go.com client — live play, puzzles, local KataGo analysis |
+| `games/` | Curated professional game library (SGF) |
+| `my_games/` | My own OGS game history — kept for reference, not example data |
+| `tools/` | Packaging and maintenance scripts |
+
+## Quick start
+
+Once built (see below), `go_viewer.bat` and `ogs_client.bat` at the repo root
+launch the two apps directly.
+
 ## Building
 
-### Linux (Arch / Debian / Fedora)
+`engine/` and `apps/go_viewer/` only need SDL2. `apps/ogs_client/` additionally
+needs libcurl and libwebsockets, and a `config.ini` (see the [ogs_client](#ogs_client)
+section below).
+
+### go_viewer — Linux (Arch / Debian / Fedora)
 
 **Arch Linux**
 ```bash
@@ -29,7 +56,7 @@ cmake -B build && cmake --build build --target go_viewer
 ./build/apps/go_viewer/go_viewer
 ```
 
-### macOS (Homebrew)
+### go_viewer — macOS (Homebrew)
 
 ```bash
 brew install sdl2 cmake
@@ -37,7 +64,7 @@ cmake -B build && cmake --build build --target go_viewer
 ./build/apps/go_viewer/go_viewer
 ```
 
-### Windows (MSYS2 / MinGW64)
+### go_viewer — Windows (MSYS2 / MinGW64, direct g++)
 
 1. Install [MSYS2](https://www.msys2.org/) and open the **MSYS2 MinGW64** shell.
 2. Install dependencies:
@@ -60,7 +87,21 @@ cp /c/msys64/mingw64/bin/SDL2.dll .
 ```
 5. Run: `./go_viewer.exe` (from the repo root — see note below)
 
-## Usage
+### Everything, via CMake (Windows / MinGW)
+
+```powershell
+cmake -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH=C:/msys64/mingw64
+cmake --build build
+```
+Builds both apps in one pass. `ogs_client` additionally needs
+`pacman -S mingw-w64-x86_64-curl mingw-w64-x86_64-libwebsockets`. Executables
+land in `build/apps/<name>/` and are copied back next to their source
+directories — `apps/go_viewer/go_viewer.exe`, `apps/ogs_client/ogs_client.exe`
+— which is what `go_viewer.bat` / `ogs_client.bat` launch.
+
+## go_viewer
+
+### Usage
 
 1. Place `.sgf` files in a `games/` folder at the repo root.
    You can organise them in subdirectories — the catalog browser handles them.
@@ -69,7 +110,7 @@ cp /c/msys64/mingw64/bin/SDL2.dll .
    the executable's own location. It picks a random game on startup.
 3. Press **ESC** at any time to toggle the in-app help overlay.
 
-## Controls
+### Controls
 
 | Key | Action |
 |-----|--------|
@@ -81,7 +122,7 @@ cp /c/msys64/mingw64/bin/SDL2.dll .
 | **Up / Down** | Faster / slower auto-playback |
 | **Left / Right** | Step back / forward one move |
 
-### Modes
+#### Modes
 
 | Key | Mode |
 |-----|------|
@@ -91,20 +132,29 @@ cp /c/msys64/mingw64/bin/SDL2.dll .
 | **T** | Territory drill — estimate which marked territory is larger |
 | **U** | Toggle chain-connection lines |
 
-### Analysis mode
+#### Analysis mode
 - **Left-click empty** — place a stone (alternates black/white)
 - **Hold B / W** while clicking — force black or white
 - **Left-click stone** — show / hide its chain's liberties
 - **Right-click stone** — remove it
 
-### Catalog browser
+#### Catalog browser
 - **Up / Down** — navigate; **Enter** — open; **ESC** — close
 
-## Source files
+## ogs_client
 
-This viewer's engine (`engine/`) is shared with [ogs_client](apps/ogs_client),
-the online-go.com client built on top of it — this repo is a small monorepo,
-not a standalone program.
+An online-go.com client with local play and analysis against KataGo —
+automatch, live play, stone-removal scoring, an OGS puzzle player, adaptive
+practice opponents, batch autoplay through a game folder, and more — built on
+the same engine as go_viewer above. Copy `apps/ogs_client/config.ini.example`
+to `apps/ogs_client/config.ini` and fill in your OGS credentials (or a JWT) to
+connect; KataGo support is optional and configured in the same file. This app
+in particular has grown around my own day-to-day usage rather than a fixed
+feature set, so this file is the full extent of its onboarding — a PlayStation
+controller is assumed for the on-screen control hints, though mouse and
+keyboard work throughout as well.
+
+## Source files
 
 | File | Purpose |
 |------|---------|
@@ -117,4 +167,5 @@ not a standalone program.
 | `engine/CMakeLists.txt` | Builds the shared `go_engine` static library |
 | `apps/go_viewer/main.cpp` | App loop, input handling, drill logic |
 | `apps/go_viewer/CMakeLists.txt` | Builds the `go_viewer` executable |
+| `apps/ogs_client/` | OGS networking, KataGo integration, puzzles, sound |
 | `CMakeLists.txt` (repo root) | Top-level build — wires up `engine/` and both `apps/` |
