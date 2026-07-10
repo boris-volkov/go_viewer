@@ -12,21 +12,21 @@ A Go game viewer for studying professional games, written in C++ with SDL2.
 ```bash
 sudo pacman -S sdl2 cmake base-devel
 cmake -B build && cmake --build build --target go_viewer
-./build/go_viewer
+./build/apps/go_viewer/go_viewer
 ```
 
 **Debian / Ubuntu**
 ```bash
 sudo apt install libsdl2-dev cmake build-essential
 cmake -B build && cmake --build build --target go_viewer
-./build/go_viewer
+./build/apps/go_viewer/go_viewer
 ```
 
 **Fedora**
 ```bash
 sudo dnf install SDL2-devel cmake gcc-c++
 cmake -B build && cmake --build build --target go_viewer
-./build/go_viewer
+./build/apps/go_viewer/go_viewer
 ```
 
 ### macOS (Homebrew)
@@ -34,7 +34,7 @@ cmake -B build && cmake --build build --target go_viewer
 ```bash
 brew install sdl2 cmake
 cmake -B build && cmake --build build --target go_viewer
-./build/go_viewer
+./build/apps/go_viewer/go_viewer
 ```
 
 ### Windows (MSYS2 / MinGW64)
@@ -44,25 +44,29 @@ cmake -B build && cmake --build build --target go_viewer
 ```bash
 pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkg-config
 ```
-3. Build (direct g++ invocation is more reliable than CMake on MSYS2):
+3. From the repo root, build (direct g++ invocation is more reliable than CMake on MSYS2):
 ```bash
 export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 export TEMP="/tmp" TMP="/tmp"
-g++ -std=c++17 -O2 $(pkg-config --cflags sdl2) \
-    main.cpp go_rules.cpp game_state.cpp analysis_state.cpp catalog.cpp renderer.cpp \
+g++ -std=c++17 -O2 $(pkg-config --cflags sdl2) -Iengine \
+    apps/go_viewer/main.cpp \
+    engine/go_rules.cpp engine/game_state.cpp engine/analysis_state.cpp \
+    engine/catalog.cpp engine/game_index.cpp engine/renderer.cpp \
     $(pkg-config --libs sdl2) -o go_viewer.exe
 ```
 4. Copy `SDL2.dll` next to the executable so it can run outside the MSYS2 shell:
 ```bash
 cp /c/msys64/mingw64/bin/SDL2.dll .
 ```
-5. Run: `./go_viewer.exe`
+5. Run: `./go_viewer.exe` (from the repo root — see note below)
 
 ## Usage
 
-1. Place `.sgf` files in a `games/` folder next to the executable.
+1. Place `.sgf` files in a `games/` folder at the repo root.
    You can organise them in subdirectories — the catalog browser handles them.
-2. Run the executable.  It picks a random game on startup.
+2. Run the executable **with your terminal's working directory set to the repo
+   root** — go_viewer looks for `games/` relative to the current directory, not
+   the executable's own location. It picks a random game on startup.
 3. Press **ESC** at any time to toggle the in-app help overlay.
 
 ## Controls
@@ -98,13 +102,19 @@ cp /c/msys64/mingw64/bin/SDL2.dll .
 
 ## Source files
 
+This viewer's engine (`engine/`) is shared with [ogs_client](apps/ogs_client),
+the online-go.com client built on top of it — this repo is a small monorepo,
+not a standalone program.
+
 | File | Purpose |
 |------|---------|
-| `go_viewer.hpp` | Shared constants and types |
-| `go_rules.cpp/hpp` | Go rules (capture, liberty counting, suicide check) |
-| `game_state.cpp/hpp` | Game state and snapshot history |
-| `analysis_state.cpp/hpp` | Free-placement analysis board |
-| `catalog.cpp/hpp` | SGF file browser |
-| `renderer.cpp/hpp` | All SDL2 rendering |
-| `main.cpp` | App loop, input handling, drill logic |
-| `CMakeLists.txt` | CMake build (Linux / macOS / MSVC) |
+| `engine/go_viewer.hpp` | Shared constants and types |
+| `engine/go_rules.cpp/hpp` | Go rules (capture, liberty counting, suicide check) |
+| `engine/game_state.cpp/hpp` | Game state and snapshot history |
+| `engine/analysis_state.cpp/hpp` | Free-placement analysis board |
+| `engine/catalog.cpp/hpp` | SGF file browser |
+| `engine/renderer.cpp/hpp` | All SDL2 rendering |
+| `engine/CMakeLists.txt` | Builds the shared `go_engine` static library |
+| `apps/go_viewer/main.cpp` | App loop, input handling, drill logic |
+| `apps/go_viewer/CMakeLists.txt` | Builds the `go_viewer` executable |
+| `CMakeLists.txt` (repo root) | Top-level build — wires up `engine/` and both `apps/` |

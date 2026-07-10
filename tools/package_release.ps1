@@ -1,6 +1,6 @@
 # Assembles a shareable ogs_client distribution into dist/ogs_client/ and zips it.
 # Run from anywhere -- paths are resolved relative to this script's own location
-# (the repo root), not the caller's current directory.
+# (tools/, one level below the repo root), not the caller's current directory.
 #
 # Included: ogs_client.exe + every DLL next to it, ca-bundle.crt,
 #           config.ini.example, the pro game library (games/), and
@@ -10,8 +10,8 @@
 #           settings.txt, puzzle_collections.txt).
 
 $ErrorActionPreference = "Stop"
-$root = $PSScriptRoot
-$src  = Join-Path $root "ogs_client"
+$root = Split-Path -Parent $PSScriptRoot
+$src  = Join-Path $root "apps\ogs_client"
 $dist = Join-Path $root "dist\ogs_client"
 
 $exePath = Join-Path $src "ogs_client.exe"

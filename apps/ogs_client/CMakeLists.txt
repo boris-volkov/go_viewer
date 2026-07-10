@@ -1,10 +1,5 @@
-cmake_minimum_required(VERSION 3.14)
-project(ogs_client CXX)
-set(CMAKE_CXX_STANDARD 17)
-
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
-find_package(SDL2 REQUIRED)
 find_package(CURL REQUIRED)
 
 # libwebsockets — try pkg-config first, fall back to manual search
@@ -25,25 +20,16 @@ add_executable(ogs_client
     katago.cpp
     sound.cpp
     ogs_puzzles.cpp
-    # Reuse shared Go logic from the parent directory
-    ../go_rules.cpp
-    ../game_state.cpp
-    ../analysis_state.cpp
-    ../catalog.cpp
-    ../game_index.cpp
-    ../renderer.cpp
 )
 
 target_include_directories(ogs_client PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}     # json.hpp lives here
-    ${CMAKE_CURRENT_SOURCE_DIR}/..  # go_viewer.hpp, go_rules.hpp, etc.
-    ${SDL2_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
     ${LWS_INCLUDE_DIRS}
 )
 
 target_link_libraries(ogs_client PRIVATE
-    ${SDL2_LIBRARIES}
+    go_engine
     ${CURL_LIBRARIES}
     ${LWS_LIBRARIES}
 )

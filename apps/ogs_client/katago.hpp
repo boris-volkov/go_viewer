@@ -8,7 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
-#include "../go_viewer.hpp"
+#include "go_viewer.hpp"
 
 // Manages a KataGo analysis subprocess and queries it for territory ownership.
 // Thread-safe: query_ownership() and poll_ownership() are called from the main

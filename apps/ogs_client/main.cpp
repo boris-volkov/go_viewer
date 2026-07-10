@@ -5,12 +5,12 @@
 
 #include <cfloat>
 #include <cmath>
-#include "../go_viewer.hpp"
-#include "../go_rules.hpp"
-#include "../game_state.hpp"
-#include "../analysis_state.hpp"
-#include "../catalog.hpp"
-#include "../renderer.hpp"
+#include "go_viewer.hpp"
+#include "go_rules.hpp"
+#include "game_state.hpp"
+#include "analysis_state.hpp"
+#include "catalog.hpp"
+#include "renderer.hpp"
 #include "ogs_client.hpp"
 #include "ogs_net.hpp"
 #include "katago.hpp"
@@ -1230,7 +1230,7 @@ void App::load_demo_game() {
         std::string dir = exe_dir() + dirname;
         std::vector<std::string> rel;
         if (!Catalog::list_sgf_files(dir, rel) || rel.empty()) {
-            dir = exe_dir() + "../" + dirname;
+            dir = exe_dir() + "../../" + dirname;
             rel.clear();
             if (!Catalog::list_sgf_files(dir, rel) || rel.empty()) return;
         }
@@ -2205,7 +2205,7 @@ void App::save_live_game() {
         DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
-    if (!is_dir(games_dir)) games_dir = exe_dir() + "../my_games";
+    if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
 
     std::string my_name  = (game_.my_color == 1) ? game_.black_name : game_.white_name;
@@ -2320,7 +2320,7 @@ std::string App::marked_position_path(int depth) const {
         DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
-    if (!is_dir(games_dir)) games_dir = exe_dir() + "../my_games";
+    if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
 
     std::string player_dir = Catalog::join_path(games_dir, my_username_.empty() ? "You" : my_username_);
@@ -2452,7 +2452,7 @@ void App::save_puzzle_position(int depth) {
         DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
-    if (!is_dir(games_dir)) games_dir = exe_dir() + "../my_games";
+    if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
     std::string player_dir = Catalog::join_path(games_dir, my_username_.empty() ? "You" : my_username_);
     std::string puzzle_dir = Catalog::join_path(player_dir, "puzzles");
@@ -2988,7 +2988,7 @@ void App::open_game_catalog() {
         DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
-    if (!is_dir(gdir)) gdir = exe_dir() + "../my_games";
+    if (!is_dir(gdir)) gdir = exe_dir() + "../../my_games";
 
     std::string my_dir = Catalog::join_path(gdir, my_username_);
 
@@ -3066,7 +3066,7 @@ void App::open_pro_catalog() {
         DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
     };
-    if (!is_dir(gdir)) gdir = exe_dir() + "../games";
+    if (!is_dir(gdir)) gdir = exe_dir() + "../../games";
 
     // The pro database never changes mid-session, so unlike open_game_catalog()
     // there is nothing to refresh on resume — just leave `entries` exactly as

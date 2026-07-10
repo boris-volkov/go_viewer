@@ -5,12 +5,12 @@ set -e
 cd "$(dirname "$0")"
 
 g++ -std=c++17 -O2 \
-    -I. -I.. \
+    -I. -I../../engine \
     $(sdl2-config --cflags) \
     $(pkg-config --cflags libcurl libwebsockets) \
-    main.cpp ogs_net.cpp katago.cpp \
-    ../go_rules.cpp ../game_state.cpp ../analysis_state.cpp \
-    ../catalog.cpp ../game_index.cpp ../renderer.cpp \
+    main.cpp ogs_net.cpp katago.cpp sound.cpp ogs_puzzles.cpp \
+    ../../engine/go_rules.cpp ../../engine/game_state.cpp ../../engine/analysis_state.cpp \
+    ../../engine/catalog.cpp ../../engine/game_index.cpp ../../engine/renderer.cpp \
     $(sdl2-config --libs) \
     $(pkg-config --libs libcurl libwebsockets) \
     -pthread \
