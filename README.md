@@ -1,4 +1,4 @@
-# go_viewer
+# go_station
 
 A personal Go toolkit written in C++ with SDL2: a viewer for studying
 professional games, and an online-go.com client with local KataGo analysis
