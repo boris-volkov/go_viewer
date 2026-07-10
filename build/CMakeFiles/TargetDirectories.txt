@@ -1,3 +1,0 @@
-C:/Users/boris/Documents/GitHub/go_viewer/build/CMakeFiles/go_viewer.dir
-C:/Users/boris/Documents/GitHub/go_viewer/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/boris/Documents/GitHub/go_viewer/build/CMakeFiles/ZERO_CHECK.dir
