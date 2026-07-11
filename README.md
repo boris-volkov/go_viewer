@@ -6,7 +6,9 @@ built on top of it. Both are shaped around my own workflow and preferences
 rather than general-purpose polish, so treat rough edges or missing
 onboarding outside the paths described here as expected rather than bugs.
 
-![Go Viewer Screenshot](screenshot.png)
+![ogs_client analysis mode — move tree, KataGo score graph, and live suggestions](screenshot1.png)
+![Same analysis view with board coordinates enabled](screenshot2.png)
+![Reviewing a professional game (Shusaku vs Ota Yuzo) in analysis mode](screenshot3.png)
 
 ## What's here
 
