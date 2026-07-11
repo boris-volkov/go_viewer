@@ -2,9 +2,11 @@
 
 Play, analyze, and study Go with a PlayStation controller.
 
+![Live game in progress — clocks, prisoner count, and turn indicator](screenshot0.png)
 ![ogs_client analysis mode — move tree, KataGo score graph, and live suggestions](screenshot1.png)
 ![Same analysis view with board coordinates enabled](screenshot2.png)
 ![Reviewing a professional game (Shusaku vs Ota Yuzo) in analysis mode](screenshot3.png)
+![Game catalog — browse past games with opening/final position thumbnails](screenshot4.png)
 
 ## Setup
 
