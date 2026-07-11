@@ -1,14 +1,32 @@
 # go_station
 
-A personal Go toolkit written in C++ with SDL2: a viewer for studying
-professional games, and an online-go.com client with local KataGo analysis
-built on top of it. Both are shaped around my own workflow and preferences
-rather than general-purpose polish, so treat rough edges or missing
-onboarding outside the paths described here as expected rather than bugs.
+Play, analyze, and study Go with a PlayStation controller.
 
 ![ogs_client analysis mode — move tree, KataGo score graph, and live suggestions](screenshot1.png)
 ![Same analysis view with board coordinates enabled](screenshot2.png)
 ![Reviewing a professional game (Shusaku vs Ota Yuzo) in analysis mode](screenshot3.png)
+
+## Setup
+
+1. Build `ogs_client` — see [Building](#building) below.
+2. Copy `apps/ogs_client/config.ini.example` to `apps/ogs_client/config.ini`.
+3. Add your OGS login. Pick whichever applies:
+   - **Most accounts** — fill in `username=` and `password=`. The client logs
+     in the same way the website does; nothing else is needed.
+   - **Signed up via Google / Facebook / etc., with no separate OGS
+     password?** Use a JWT instead: log into
+     [online-go.com](https://online-go.com) in a browser, open DevTools
+     (F12) → **Application** tab → **Local Storage** → `https://online-go.com`
+     → copy the value of the `ogs_user_jwt` key → paste it into `jwt=` in
+     `config.ini`.
+4. *(Optional)* KataGo analysis — point `katago_exe` / `katago_model` /
+   `katago_config` at a local KataGo install; see the comments in
+   `config.ini.example` for the exact fields and a model download link.
+5. Run `ogs_client.bat` at the repo root (or `apps/ogs_client/ogs_client.exe`
+   directly).
+
+`go_viewer` — the pro-game library browser — needs no setup beyond building
+it; just run `go_viewer.bat`.
 
 ## What's here
 
@@ -24,16 +42,11 @@ two apps built on it (`apps/`).
 | `my_games/` | My own OGS game history — kept for reference, not example data |
 | `tools/` | Packaging and maintenance scripts |
 
-## Quick start
-
-Once built (see below), `go_viewer.bat` and `ogs_client.bat` at the repo root
-launch the two apps directly.
-
 ## Building
 
 `engine/` and `apps/go_viewer/` only need SDL2. `apps/ogs_client/` additionally
-needs libcurl and libwebsockets, and a `config.ini` (see the [ogs_client](#ogs_client)
-section below).
+needs libcurl and libwebsockets, and a `config.ini` (see [Setup](#setup)
+above).
 
 ### go_viewer — Linux (Arch / Debian / Fedora)
 
@@ -148,13 +161,11 @@ directories — `apps/go_viewer/go_viewer.exe`, `apps/ogs_client/ogs_client.exe`
 An online-go.com client with local play and analysis against KataGo —
 automatch, live play, stone-removal scoring, an OGS puzzle player, adaptive
 practice opponents, batch autoplay through a game folder, and more — built on
-the same engine as go_viewer above. Copy `apps/ogs_client/config.ini.example`
-to `apps/ogs_client/config.ini` and fill in your OGS credentials (or a JWT) to
-connect; KataGo support is optional and configured in the same file. This app
-in particular has grown around my own day-to-day usage rather than a fixed
-feature set, so this file is the full extent of its onboarding — a PlayStation
-controller is assumed for the on-screen control hints, though mouse and
-keyboard work throughout as well.
+the same engine as go_viewer above. See [Setup](#setup) above for connecting
+your OGS account. This app in particular has grown around my own day-to-day
+usage rather than a fixed feature set, so this README is the full extent of
+its onboarding — a PlayStation controller is assumed for the on-screen
+control hints, though mouse and keyboard work throughout as well.
 
 ## Source files
 
