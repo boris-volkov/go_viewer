@@ -331,6 +331,7 @@ bool Catalog::load_entries() {
         pin_special("marked",  "[MARKED POSITIONS]");
         pin_special("puzzles", "[STUDY PUZZLES]");
         pin_special("katago",  "[VS KATAGO GAMES]");
+        pin_special("drills",  "[L&D DRILLS]");
 
         CatalogEntry by_year;
         by_year.name         = "[BY YEAR]";

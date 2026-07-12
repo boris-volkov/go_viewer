@@ -417,6 +417,9 @@ struct AnalysisNode {
     // which just tracks navigation and gets repointed at whichever branch you last
     // explored — is_main_line is the stable, structural "is this the real game" fact.
     bool  is_main_line = true;
+    // Marks this position as a correct ending of a life-and-death drill line
+    // (rendered as a green halo in the tree panel; serialized as C[RIGHT]).
+    bool  drill_correct = false;
     // Letter annotations ("A", "B", …) placed with the circle button — owned by the
     // position they were placed on, so navigating away and back restores them.
     std::vector<BoardLabel> labels;
@@ -704,11 +707,15 @@ private:
     bool        pz_done_   = false;            // solved or failed — judging over
     bool        pz_solved_ = false;
     bool        pz_explore_ = false;           // off the authored tree — free sandbox, no judging
+    int         pz_explore_anchor_ = 0;        // history length to restore to on "back to solving"
     // Opponent-branch visit counts for the loaded puzzle: retries walk the LEAST
     // visited resistance line, so repeated attempts sweep every authored variation
     // in order instead of sampling randomly. Cleared when a new puzzle loads.
     std::map<const PuzzleMoveNode*, int> pz_visits_;
-    bool pz_more_lines_ = false;               // this run skipped an unvisited alternative
+    bool pz_subtree_unexplored(const PuzzleMoveNode* n) const;  // any never-traversed node below?
+    bool pz_more_lines_ = false;               // somewhere in the tree, a line hasn't been seen yet
+    const PuzzleMoveNode* pz_pending_reply_ = nullptr;  // opponent reply chosen, awaiting the delay
+    Uint32 pz_reply_at_ = 0;                            // SDL_GetTicks() deadline to apply it
     // Solution tree rendered in the left panel via the analysis-tree renderer
     std::vector<AnalysisTreeRenderNode> pz_tree_render_;
     int  pz_cur_depth_ = 0;
@@ -724,12 +731,47 @@ private:
     std::string pz_banner_;                    // "SOLVED!" / "WRONG" big banner
     std::string pz_comment_;                   // author's comment at the current node
 
+    // ── Life-and-death drill trees (local, user-authored) ─────────────────────
+    // Authored in analysis mode (drill_correct marks + SAVE AS DRILL), stored as
+    // variation SGFs in my_games/<user>/drills/, drilled through the puzzle
+    // player via a synthesized local OgsPuzzle (id=0 — no solved-persistence).
+    bool        drill_browse_ = false;         // puzzle browser PUZZLES view lists local drills
+    std::vector<std::string> drill_paths_;     // parallel to pz_list_ while drill_browse_
+    std::string drill_play_path_;              // file behind pz_ ("" = network OGS puzzle)
+    std::string drill_edit_path_;              // overwrite target for SAVE ("" = save as new)
+    // Setup-stone placement in analysis: -1 = off (normal alternating moves),
+    // 1/0 = cross places/removes raw black/white stones on the CURRENT node's
+    // board without creating tree nodes — for laying out a drill's initial
+    // shape before recording any lines.
+    int         analysis_setup_color_ = -1;
+    // [MY DRILLS] list preview: the selected drill's setup position, parsed on
+    // cursor move and cached (same BOARD_SIZE stride as the catalog thumbs).
+    char        drill_thumb_[BOARD_SIZE][BOARD_SIZE] = {};
+    int         drill_thumb_idx_ = -1;   // drill_paths_ index the cache holds (-1 = none)
+    int         drill_thumb_bs_  = 0;    // 0 = nothing valid to draw
+    // Renaming a drill file (keyboard text entry in the [MY DRILLS] list,
+    // same plain-keycode capture idiom as the credential prompt)
+    bool        drill_rename_active_ = false;
+    std::string drill_rename_buf_;
+    void        drill_commit_rename();
+    void        drill_delete_selected();
+    void        delete_analysis_branch();      // remove analysis_cur_'s subtree (hypothetical only)
+    std::string drills_dir(bool create);
+    bool save_drill(const std::string& path);
+    void save_drill_from_current();
+    void open_drill_list();
+    void drill_load_and_start(int idx);
+    void drill_edit_current();
+
     void open_puzzle_browser();
     void pz_launch_fetch(int kind, int arg);   // spawn worker for one of the 3 fetchers
     void poll_puzzle_fetch();                  // consume a finished fetch (event loop)
     void pz_start();                           // (re)set the board to pz_'s initial position
     void pz_place(int r, int f);               // player move → tree matching + feedback
     void pz_advance(const PuzzleMoveNode* node, bool opponent_follows);
+    void pz_fire_pending_reply();               // apply the delayed opponent reply, then keep judging
+    void pz_enter_explore();                   // triangle: free sandbox from the current position
+    void pz_return_to_solving();               // circle, mid-exploration: back to the judged anchor
     void pz_step(int dir);                     // prev/next puzzle within the collection
     void handle_puzzle_button(Uint8 btn);      // PUZZLE_BROWSE + PUZZLE_PLAY input
     void draw_puzzle_browser();
@@ -823,6 +865,7 @@ private:
     // forced_color: -1 = use current turn (normal), 0/1 = force that color and don't flip turn
     void apply_move(int col, int row, int forced_color = -1);
     void apply_pass();  // flips turn and records a history snapshot, same bookkeeping as apply_move
+    void reset_byo_countdowns(bool running_player_too);  // stored secs -> full period (byo players)
     void undo_local_move();  // pop back to your last turn in a local game vs KataGo
     void step_history(int delta);  // delta=-1 back, +1 forward; sets history_pos
     void load_demo_game();
@@ -936,6 +979,28 @@ void App::apply_pass() {
     }
 }
 
+// Byo-yomi: a period resets the instant a move is played — the player who just
+// moved parks with a full period banked, and the player now to move starts a
+// fresh one. But server move events carry period_time_left as a snapshot of the
+// mover's just-ended turn (the leftover, e.g. 8s of a 30s period), and that
+// stale remainder was being stored verbatim — so when the turn flipped back,
+// the countdown started from 8s, hit zero, and began eating banked periods on
+// screen while the server-side clock was actually fine. Normalize stored secs
+// to the full period for byo players: always for the parked player (their
+// stored value is never meaningful); for the running player too when a move
+// was just applied (running_player_too=true — at a turn flip they start a
+// fresh period by rule). Mid-turn clock updates keep running_player_too=false
+// so a genuine in-progress countdown (e.g. reconnect) is preserved.
+void App::reset_byo_countdowns(bool running_player_too) {
+    bool btm   = (game_.board.turn_is_black == 1);
+    bool b_byo = game_.black_in_byo || (game_.black_secs <= 0 && game_.black_periods > 0);
+    bool w_byo = game_.white_in_byo || (game_.white_secs <= 0 && game_.white_periods > 0);
+    if (b_byo && game_.black_period_secs > 0 && (running_player_too || !btm))
+        game_.black_secs = game_.black_period_secs;
+    if (w_byo && game_.white_period_secs > 0 && (running_player_too || btm))
+        game_.white_secs = game_.white_period_secs;
+}
+
 // Pops history back to your own last turn in a local game vs KataGo — your last move
 // plus whatever KataGo played in response (generically walks back ply-by-ply checking
 // whose turn each resulting position is, rather than assuming a hardcoded pair, so it
@@ -1026,6 +1091,13 @@ void App::step_history(int delta) {
 void App::build_analysis_tree() {
     analysis_root_.reset();
     analysis_cur_ = nullptr;
+    // Every non-drill analysis entry (live game end, catalog review, free
+    // analysis) funnels through here — a fresh tree is never an edit of a
+    // previously saved drill, so SAVE must create a new file, not overwrite.
+    // (drill_edit_current() also passes through here for its root, then
+    // re-sets drill_edit_path_ afterwards.)
+    drill_edit_path_.clear();
+    analysis_setup_color_ = -1;   // setup-stone mode never carries across sessions
 
     analysis_root_ = std::make_unique<AnalysisNode>();
     analysis_root_->board = game_.history.empty() ? game_.board : game_.history[0];
@@ -1090,6 +1162,7 @@ void App::build_analysis_tree_render() {
             rn.parent_col   = parent_col;
             rn.move_color   = node->move_color;
             rn.marked       = (node->depth < (int)move_marked_.size()) && move_marked_[node->depth];
+            rn.goal         = node->drill_correct;   // green halo, same as puzzle solution endpoints
             analysis_tree_render_.push_back(rn);
 
             for (int i = 0; i < (int)node->children.size(); i++) {
@@ -1183,6 +1256,32 @@ void App::apply_analysis_move(int col, int row) {
     analysis_cur_->children.push_back(std::move(child));
     analysis_cur_ = analysis_cur_->children[new_idx].get();
     build_analysis_tree_render();
+}
+
+// Remove the current node and its entire subtree from the analysis tree,
+// landing on the parent. Hypothetical branches only — the popup item is gated
+// on !is_main_line, and this re-checks for safety (deleting real game moves
+// would silently rewrite the record being reviewed).
+void App::delete_analysis_branch() {
+    AnalysisNode* cur = analysis_cur_;
+    if (!cur || !cur->parent || cur->is_main_line) return;
+    AnalysisNode* parent = cur->parent;
+    auto& sibs = parent->children;
+    for (size_t i = 0; i < sibs.size(); i++) {
+        if (sibs[i].get() == cur) {
+            sibs.erase(sibs.begin() + i);   // unique_ptr — frees the whole subtree
+            break;
+        }
+    }
+    if (parent->active_child >= (int)sibs.size())
+        parent->active_child = 0;
+    analysis_cur_ = parent;
+    build_analysis_tree_render();
+    kata_suggestion_count_ = 0;
+    kata_score_lead_  = cached_analysis_score(analysis_cur_);
+    kata_query_after_ = SDL_GetTicks() + 1000;
+    flash_       = "BRANCH DELETED";
+    flash_until_ = SDL_GetTicks() + 1200;
 }
 
 // Load a specific SGF into the lobby screensaver (board + names, no analysis
@@ -1403,6 +1502,10 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
+    // Typing a drill name — keyboard owns all input until Enter/ESC
+    if (drill_rename_active_ && state_ == AppState::PUZZLE_BROWSE)
+        return;
+
     // History navigation: LT/RT work in any game state
     if (btn == 0xFD || btn == 0xFE) {
         if (state_ == AppState::JOSEKI) {
@@ -1471,6 +1574,13 @@ void App::handle_controller_button(Uint8 btn) {
             } else {
                 step_history(btn == 0xFD ? -1 : +1);
             }
+            draw();
+        } else if (state_ == AppState::PUZZLE_PLAY && pz_explore_) {
+            // Review the sandbox moves made so far. Only wired while exploring —
+            // pz_node_ is frozen there, so scrubbing never needs to re-resolve a
+            // tree position; placing a stone from mid-review branches off via the
+            // history_pos handling already in pz_place().
+            step_history(btn == 0xFD ? -1 : +1);
             draw();
         }
         return;
@@ -1800,6 +1910,10 @@ void App::handle_controller_button(Uint8 btn) {
                 game_.pending_col = game_.cursor_f;
                 game_.pending_row = game_.cursor_r;
                 game_.my_turn = false;
+                // Fresh byo-yomi periods from the moment the move is played —
+                // don't wait on the server echo to stop a stale countdown.
+                reset_byo_countdowns(/*running_player_too=*/true);
+                game_.clock_tick = SDL_GetTicks();
                 set_status("WAITING...");
             }
             draw();
@@ -1822,6 +1936,9 @@ void App::handle_controller_button(Uint8 btn) {
                     game_.pending_col = -1;
                     game_.pending_row = -1;
                     game_.my_turn = false;
+                    // Same byo-yomi reset as a real move — a pass consumes the turn too
+                    reset_byo_countdowns(/*running_player_too=*/true);
+                    game_.clock_tick = SDL_GetTicks();
                     set_status("PASSED — WAITING...");
                 }
             } else {
@@ -1911,6 +2028,23 @@ void App::handle_controller_button(Uint8 btn) {
         case SDL_CONTROLLER_BUTTON_A:
             if (analysis_cur_) {
                 int col = game_.cursor_f, row = game_.cursor_r;
+                // Setup-stone mode: edit the current node's board directly —
+                // raw add/remove, no tree nodes, no captures, no turn change.
+                // Gated on a childless position (children derive their boards
+                // from this one; editing under them would desync the tree).
+                if (analysis_setup_color_ >= 0) {
+                    if (!analysis_cur_->children.empty()) {
+                        flash_       = "POSITION HAS CONTINUATIONS — DELETE THEM FIRST";
+                        flash_until_ = SDL_GetTicks() + 2000;
+                    } else if (analysis_cur_->board.board[row][col] != 0) {
+                        analysis_cur_->board.board[row][col] = 0;   // remove any stone
+                    } else {
+                        analysis_cur_->board.board[row][col] =
+                            (analysis_setup_color_ == 1) ? 1 : 2;
+                    }
+                    draw();
+                    break;
+                }
                 if (analysis_cur_->board.board[row][col] == 0) {
                     apply_analysis_move(col, row);
                     kata_suggestion_count_ = 0;
@@ -2054,6 +2188,54 @@ void App::open_popup_menu() {
         // from the configured KataGo strength in match settings.
         if (analysis_cur_ && !kata_human_model_.empty())
             add("PRACTICE VS KATAGO", [this]() { start_practice_from_position(); });
+        // ── Drill authoring (life-and-death drill trees) ──
+        if (analysis_cur_ && analysis_cur_->parent)   // the root can't be an ending
+            add(analysis_cur_->drill_correct ? "UNMARK CORRECT ENDING"
+                                             : "MARK CORRECT ENDING",
+                [this]() {
+                    analysis_cur_->drill_correct = !analysis_cur_->drill_correct;
+                    build_analysis_tree_render();
+                });
+        // Setup-stone mode: cross places/removes raw stones of one color on the
+        // current node's board (no tree nodes, no alternation) — for laying out
+        // a drill's initial shape. Only allowed while the position has no
+        // continuations, since children's boards derive from this one.
+        if (analysis_cur_ && analysis_cur_->children.empty()) {
+            add(analysis_setup_color_ == 1 ? "SETUP BLACK STONES (ON — TURN OFF)"
+                                           : "SETUP BLACK STONES",
+                [this]() {
+                    analysis_setup_color_ = (analysis_setup_color_ == 1) ? -1 : 1;
+                    set_status(analysis_setup_color_ == 1
+                                   ? "SETUP: " GLYPH_PS_CROSS " ADDS/REMOVES BLACK STONES"
+                                   : "");
+                });
+            add(analysis_setup_color_ == 0 ? "SETUP WHITE STONES (ON — TURN OFF)"
+                                           : "SETUP WHITE STONES",
+                [this]() {
+                    analysis_setup_color_ = (analysis_setup_color_ == 0) ? -1 : 0;
+                    set_status(analysis_setup_color_ == 0
+                                   ? "SETUP: " GLYPH_PS_CROSS " ADDS/REMOVES WHITE STONES"
+                                   : "");
+                });
+        }
+        // Flip whose turn it is at the current node (which side the drill's
+        // first move belongs to). Only future children read this flag.
+        if (analysis_cur_)
+            add(analysis_cur_->board.turn_is_black == 1 ? "SWITCH SIDE TO MOVE (NOW: BLACK)"
+                                                        : "SWITCH SIDE TO MOVE (NOW: WHITE)",
+                [this]() {
+                    analysis_cur_->board.turn_is_black =
+                        (analysis_cur_->board.turn_is_black == 1) ? 0 : 1;
+                });
+        // Prune an accidental line: removes the current node and everything
+        // below it, landing on the parent. Hypothetical branches only — the
+        // real game's moves (is_main_line) are never deletable.
+        if (analysis_cur_ && analysis_cur_->parent && !analysis_cur_->is_main_line)
+            add("DELETE THIS BRANCH", [this]() { delete_analysis_branch(); },
+                /*confirm=*/true);
+        if (analysis_cur_ && !analysis_cur_->children.empty())
+            add(drill_edit_path_.empty() ? "SAVE AS DRILL" : "OVERWRITE DRILL",
+                [this]() { save_drill_from_current(); });
         add("GAME CATALOG",    [this]() { open_game_catalog(); });
         add("PRO GAMES",       [this]() { open_pro_catalog(); });
         add("SETTINGS",        [this]() { open_settings_menu(); });
@@ -2061,6 +2243,16 @@ void App::open_popup_menu() {
 
     case AppState::PUZZLE_BROWSE:
         popup_title_ = "PUZZLES";
+        // Drill file management, only with a drill highlighted in [MY DRILLS]
+        if (drill_browse_ && pz_view_ == PzView::PUZZLES &&
+            pz_index_ >= 0 && pz_index_ < (int)drill_paths_.size()) {
+            add("RENAME DRILL (KEYBOARD)", [this]() {
+                drill_rename_buf_    = pz_list_[pz_index_].second;   // prefill current name
+                drill_rename_active_ = true;
+            });
+            add("DELETE DRILL", [this]() { drill_delete_selected(); },
+                /*confirm=*/true);
+        }
         add("RETURN TO LOBBY", lobby);
         add("SETTINGS", [this]() { open_settings_menu(); });
         break;
@@ -2075,6 +2267,8 @@ void App::open_popup_menu() {
     case AppState::PUZZLE_PLAY:
         popup_title_ = "PUZZLE MENU";
         add("RETRY PUZZLE", [this]() { pz_start(); });
+        if (!drill_play_path_.empty())
+            add("EDIT DRILL", [this]() { drill_edit_current(); });
         add("PUZZLE LIST", [this]() {
             state_    = AppState::PUZZLE_BROWSE;
             pz_view_  = pz_list_.empty() ? PzView::COLLECTIONS : PzView::PUZZLES;
@@ -2393,6 +2587,404 @@ void App::delete_marked_position(int depth) {
     if (marked_paths_[depth].empty()) return;  // marked in a prior session — no known path to clean up
     remove(marked_paths_[depth].c_str());
     marked_paths_[depth].clear();
+}
+
+// ── Life-and-death drill trees ───────────────────────────────────────────────
+// Authored in analysis mode, saved as standard variation SGFs, drilled through
+// the puzzle player. Format: root = AB/AW/PL setup (same shape as marked
+// positions) + GN, tree = nested parens of ;B[xy]/;W[xy], correct endings
+// marked C[RIGHT] (unmarked dead-ends are implicitly wrong — matches the
+// puzzle player's judging).
+
+static constexpr int DRILL_MAX_DEPTH = 400;
+
+static std::string sgf_escape_text(const std::string& s) {
+    std::string out;
+    for (char c : s) { if (c == ']' || c == '\\') out += '\\'; out += c; }
+    return out;
+}
+
+std::string App::drills_dir(bool create) {
+    std::string games_dir = exe_dir() + "my_games";
+    auto is_dir = [](const std::string& p) {
+        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
+        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+    };
+    if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
+    if (!is_dir(games_dir)) games_dir = exe_dir();
+    std::string player_dir = Catalog::join_path(games_dir, my_username_.empty() ? "You" : my_username_);
+    std::string dir        = Catalog::join_path(player_dir, "drills");
+    if (create) {
+        CreateDirectoryW(Catalog::utf8_to_wide(games_dir).c_str(), nullptr);
+        CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
+        CreateDirectoryW(Catalog::utf8_to_wide(dir).c_str(), nullptr);
+    }
+    return dir;
+}
+
+// Validate the drill subtree below `n`: strictly alternating colors, no passes,
+// bounded depth; notes whether any node is marked as a correct ending.
+static bool drill_validate(const AnalysisNode* n, int expect_color,
+                           bool& any_correct, int depth) {
+    if (depth > DRILL_MAX_DEPTH) return false;
+    for (const auto& ch : n->children) {
+        if (ch->move_col < 0 || ch->move_row < 0) return false;   // pass node
+        if (ch->move_color != expect_color)       return false;   // non-alternating
+        if (ch->drill_correct) any_correct = true;
+        if (!drill_validate(ch.get(), 1 - expect_color, any_correct, depth + 1))
+            return false;
+    }
+    return true;
+}
+
+// Emit the subtree below `n`: a single child chains inline (;B[..];W[..]),
+// multiple children each get their own (...) variation.
+static void drill_write(FILE* f, const AnalysisNode* n) {
+    const AnalysisNode* cur = n;
+    while (true) {
+        if (cur->children.empty()) return;
+        if (cur->children.size() == 1) {
+            const AnalysisNode* ch = cur->children[0].get();
+            fprintf(f, ";%c[%c%c]", ch->move_color == 1 ? 'B' : 'W',
+                    char('a' + ch->move_col), char('a' + ch->move_row));
+            if (ch->drill_correct) fprintf(f, "C[RIGHT]");
+            for (const auto& lb : ch->labels)
+                fprintf(f, "LB[%c%c:%c]", char('a' + lb.f), char('a' + lb.r), lb.ch);
+            cur = ch;   // chain without recursing
+        } else {
+            for (const auto& chp : cur->children) {
+                const AnalysisNode* ch = chp.get();
+                fprintf(f, "(;%c[%c%c]", ch->move_color == 1 ? 'B' : 'W',
+                        char('a' + ch->move_col), char('a' + ch->move_row));
+                if (ch->drill_correct) fprintf(f, "C[RIGHT]");
+                for (const auto& lb : ch->labels)
+                    fprintf(f, "LB[%c%c:%c]", char('a' + lb.f), char('a' + lb.r), lb.ch);
+                drill_write(f, ch);
+                fprintf(f, ")");
+            }
+            return;
+        }
+    }
+}
+
+bool App::save_drill(const std::string& path) {
+    if (!analysis_cur_ || analysis_cur_->children.empty()) {
+        flash_       = "NOTHING TO SAVE — PLAY OUT SOME LINES FIRST";
+        flash_until_ = SDL_GetTicks() + 2500;
+        return false;
+    }
+    const GameState& root = analysis_cur_->board;   // reference — GameState is huge
+    bool any_correct = false;
+    int  first_color = (root.turn_is_black == 1) ? 1 : 0;
+    if (!drill_validate(analysis_cur_, first_color, any_correct, 0)) {
+        flash_       = "DRILL MUST ALTERNATE COLORS, NO PASSES";
+        flash_until_ = SDL_GetTicks() + 2500;
+        return false;
+    }
+    if (!any_correct) {
+        flash_       = "MARK A CORRECT ENDING FIRST";
+        flash_until_ = SDL_GetTicks() + 2500;
+        return false;
+    }
+
+    FILE* f = Catalog::fopen_utf8(path, "w");
+    if (!f) {
+        flash_       = "COULDN'T WRITE DRILL FILE";
+        flash_until_ = SDL_GetTicks() + 2500;
+        return false;
+    }
+    int n = root.board_size;
+    fprintf(f, "(;GM[1]FF[4]CA[UTF-8]SZ[%d]", n);
+    for (int color = 1; color >= 0; color--) {  // black setup stones first, then white
+        bool any = false;
+        for (int r = 0; r < n && !any; r++)
+            for (int c = 0; c < n; c++)
+                if (root.board[r][c] == (color ? 1 : 2)) { any = true; break; }
+        if (!any) continue;
+        fprintf(f, "%s", color ? "AB" : "AW");
+        for (int r = 0; r < n; r++)
+            for (int c = 0; c < n; c++)
+                if (root.board[r][c] == (color ? 1 : 2))
+                    fprintf(f, "[%c%c]", char('a' + c), char('a' + r));
+    }
+    fprintf(f, "PL[%s]", root.turn_is_black ? "B" : "W");
+    // GN = filename stem, for display in the drill list
+    std::string stem = path;
+    size_t slash = stem.find_last_of("/\\");
+    if (slash != std::string::npos) stem = stem.substr(slash + 1);
+    size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos) stem = stem.substr(0, dot);
+    fprintf(f, "GN[%s]", sgf_escape_text(stem).c_str());
+    time_t t = time(nullptr);
+    char date[16];
+    strftime(date, sizeof(date), "%Y-%m-%d", localtime(&t));
+    fprintf(f, "DT[%s]", date);
+    fprintf(f, "C[%s TO PLAY]", root.turn_is_black ? "BLACK" : "WHITE");
+    drill_write(f, analysis_cur_);
+    fprintf(f, ")\n");
+    fclose(f);
+    return true;
+}
+
+void App::save_drill_from_current() {
+    std::string path = drill_edit_path_;
+    if (path.empty()) {
+        time_t t = time(nullptr);
+        char stamp[32];
+        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", localtime(&t));
+        path = Catalog::join_path(drills_dir(true), std::string("drill-") + stamp + ".sgf");
+    }
+    if (save_drill(path)) {
+        drill_edit_path_ = path;
+        flash_       = "DRILL SAVED";
+        flash_until_ = SDL_GetTicks() + 2000;
+    }
+    draw();
+}
+
+// ── Drill SGF parser (variation-preserving) ─────────────────────────────────
+// A separate parser from load_sgf(), which deliberately flattens variations —
+// drills need the whole tree. Handles the subset our writer emits plus sane
+// hand edits: root setup props, nested (…) variations, ;B[xy]/;W[xy] chains,
+// C[RIGHT] correct marks, LB[] labels. Rejects passes, non-alternating
+// colors, and pathological nesting.
+
+// Read one "[...]" property value (assumes *p == '['), unescaping \] and \\.
+static const char* drill_read_value(const char* p, std::string& out) {
+    out.clear();
+    p++;  // '['
+    while (*p && *p != ']') {
+        if (*p == '\\') { p++; if (!*p) break; }
+        out += *p++;
+    }
+    return (*p == ']') ? p + 1 : p;
+}
+
+static void drill_trim(std::string& s) {
+    while (!s.empty() && isspace((unsigned char)s.back()))  s.pop_back();
+    size_t i = 0;
+    while (i < s.size() && isspace((unsigned char)s[i])) i++;
+    s.erase(0, i);
+}
+
+// Parse "Sequence {GameTree}" — everything between a consumed '(' and its ')'.
+// New move nodes chain onto *attach; sibling (…) subtrees attach to the current
+// chain end. expect_color = color the next move node must have (1=B, 0=W).
+static bool drill_parse_seq(const char*& p, PuzzleMoveNode* attach, int expect_color,
+                            int move_depth, int nest_depth, int bs, std::string& err) {
+    if (nest_depth > DRILL_MAX_DEPTH) { err = "TOO DEEPLY NESTED"; return false; }
+    bool seen_subtree = false;
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == ')') { p++; return true; }
+        if (*p == '(') {
+            p++;
+            seen_subtree = true;
+            if (!drill_parse_seq(p, attach, expect_color, move_depth,
+                                 nest_depth + 1, bs, err))
+                return false;
+            continue;
+        }
+        if (*p == ';') {
+            if (seen_subtree) { err = "NODE AFTER VARIATION"; return false; }
+            p++;
+            // One node: a run of properties, each IDENT + one or more [values]
+            PuzzleMoveNode* made = nullptr;
+            while (*p) {
+                while (*p && isspace((unsigned char)*p)) p++;
+                if (!isupper((unsigned char)*p)) break;   // node/tree boundary
+                std::string ident;
+                while (isalpha((unsigned char)*p)) ident += *p++;
+                while (*p && isspace((unsigned char)*p)) p++;
+                if (*p != '[') { err = "PROPERTY WITHOUT VALUE"; return false; }
+                // Collect all values of this property
+                std::vector<std::string> vals;
+                while (*p == '[') {
+                    std::string v;
+                    p = drill_read_value(p, v);
+                    vals.push_back(std::move(v));
+                    while (*p && isspace((unsigned char)*p)) p++;
+                }
+                if (ident == "B" || ident == "W") {
+                    if (made) { err = "TWO MOVES IN ONE NODE"; return false; }
+                    int color = (ident == "B") ? 1 : 0;
+                    if (color != expect_color) { err = "NON-ALTERNATING DRILL TREE"; return false; }
+                    const std::string& v = vals[0];
+                    bool is_pass = v.empty() || (bs <= 19 && v == "tt");
+                    if (is_pass) { err = "PASSES NOT SUPPORTED"; return false; }
+                    if (v.size() != 2) { err = "BAD MOVE COORD"; return false; }
+                    int x = v[0] - 'a', y = v[1] - 'a';
+                    if (x < 0 || x >= bs || y < 0 || y >= bs) { err = "MOVE OFF BOARD"; return false; }
+                    if (move_depth + 1 > DRILL_MAX_DEPTH) { err = "DRILL TOO DEEP"; return false; }
+                    attach->branches.emplace_back();
+                    made = &attach->branches.back();
+                    made->x = x;
+                    made->y = y;
+                    attach = made;
+                    expect_color = 1 - expect_color;
+                    move_depth++;
+                } else if (ident == "C" && made) {
+                    std::string c = vals[0];
+                    drill_trim(c);
+                    if (c == "RIGHT") made->correct = true;
+                    else              made->text    = vals[0];
+                } else if (ident == "LB" && made) {
+                    for (const auto& v : vals) {
+                        // "xy:C"
+                        if (v.size() >= 4 && v[2] == ':') {
+                            int x = v[0] - 'a', y = v[1] - 'a';
+                            if (x >= 0 && x < bs && y >= 0 && y < bs)
+                                made->marks.push_back({x, y, v[3]});
+                        }
+                    }
+                }
+                // all other properties: values already consumed, ignore
+            }
+            continue;
+        }
+        // Unexpected character — malformed
+        err = "MALFORMED DRILL SGF";
+        return false;
+    }
+    err = "UNTERMINATED DRILL SGF";
+    return false;
+}
+
+// Load a drill SGF into a synthesized local OgsPuzzle (id=0 — never persisted
+// as an OGS solve). Returns false with no partial state on any parse error.
+static bool load_drill_sgf(const std::string& path, OgsPuzzle& out_pz, std::string& err) {
+    FILE* fp = Catalog::fopen_utf8(path, "rb");
+    if (!fp) { err = "CAN'T OPEN"; return false; }
+    fseek(fp, 0, SEEK_END);
+    long fsz = ftell(fp);
+    rewind(fp);
+    if (fsz <= 0 || fsz > 8 * 1024 * 1024) { fclose(fp); err = "BAD FILE SIZE"; return false; }
+    std::vector<char> buf((size_t)fsz + 1);
+    size_t nread = fread(buf.data(), 1, (size_t)fsz, fp);
+    fclose(fp);
+    buf[nread] = '\0';
+
+    OgsPuzzle pz;   // build locally; assign to out_pz only on full success
+    const char* p = buf.data();
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != '(') { err = "NOT AN SGF"; return false; }
+    p++;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != ';') { err = "NO ROOT NODE"; return false; }
+    p++;
+
+    // Root node: setup properties
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!isupper((unsigned char)*p)) break;   // end of root properties
+        std::string ident;
+        while (isalpha((unsigned char)*p)) ident += *p++;
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p != '[') { err = "PROPERTY WITHOUT VALUE"; return false; }
+        std::vector<std::string> vals;
+        while (*p == '[') {
+            std::string v;
+            p = drill_read_value(p, v);
+            vals.push_back(std::move(v));
+            while (*p && isspace((unsigned char)*p)) p++;
+        }
+        if (ident == "SZ") {
+            int sz = atoi(vals[0].c_str());
+            pz.width = pz.height = sz;
+        } else if (ident == "AB" || ident == "AW") {
+            std::string& dst = (ident == "AB") ? pz.initial_black : pz.initial_white;
+            for (const auto& v : vals)
+                if (v.size() == 2) dst += v;
+        } else if (ident == "PL") {
+            pz.black_to_play = !vals[0].empty() && (vals[0][0] == 'B' || vals[0][0] == 'b' || vals[0][0] == '1');
+        } else if (ident == "GN") {
+            pz.name = vals[0];
+        } else if (ident == "C") {
+            pz.description = vals[0];
+        } else if (ident == "B" || ident == "W") {
+            err = "MOVE IN ROOT NODE";   // our format keeps the root move-free
+            return false;
+        }
+        // everything else (GM/FF/CA/DT/PB/PW/KM/...) ignored
+    }
+
+    if (pz.width != pz.height || pz.width < 2 || pz.width > MAX_BOARD_SIZE) {
+        err = "BAD BOARD SIZE";
+        return false;
+    }
+
+    // Variation tree: chained nodes + sibling subtrees until the closing ')'
+    int first_color = pz.black_to_play ? 1 : 0;
+    if (!drill_parse_seq(p, &pz.tree, first_color, 0, 0, pz.width, err))
+        return false;
+    if (pz.tree.branches.empty()) { err = "NO MOVES IN DRILL"; return false; }
+    pz.tree.correct = false;   // a C[RIGHT] on the root would insta-solve
+
+    pz.id              = 0;      // local — disables solved-persistence
+    pz.opponent_auto   = true;
+    pz.type            = "life_and_death";
+    pz.rank            = 0;
+    pz.collection_id   = 0;
+    pz.collection_name = "MY DRILLS";
+    if (pz.name.empty()) {
+        std::string stem = path;
+        size_t slash = stem.find_last_of("/\\");
+        if (slash != std::string::npos) stem = stem.substr(slash + 1);
+        size_t dot = stem.find_last_of('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+        pz.name = stem;
+    }
+    if (pz.description.empty())
+        pz.description = pz.black_to_play ? "BLACK TO PLAY" : "WHITE TO PLAY";
+
+    out_pz = std::move(pz);
+    return true;
+}
+
+// Apply a random rotation/reflection (one of the 8 board symmetries) to a
+// loaded drill — setup stones, every tree move, and author marks together —
+// so a shape isn't only ever learned in the corner it was authored in.
+// The board cursor (cur_f/cur_r, may be null) rides along through the same
+// map, so the player's hand stays on the shape instead of chasing it.
+// Exact integer maps; composing another one on a later retry is still a
+// symmetry, so repeated in-place application never drifts.
+static void drill_random_transform(OgsPuzzle& pz, int* cur_f, int* cur_r) {
+    int op = rand() % 8;
+    if (op == 0) return;   // identity
+    int n = pz.width;
+    auto tf = [op, n](int& x, int& y) {
+        int ox = x, oy = y;
+        switch (op) {
+        case 1: x = n - 1 - ox; y = oy;          break;  // mirror horizontally
+        case 2: x = ox;         y = n - 1 - oy;  break;  // mirror vertically
+        case 3: x = n - 1 - ox; y = n - 1 - oy;  break;  // rotate 180
+        case 4: x = oy;         y = ox;          break;  // transpose
+        case 5: x = oy;         y = n - 1 - ox;  break;  // rotate 90
+        case 6: x = n - 1 - oy; y = ox;          break;  // rotate 270
+        case 7: x = n - 1 - oy; y = n - 1 - ox;  break;  // anti-transpose
+        }
+    };
+    auto tf_coords = [&](std::string& s) {
+        for (size_t i = 0; i + 1 < s.size(); i += 2) {
+            int x = s[i] - 'a', y = s[i + 1] - 'a';
+            if (x < 0 || x >= n || y < 0 || y >= n) continue;
+            tf(x, y);
+            s[i]     = char('a' + x);
+            s[i + 1] = char('a' + y);
+        }
+    };
+    tf_coords(pz.initial_black);
+    tf_coords(pz.initial_white);
+    std::function<void(PuzzleMoveNode&)> rec = [&](PuzzleMoveNode& nd) {
+        if (nd.x >= 0 && nd.y >= 0) tf(nd.x, nd.y);
+        for (auto& m : nd.marks)
+            if (m.x >= 0 && m.y >= 0) tf(m.x, m.y);
+        for (auto& b : nd.branches) rec(b);
+    };
+    rec(pz.tree);
+    if (cur_f && cur_r &&
+        *cur_f >= 0 && *cur_f < n && *cur_r >= 0 && *cur_r < n)
+        tf(*cur_f, *cur_r);
 }
 
 // ── Auto-detected study puzzles ──────────────────────────────────────────────
@@ -3288,6 +3880,242 @@ void App::pz_rebuild_display() {
     for (const auto& c : pz_collections_)
         if (!pinned_ids.count(c.id))
             pz_display_cols_.push_back(c);
+
+    // Local life-and-death drills, pinned at the very top (id = -1 sentinel,
+    // routed to open_drill_list() instead of a network fetch). Only shown when
+    // at least one drill file exists.
+    std::vector<std::string> drill_files;
+    if (Catalog::list_sgf_files(drills_dir(false), drill_files) && !drill_files.empty()) {
+        OgsPuzzleCollection dc;
+        dc.id           = -1;
+        dc.name         = "[MY DRILLS]";
+        dc.owner        = my_username_.empty() ? "You" : my_username_;
+        dc.puzzle_count = (int)drill_files.size();
+        pz_display_cols_.insert(pz_display_cols_.begin(), dc);
+    }
+}
+
+// Enter the drill list: the puzzle browser's PUZZLES view backed by local
+// files instead of a fetched collection.
+void App::open_drill_list() {
+    std::string dir = drills_dir(false);
+    std::vector<std::string> files;
+    Catalog::list_sgf_files(dir, files);
+    if (files.empty()) {
+        flash_       = "NO DRILLS YET — SAVE ONE FROM ANALYSIS";
+        flash_until_ = SDL_GetTicks() + 2500;
+        draw();
+        return;
+    }
+    std::sort(files.begin(), files.end(),
+              [](const std::string& a, const std::string& b) {
+                  return _stricmp(a.c_str(), b.c_str()) < 0;
+              });
+    drill_paths_.clear();
+    pz_list_.clear();
+    for (int i = 0; i < (int)files.size(); i++) {
+        drill_paths_.push_back(Catalog::join_path(dir, files[i]));
+        std::string stem = files[i];
+        size_t dot = stem.find_last_of('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+        pz_list_.push_back({-(i + 1), stem});
+    }
+    drill_browse_    = true;
+    pz_view_         = PzView::PUZZLES;
+    pz_list_title_   = "MY DRILLS";
+    pz_index_        = 0;
+    pz_open_col_id_  = 0;
+    drill_thumb_idx_ = -1;   // file list may have changed — recompute the preview
+    draw();
+}
+
+// Load drill_paths_[idx] into pz_ and start it — the local (no network)
+// counterpart of pz_launch_fetch(2, id).
+void App::drill_load_and_start(int idx) {
+    if (idx < 0 || idx >= (int)drill_paths_.size()) return;
+    std::string err;
+    if (!load_drill_sgf(drill_paths_[idx], pz_, err)) {
+        flash_       = "BAD DRILL FILE: " + err;
+        flash_until_ = SDL_GetTicks() + 2500;
+        draw();
+        return;
+    }
+    pz_visits_.clear();
+    pz_more_lines_   = false;
+    pz_list_pos_     = idx;
+    drill_play_path_ = drill_paths_[idx];
+    pz_start();
+}
+
+// Commit the keyboard-entered new name for the selected drill file.
+void App::drill_commit_rename() {
+    drill_rename_active_ = false;
+    std::string name = sgf_sanitize(drill_rename_buf_);
+    drill_rename_buf_.clear();
+    if (pz_index_ < 0 || pz_index_ >= (int)drill_paths_.size()) { draw(); return; }
+    if (name.empty()) {
+        flash_       = "INVALID NAME";
+        flash_until_ = SDL_GetTicks() + 2000;
+        draw();
+        return;
+    }
+    std::string old_path = drill_paths_[pz_index_];
+    std::string new_path = Catalog::join_path(drills_dir(false), name + ".sgf");
+    if (new_path == old_path) { draw(); return; }
+    if (GetFileAttributesW(Catalog::utf8_to_wide(new_path).c_str()) != INVALID_FILE_ATTRIBUTES) {
+        flash_       = "NAME ALREADY TAKEN";
+        flash_until_ = SDL_GetTicks() + 2000;
+        draw();
+        return;
+    }
+    if (_wrename(Catalog::utf8_to_wide(old_path).c_str(),
+                 Catalog::utf8_to_wide(new_path).c_str()) != 0) {
+        flash_       = "RENAME FAILED";
+        flash_until_ = SDL_GetTicks() + 2000;
+        draw();
+        return;
+    }
+    if (drill_play_path_ == old_path) drill_play_path_ = new_path;
+    open_drill_list();   // re-list; park the cursor back on the renamed file
+    for (int i = 0; i < (int)drill_paths_.size(); i++)
+        if (drill_paths_[i] == new_path) { pz_index_ = i; break; }
+    flash_       = "RENAMED";
+    flash_until_ = SDL_GetTicks() + 1500;
+    draw();
+}
+
+// Delete the selected drill file (reached via the popup's confirmed item).
+void App::drill_delete_selected() {
+    if (pz_index_ < 0 || pz_index_ >= (int)drill_paths_.size()) return;
+    std::string path = drill_paths_[pz_index_];
+    if (_wremove(Catalog::utf8_to_wide(path).c_str()) != 0) {
+        flash_       = "DELETE FAILED";
+        flash_until_ = SDL_GetTicks() + 2000;
+        draw();
+        return;
+    }
+    if (drill_play_path_ == path) drill_play_path_.clear();
+    flash_       = "DRILL DELETED";
+    flash_until_ = SDL_GetTicks() + 1500;
+    int old_index = pz_index_;
+    std::vector<std::string> remaining;
+    Catalog::list_sgf_files(drills_dir(false), remaining);
+    if (remaining.empty()) {
+        // Last drill gone — the [MY DRILLS] collection itself disappears
+        drill_browse_ = false;
+        drill_paths_.clear();
+        pz_view_  = PzView::COLLECTIONS;
+        pz_index_ = 0;
+        pz_rebuild_display();
+        draw();
+        return;
+    }
+    open_drill_list();
+    pz_index_ = std::min(old_index, (int)drill_paths_.size() - 1);
+    draw();
+}
+
+// Reopen the drill being played as an editable analysis tree: the drill's
+// setup becomes the analysis root, its variation tree becomes AnalysisNode
+// children (correct-marks and labels intact), and SAVE overwrites the file.
+void App::drill_edit_current() {
+    if (drill_play_path_.empty()) return;
+    // Reload from disk: the in-memory pz_ may carry a random drill orientation
+    // (see pz_start) — editing must happen in the file's authored orientation
+    // or every save would rewrite the drill rotated.
+    std::string reload_err;
+    if (!load_drill_sgf(drill_play_path_, pz_, reload_err)) {
+        flash_       = "CAN'T RELOAD DRILL: " + reload_err;
+        flash_until_ = SDL_GetTicks() + 2500;
+        draw();
+        return;
+    }
+
+    // Rebuild game_ at the drill's root, same steps as pz_start()
+    game_.history.clear();
+    game_.history_pos = -1;
+    game_.board_size  = pz_.width;
+    game_.board.reset();
+    game_.board.board_size    = pz_.width;
+    game_.board.turn_is_black = pz_.black_to_play ? 1 : 0;
+    game_.black_name = "BLACK";
+    game_.white_name = "WHITE";
+    game_.black_rank = game_.white_rank = "";
+    game_.result.clear();
+    game_.my_color   = -1;   // analysis — no "my side", no study-puzzle detection
+    game_.game_id    = 0;
+    game_.black_secs = game_.white_secs = -1;
+    game_.cursor_r = std::max(0, std::min(pz_.width - 1, game_.cursor_r));
+    game_.cursor_f = std::max(0, std::min(pz_.width - 1, game_.cursor_f));
+    auto apply_stones = [&](const std::string& coords, char stone) {
+        for (size_t i = 0; i + 1 < coords.size(); i += 2) {
+            int f = coords[i]     - 'a';
+            int r = coords[i + 1] - 'a';
+            if (r >= 0 && r < pz_.width && f >= 0 && f < pz_.width)
+                game_.board.board[r][f] = stone;
+        }
+    };
+    apply_stones(pz_.initial_black, 1);
+    apply_stones(pz_.initial_white, 2);
+    game_.board.save_snapshot();
+    game_.history.push_back(game_.board);
+    last_move_r_ = last_move_f_ = -1;
+
+    black_label_ = game_.black_name;
+    white_label_ = game_.white_name;
+    review_komi_ = 7.5f;
+    move_scores_.assign(1, FLT_MAX);
+    move_marked_.assign(1, false);
+    marked_paths_.assign(1, "");
+    puzzle_eval_.clear();
+    puzzle_saved_.clear();
+    bg_analysis_next_  = 0;
+    bg_analysis_depth_ = -1;
+    bg_analysis_busy_  = false;
+    companion_path_.clear();
+    review_path_.clear();
+    is_local_game_ = false;
+
+    // Root from the 1-entry history (also clears drill_edit_path_ — reset below)
+    build_analysis_tree();
+
+    // Convert the puzzle tree into analysis children. Every node is heap-owned
+    // (unique_ptr chain) and boards are copied member-to-member inside those
+    // heap blocks — no GameState ever touches the stack (see the CRITICAL
+    // FOOTGUN note: sizeof(GameState) is ~12MB).
+    std::function<void(const PuzzleMoveNode&, AnalysisNode*, int)> conv =
+        [&](const PuzzleMoveNode& src, AnalysisNode* parent, int color) {
+            for (const auto& b : src.branches) {
+                if (b.x < 0 || b.y < 0) continue;
+                auto ch = std::make_unique<AnalysisNode>();
+                ch->board = parent->board;
+                if (!ch->board.place_stone(b.y, b.x, color)) continue;  // illegal in file — drop
+                ch->board.turn_is_black = color ? 0 : 1;
+                ch->move_col      = b.x;
+                ch->move_row      = b.y;
+                ch->move_color    = color;
+                ch->depth         = parent->depth + 1;
+                ch->parent        = parent;
+                ch->is_main_line  = false;
+                ch->drill_correct = b.correct;
+                for (const auto& m : b.marks)
+                    ch->labels.push_back({m.y, m.x, m.ch});
+                parent->children.push_back(std::move(ch));
+                conv(b, parent->children.back().get(), 1 - color);
+            }
+        };
+    conv(pz_.tree, analysis_root_.get(), pz_.black_to_play ? 1 : 0);
+
+    analysis_cur_ = analysis_root_.get();
+    build_analysis_tree_render();
+    drill_edit_path_ = drill_play_path_;   // SAVE becomes OVERWRITE DRILL
+
+    state_ = AppState::GAME_OVER;
+    kata_suggestion_count_ = 0;
+    kata_score_lead_       = FLT_MAX;
+    kata_analysis_enabled_ = false;
+    set_status("EDITING DRILL — SAVE VIA OPTIONS MENU");
+    draw();
 }
 
 // ── Joseki explorer ───────────────────────────────────────────────────────────
@@ -3526,6 +4354,7 @@ void App::open_puzzle_browser() {
     state_    = AppState::PUZZLE_BROWSE;
     pz_view_  = PzView::COLLECTIONS;
     pz_index_ = 0;
+    drill_browse_ = false;   // always land on the collections view, drills re-entered from there
     pz_rebuild_display();   // pinned sets show immediately, even before any fetch
     if (pz_collections_.empty())
         pz_launch_fetch(1, pz_col_page_);   // first visit — load page 1
@@ -3579,6 +4408,7 @@ void App::poll_puzzle_fetch() {
     case 2:
         pz_ = std::move(res->puzzle);
         pz_visits_.clear();   // fresh puzzle — line coverage starts over
+        drill_play_path_.clear();   // a network puzzle displaced any local drill
         pz_list_pos_ = -1;
         for (int i = 0; i < (int)pz_list_.size(); i++)
             if (pz_list_[i].first == pz_.id) { pz_list_pos_ = i; break; }
@@ -3615,6 +4445,13 @@ void App::pz_start() {
         draw();
         return;
     }
+    // Local drills get a fresh random orientation on every attempt (including
+    // circle-retry) so the shape is learned, not its screen position. Tree
+    // pointers are untouched — pz_visits_ line coverage survives the reshuffle.
+    // The cursor is mapped along with the stones so it stays on the shape.
+    // (EDIT DRILL reloads from disk, so saves stay in authored orientation.)
+    if (!drill_play_path_.empty())
+        drill_random_transform(pz_, &game_.cursor_f, &game_.cursor_r);
     game_.history.clear();
     game_.history_pos = -1;
     game_.board_size  = pz_.width;
@@ -3645,11 +4482,13 @@ void App::pz_start() {
     game_.history.push_back(game_.board);
     last_move_r_ = last_move_f_ = -1;
 
-    pz_node_       = &pz_.tree;
-    pz_done_       = false;
-    pz_solved_     = false;
-    pz_explore_    = false;
-    pz_more_lines_ = false;
+    pz_node_            = &pz_.tree;
+    pz_done_            = false;
+    pz_solved_          = false;
+    pz_explore_         = false;
+    pz_explore_anchor_  = 0;
+    pz_more_lines_      = false;
+    pz_pending_reply_   = nullptr;
     pz_refresh_marks();       // root-node marks annotate the initial position
     pz_build_tree_render();   // solution tree in the left panel
     pz_banner_.clear();
@@ -3694,10 +4533,35 @@ void App::pz_build_tree_render() {
     dfs(&pz_.tree, 0, 0, 0, -1);
 }
 
+static constexpr int PZ_OPPONENT_REPLY_DELAY_MS = 500;
+
 // Land on a solution-tree node (just reached by whoever moved), judge it, and
 // let the automatic opponent respond when the line continues.
+// Does this subtree contain a correct ending at all? Wrong lines and judged
+// dead-ends exist to punish mistakes — they shouldn't be required viewing for
+// coverage, and the opponent shouldn't steer toward them.
+static bool pz_leads_to_correct(const PuzzleMoveNode* n) {
+    if (n->correct) return true;
+    for (const auto& b : n->branches)
+        if (pz_leads_to_correct(&b)) return true;
+    return false;
+}
+
+// True if a never-traversed node lies on some path to a correct ending within
+// this subtree — drives both the opponent's steer-toward-unseen-lines choice
+// and the "MORE LINES REMAIN" / "ALL LINES SEEN" verdict after a solve.
+bool App::pz_subtree_unexplored(const PuzzleMoveNode* n) const {
+    if (!pz_leads_to_correct(n)) return false;
+    auto it = pz_visits_.find(n);
+    if (it == pz_visits_.end() || it->second == 0) return true;
+    for (const auto& b : n->branches)
+        if (pz_subtree_unexplored(&b)) return true;
+    return false;
+}
+
 void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
     pz_node_ = node;
+    pz_visits_[node]++;   // every traversed node counts toward line coverage
     if (!node->text.empty()) pz_comment_ = node->text;
     if (!node->marks.empty()) pz_refresh_marks();   // new annotations replace the old
     pz_build_tree_render();                          // move the tree-panel highlight
@@ -3714,9 +4578,16 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
             if (remap) pz_solved_col_[pz_.id] = pz_.collection_id;
             if (fresh || remap) save_solved_puzzles();
         }
+        // Whole-tree truth, not just this run's path: anything anywhere in the
+        // authored tree never yet traversed (opponent resistance you haven't
+        // faced, or your own alternative lines you haven't tried) keeps the
+        // "more lines" nudge alive.
+        pz_more_lines_ = false;
+        for (const auto& b : pz_.tree.branches)
+            if (pz_subtree_unexplored(&b)) { pz_more_lines_ = true; break; }
         set_status(pz_more_lines_
-                       ? GLYPH_PS_CIRCLE ": MORE RESISTANCE LINES REMAIN"
-                       : "R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST");
+                       ? "MORE LINES REMAIN — " GLYPH_PS_CIRCLE ": RETRY"
+                       : "ALL LINES SEEN   R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST");
         draw();
         return;
     }
@@ -3729,46 +4600,91 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
         return;
     }
     if (opponent_follows && pz_.opponent_auto) {
-        // Opponent resists along the LEAST-VISITED authored branch — replaying the
-        // puzzle sweeps every variation in order until the whole tree is covered.
+        // Opponent resistance choice. First preference: a reply whose subtree
+        // still contains something never traversed — raw least-visited counts
+        // alone can ping-pong between an already-exhausted shallow branch and
+        // a deep bushy one, re-treading known lines while unseen ones wait.
+        // Only when everything below this node has been seen does it fall back
+        // to least-visited for variety.
         const PuzzleMoveNode* reply = nullptr;
         int fewest = INT_MAX;
         for (const auto& b : node->branches) {
-            int v = pz_visits_[&b];   // default-constructs 0 for unseen branches
+            if (!pz_subtree_unexplored(&b)) continue;
+            auto it = pz_visits_.find(&b);
+            int v = (it == pz_visits_.end()) ? 0 : it->second;
             if (v < fewest) { fewest = v; reply = &b; }
         }
-        for (const auto& b : node->branches)
-            if (&b != reply && pz_visits_[&b] == 0) { pz_more_lines_ = true; break; }
-        pz_visits_[reply]++;
-
-        if (reply->x >= 0 && reply->y >= 0 &&
-            reply->y < game_.board_size && reply->x < game_.board_size &&
-            game_.board.board[reply->y][reply->x] == 0) {
-            int opp_black = (game_.board.turn_is_black == 1);
-            game_.board.save_snapshot();
-            // Only mutate turn/history if the placement actually happened —
-            // a refused move must never flip whose turn it is
-            if (game_.board.place_stone(reply->y, reply->x, opp_black)) {
-                game_.board.turn_is_black = opp_black ? 0 : 1;
-                game_.history.push_back(game_.board);
-                last_move_r_ = reply->y;
-                last_move_f_ = reply->x;
+        if (!reply) {
+            for (const auto& b : node->branches) {
+                auto it = pz_visits_.find(&b);
+                int v = (it == pz_visits_.end()) ? 0 : it->second;
+                if (v < fewest) { fewest = v; reply = &b; }
             }
         }
-        pz_advance(reply, false);
+
+        // Delay placing it slightly so the player's own move is visible on
+        // its own for a beat, instead of both stones landing in the same
+        // frame — fired from the main loop tick via pz_fire_pending_reply().
+        pz_pending_reply_ = reply;
+        pz_reply_at_      = SDL_GetTicks() + PZ_OPPONENT_REPLY_DELAY_MS;
+        draw();
         return;
     }
     set_status("YOUR MOVE");
     draw();
 }
 
+// Apply the opponent's chosen reply once the visibility delay has elapsed,
+// then keep judging from there (it may itself be solved/wrong/branch again).
+void App::pz_fire_pending_reply() {
+    const PuzzleMoveNode* reply = pz_pending_reply_;
+    pz_pending_reply_ = nullptr;
+    if (!reply) return;
+
+    if (reply->x >= 0 && reply->y >= 0 &&
+        reply->y < game_.board_size && reply->x < game_.board_size &&
+        game_.board.board[reply->y][reply->x] == 0) {
+        int opp_black = (game_.board.turn_is_black == 1);
+        game_.board.save_snapshot();
+        // Only mutate turn/history if the placement actually happened —
+        // a refused move must never flip whose turn it is
+        if (game_.board.place_stone(reply->y, reply->x, opp_black)) {
+            game_.board.turn_is_black = opp_black ? 0 : 1;
+            game_.history.push_back(game_.board);
+            last_move_r_ = reply->y;
+            last_move_f_ = reply->x;
+        }
+    }
+    pz_advance(reply, false);
+}
+
 // Player plays at (r, f): match against the current node's branches — or, once
-// off the authored tree (or after a verdict), free exploration: stones alternate
-// colors with no judging and no auto-opponent, so lines the author didn't cover
-// can be tested by playing both sides. Circle restarts the judged attempt.
+// exploring (triangle, off the authored tree, or after a verdict), free
+// exploration: stones alternate colors with no judging and no auto-opponent, so
+// lines the author didn't cover can be tested by playing both sides. Triggers
+// review the moves made so far; circle returns to the judged position explore
+// mode branched off from (or retries the whole puzzle if not exploring).
 void App::pz_place(int r, int f) {
     if (!pz_node_) return;
+    if (pz_pending_reply_) return;  // opponent's reply is mid-delay — not your turn yet
     if (r < 0 || f < 0 || r >= game_.board_size || f >= game_.board_size) return;
+
+    if (game_.history_pos >= 0) {
+        // Placing from a reviewed (non-live) position discards whatever came
+        // after, same as a normal undo-then-move — only ever reachable while
+        // already exploring (triggers are gated on pz_explore_), so pz_node_
+        // (frozen since exploration began) never needs to move here. If this
+        // rewinds past the explore anchor (scrubbed back into the judged
+        // prefix, then branched), pull the anchor in too — it must never sit
+        // beyond the live history length, or "back to solving" would try to
+        // GROW game_.history, default-constructing GameState elements (each
+        // ~12MB — see the CRITICAL FOOTGUN note on why that's dangerous).
+        game_.history.resize(game_.history_pos + 1);
+        game_.board         = game_.history.back();
+        game_.history_pos   = -1;
+        pz_explore_anchor_  = std::min(pz_explore_anchor_, (int)game_.history.size());
+    }
+
     if (game_.board.board[r][f] != 0) return;
 
     int is_black = (game_.board.turn_is_black == 1);
@@ -3808,10 +4724,11 @@ void App::pz_place(int r, int f) {
     if (pz_explore_ || pz_done_) {
         // Already exploring (or continuing past a verdict) — sandbox move
         if (!pz_explore_) {
+            pz_explore_anchor_ = (int)game_.history.size() - 1;  // the verdict position
             pz_explore_ = true;
             pz_banner_.clear();   // drop the SOLVED!/WRONG banner once exploring
         }
-        set_status("EXPLORING — " GLYPH_PS_CIRCLE " RESTARTS PUZZLE");
+        set_status("EXPLORING — " GLYPH_PS_CIRCLE " BACK TO SOLVING\nTRIGGERS: REVIEW");
         draw();
         return;
     }
@@ -3823,13 +4740,58 @@ void App::pz_place(int r, int f) {
     if (!hit) {
         // Off the authored tree: not judged, just warned — free exploration from
         // here on (both sides played manually; there is no authored reply anyway).
+        pz_explore_anchor_ = (int)game_.history.size() - 1;  // undo this off-tree move
         pz_explore_ = true;
         pz_comment_ = "OFF THE SOLUTION TREE — FREE PLAY, BOTH SIDES";
-        set_status("OFF TREE — " GLYPH_PS_CIRCLE " RESTARTS PUZZLE");
+        set_status("OFF TREE — " GLYPH_PS_CIRCLE " BACK TO SOLVING\nTRIGGERS: REVIEW");
         draw();
         return;
     }
     pz_advance(hit, /*opponent_follows=*/true);
+}
+
+// Triangle: drop into the free sandbox right where you stand, without playing
+// a move first. Only meaningful pre-verdict — once pz_done_, any placement
+// already falls into the same sandbox (see pz_place).
+void App::pz_enter_explore() {
+    if (pz_explore_ || pz_done_ || pz_pending_reply_) return;
+    pz_explore_anchor_ = (int)game_.history.size();
+    pz_explore_ = true;
+    pz_banner_.clear();
+    pz_comment_ = "FREE PLAY — BOTH SIDES";
+    set_status("EXPLORING — " GLYPH_PS_CIRCLE " BACK TO SOLVING\nTRIGGERS: REVIEW");
+    draw();
+}
+
+// Circle, mid-exploration: discard the sandbox detour and resume at the judged
+// position explore mode branched off from. pz_node_ never moves while
+// pz_explore_ is set, so it's already sitting at the right spot — this just
+// rewinds the board/history to match and restores the verdict banner, if any.
+void App::pz_return_to_solving() {
+    pz_pending_reply_ = nullptr;  // defensive — unreachable in practice, see pz_place()/pz_enter_explore() guards
+    // Defense in depth: this resize must only ever shrink. pz_place() keeps the
+    // anchor clamped to <= history size already, but a stale/out-of-range anchor
+    // here would otherwise GROW game_.history, default-constructing GameState
+    // elements (~12MB each — see the CRITICAL FOOTGUN note on why that's unsafe).
+    int target = std::min((int)game_.history.size(), std::max(1, pz_explore_anchor_));
+    game_.history.resize(target);
+    game_.board       = game_.history.back();
+    game_.history_pos = -1;
+    pz_explore_        = false;
+    pz_build_tree_render();
+    if (pz_done_) {
+        pz_banner_ = pz_solved_ ? "SOLVED!" : "WRONG";
+        set_status(pz_solved_
+            ? (pz_more_lines_ ? GLYPH_PS_CIRCLE ": MORE RESISTANCE LINES REMAIN"
+                               : "R3: NEXT   " GLYPH_PS_CIRCLE ": RETRY   " GLYPH_PS_SQUARE ": LIST")
+            : "PRESS " GLYPH_PS_CIRCLE " TO RETRY");
+    } else {
+        pz_banner_.clear();
+        pz_comment_ = (pz_node_ && !pz_node_->text.empty()) ? pz_node_->text : pz_.description;
+        std::string rank = (pz_.rank > 0) ? "  (" + ogs_rank_str(pz_.rank) + ")" : "";
+        set_status("YOU ARE " + std::string(pz_.black_to_play ? "BLACK" : "WHITE") + rank);
+    }
+    draw();
 }
 
 // L3/R3: previous/next puzzle within the open collection.
@@ -3837,6 +4799,10 @@ void App::pz_step(int dir) {
     if (pz_list_.empty() || pz_list_pos_ < 0 || pz_loading_) return;
     int n    = (int)pz_list_.size();
     int next = (pz_list_pos_ + dir + n) % n;
+    if (drill_browse_ && !drill_paths_.empty()) {
+        drill_load_and_start(next);   // local files — no network fetch
+        return;
+    }
     pz_launch_fetch(2, pz_list_[next].first);
 }
 
@@ -3874,6 +4840,39 @@ void App::draw_puzzle_browser() {
                                                                             : PZ_NO_COLOR);
         }
         footer = GLYPH_PS_CROSS " OPEN   LEFT/RIGHT: PAGE   " GLYPH_PS_CIRCLE " LOBBY";
+    } else if (drill_browse_) {
+        // Local drills: no solved tracking (ids are negative sentinels)
+        title = "MY DRILLS  (" + std::to_string((int)pz_list_.size()) + ")";
+        for (const auto& p : pz_list_) {
+            lines.push_back(p.second);
+            colors.push_back(PZ_NO_COLOR);
+        }
+        footer = drill_rename_active_
+                     ? "NEW NAME: " + drill_rename_buf_ + "_   ENTER=OK   ESC=CANCEL"
+                     : GLYPH_PS_CROSS " DRILL   " GLYPH_PS_CIRCLE " COLLECTIONS";
+        // Refresh the setup-position preview when the cursor moved to a new file
+        if (pz_index_ != drill_thumb_idx_) {
+            drill_thumb_idx_ = pz_index_;
+            drill_thumb_bs_  = 0;
+            if (pz_index_ >= 0 && pz_index_ < (int)drill_paths_.size()) {
+                OgsPuzzle tmp;
+                std::string err;
+                if (load_drill_sgf(drill_paths_[pz_index_], tmp, err) &&
+                    tmp.width <= BOARD_SIZE) {
+                    memset(drill_thumb_, 0, sizeof(drill_thumb_));
+                    auto apply = [&](const std::string& s, char stone) {
+                        for (size_t i = 0; i + 1 < s.size(); i += 2) {
+                            int f = s[i] - 'a', r = s[i + 1] - 'a';
+                            if (r >= 0 && r < tmp.width && f >= 0 && f < tmp.width)
+                                drill_thumb_[r][f] = stone;
+                        }
+                    };
+                    apply(tmp.initial_black, 1);
+                    apply(tmp.initial_white, 2);
+                    drill_thumb_bs_ = tmp.width;
+                }
+            }
+        }
     } else {
         int solved_here = 0;
         for (const auto& p : pz_list_)
@@ -3891,14 +4890,24 @@ void App::draw_puzzle_browser() {
         lines.push_back("LOADING...");
         colors.push_back(PZ_NO_COLOR);
     }
-    // The list screen presents itself unless the START popup needs to layer on top
+    // The list screen presents itself unless something needs to layer on top
+    // (the START popup, or the drill setup-position preview board).
+    bool want_thumb = drill_browse_ && pz_view_ == PzView::PUZZLES && drill_thumb_bs_ > 0;
+    bool self_present = !popup_active_ && !want_thumb;
     renderer_->draw_list_screen(title.c_str(), lines, pz_index_, footer.c_str(),
-                                !popup_active_, colors.data());
-    if (popup_active_) {
+                                self_present, colors.data());
+    if (want_thumb) {
+        int w = 0, h = 0;
+        SDL_GetRendererOutputSize(renderer_->sdl, &w, &h);
+        int size = std::min(w / 3, h / 2);
+        renderer_->render_mini_board(w - size - 40, (h - size) / 2, size,
+                                     drill_thumb_, drill_thumb_bs_);
+    }
+    if (popup_active_)
         renderer_->draw_popup_menu(popup_title_.c_str(), popup_labels_.data(),
                                    (int)popup_labels_.size(), popup_index_);
+    if (!self_present)
         SDL_RenderPresent(renderer_->sdl);
-    }
 }
 
 // Input for both puzzle states (called from handle_controller_button).
@@ -3932,7 +4941,13 @@ void App::handle_puzzle_button(Uint8 btn) {
             if (pz_loading_ || total == 0 || pz_index_ >= total) break;
             if (pz_view_ == PzView::COLLECTIONS) {
                 const auto& c = pz_display_cols_[pz_index_];
+                if (c.id == -1) {           // [MY DRILLS] — local, no fetch
+                    open_drill_list();
+                    break;
+                }
                 if (c.starting_puzzle_id > 0) {
+                    drill_browse_ = false;  // entering a real OGS collection
+                    drill_paths_.clear();
                     pz_list_title_  = c.name;
                     pz_open_col_id_ = c.id;   // for the solved-mapping backfill
                     // Remember this collection (metadata refresh included) so the
@@ -3941,6 +4956,8 @@ void App::handle_puzzle_button(Uint8 btn) {
                     save_known_collections();
                     pz_launch_fetch(3, c.starting_puzzle_id);
                 }
+            } else if (drill_browse_) {
+                drill_load_and_start(pz_index_);
             } else {
                 pz_launch_fetch(2, pz_list_[pz_index_].first);
             }
@@ -3950,9 +4967,11 @@ void App::handle_puzzle_button(Uint8 btn) {
             if (pz_view_ == PzView::PUZZLES) {
                 pz_view_  = PzView::COLLECTIONS;
                 pz_index_ = 0;
+                drill_browse_ = false;
                 pz_rebuild_display();   // solves made in this collection may pin it
                 draw();
             } else {
+                drill_browse_ = false;
                 state_ = AppState::LOBBY;
                 set_status("");
                 draw();
@@ -3981,13 +5000,17 @@ void App::handle_puzzle_button(Uint8 btn) {
         pz_place(game_.cursor_r, game_.cursor_f);
         break;
     case SDL_CONTROLLER_BUTTON_B:
-        pz_start();                       // retry from the top
+        if (pz_explore_) pz_return_to_solving();  // back to where exploring branched off
+        else             pz_start();              // retry from the top
         break;
     case SDL_CONTROLLER_BUTTON_X:
         state_    = AppState::PUZZLE_BROWSE;
         pz_view_  = pz_list_.empty() ? PzView::COLLECTIONS : PzView::PUZZLES;
         pz_index_ = std::max(0, pz_list_pos_);
         draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_Y:
+        pz_enter_explore();
         break;
     case SDL_CONTROLLER_BUTTON_LEFTSTICK:
         pz_step(-1);
@@ -4211,6 +5234,9 @@ void App::handle_net_msg(const NetMsg& msg) {
         game_.black_in_byo      = msg.black_in_byo;
         game_.white_in_byo      = msg.white_in_byo;
         game_.clock_tick        = SDL_GetTicks();
+        // Reconnect: the running player's countdown is genuinely mid-turn, but
+        // the parked player's stored value is their last turn's leftover.
+        reset_byo_countdowns(/*running_player_too=*/false);
         game_.cursor_r     = msg.board_size / 2;
         game_.cursor_f     = msg.board_size / 2;
         game_.board.reset();
@@ -4293,6 +5319,9 @@ void App::handle_net_msg(const NetMsg& msg) {
                 pass_confirm_  = false;
                 set_status("YOUR TURN");
             }
+            // A move was just played: both byo-yomi countdowns start a fresh
+            // period, whatever leftover the event's clock snapshot carried.
+            reset_byo_countdowns(/*running_player_too=*/true);
             draw();
         }
         break;
@@ -4311,6 +5340,9 @@ void App::handle_net_msg(const NetMsg& msg) {
             game_.white_period_secs = msg.white_period_secs;
             game_.white_in_byo      = msg.white_in_byo;
         }
+        // No move here — trust the running player's countdown (it's genuinely
+        // in progress), but the parked player's value is stale leftover.
+        reset_byo_countdowns(/*running_player_too=*/false);
         draw();
         break;
 
@@ -4515,8 +5547,10 @@ Renderer::DrawState App::make_ds() {
                  w_secs, w_periods, w_in_byo);
     }
 
-    // GAME_OVER is navigated through the analysis tree; PLAYING/STONE_REMOVAL use flat history.
-    bool in_history = (state_ == AppState::PLAYING || state_ == AppState::STONE_REMOVAL)
+    // GAME_OVER is navigated through the analysis tree; PLAYING/STONE_REMOVAL/
+    // PUZZLE_PLAY (while exploring) use flat history.
+    bool in_history = (state_ == AppState::PLAYING || state_ == AppState::STONE_REMOVAL ||
+                        state_ == AppState::PUZZLE_PLAY)
                       && (game_.history_pos >= 0 && !game_.history.empty());
 
     const char* status_cstr = status_.empty() ? nullptr : status_.c_str();
@@ -4640,7 +5674,6 @@ Renderer::DrawState App::make_ds() {
         .live_status     = live ? status_cstr : nullptr,
         .live_dead_stones     = (state_ == AppState::STONE_REMOVAL) ? game_.dead_stones : nullptr,
         .live_ownership       = (state_ == AppState::STONE_REMOVAL) ? game_.ownership   : nullptr,
-        .live_in_history      = in_history,
         .live_suggestions     = (state_ == AppState::GAME_OVER && kata_suggestion_count_ > 0)
                                      ? kata_suggestions_ : nullptr,
         .live_suggestion_count = (state_ == AppState::GAME_OVER) ? kata_suggestion_count_ : 0,
@@ -4827,6 +5860,8 @@ void App::event_loop() {
             wait_ms = std::min(wait_ms, (int)(ko_flash_until_ - now));
         if (kata_query_after_ > 0 && kata_query_after_ > now)
             wait_ms = std::min(wait_ms, (int)(kata_query_after_ - now));
+        if (pz_pending_reply_ && pz_reply_at_ > now)
+            wait_ms = std::min(wait_ms, (int)(pz_reply_at_ - now));
         if (repeat_btn != 0xFF && repeat_next_ms > now)
             wait_ms = std::min(wait_ms, (int)(repeat_next_ms - now));
         if (demo_active_ && demo_.next_tick > now)
@@ -5015,6 +6050,22 @@ void App::event_loop() {
                             net_.start(cred_username_, cred_password_);
                         }
                         draw();
+                    } else if (drill_rename_active_ && state_ == AppState::PUZZLE_BROWSE) {
+                        // Typing a new drill name — capture everything (same
+                        // plain-keycode entry as the credential prompt)
+                        if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                            drill_commit_rename();
+                        } else if (k == SDLK_ESCAPE) {
+                            drill_rename_active_ = false;
+                            drill_rename_buf_.clear();
+                            draw();
+                        } else if (k == SDLK_BACKSPACE) {
+                            if (!drill_rename_buf_.empty()) drill_rename_buf_.pop_back();
+                            draw();
+                        } else if (k >= SDLK_SPACE && k <= SDLK_z && k < 127) {
+                            drill_rename_buf_ += (char)toupper((int)k);
+                            draw();
+                        }
                     } else if (k == SDLK_q) {
                         if (quit_confirm_) { quit = true; }
                         else { quit_confirm_ = true; draw(); }
@@ -5213,6 +6264,12 @@ void App::event_loop() {
                     analysis_cur_->board.board, game_.board_size,
                     analysis_cur_->board.turn_is_black == 1, review_komi_);
             }
+        }
+
+        // Fire the puzzle opponent's delayed reply once it's had its moment
+        if (pz_pending_reply_ && now >= pz_reply_at_ && state_ == AppState::PUZZLE_PLAY) {
+            pz_fire_pending_reply();
+            draw();
         }
 
         // If a background query's response never arrives (lost/corrupted on the way

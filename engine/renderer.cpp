@@ -970,7 +970,9 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
             {"",            "",             ""},
             {nullptr,       nullptr,        "OGS PUZZLES"},
             {GLYPH_PS_CROSS,"ENTER/CLICK",  "PLAY MOVE / OPEN"},
-            {GLYPH_PS_CIRCLE,"B",           "RETRY / BACK"},
+            {GLYPH_PS_TRIANGLE,"M",         "FREE PLAY, BOTH SIDES"},
+            {"L2/R2",       ", . WHEEL",    "REVIEW (WHILE EXPLORING)"},
+            {GLYPH_PS_CIRCLE,"B",           "BACK TO SOLVING / RETRY"},
             {GLYPH_PS_SQUARE,"C",           "BACK TO LIST"},
             {"L3/R3",       "PGUP/PGDN",    "PREV/NEXT PUZZLE"},
             {"",            "",             ""},
@@ -2890,13 +2892,24 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     }
     if (!ds.free_mode) {
         if (ds.live_mode) {
-            // Status line in the same top-left spot as mode status
+            // Status line in the same top-left spot as mode status. An embedded
+            // '\n' (long hint text, e.g. puzzle explore-mode) splits it into two
+            // lines instead of forcing one long line down to the smallest scale.
             if (ds.live_status && ds.live_status[0]) {
+                std::string status_str(ds.live_status);
+                size_t nl = status_str.find('\n');
+                std::string line1 = (nl == std::string::npos) ? status_str : status_str.substr(0, nl);
+                std::string line2 = (nl == std::string::npos) ? std::string() : status_str.substr(nl + 1);
+
                 int scale = (view.square >= 30) ? 3 : 2;
                 int pad   = (view.square >= 30) ? 16 : 8;
                 int avail = view.offset_x - view.margin - pad - 4;
-                // Scale down if the text overflows the left panel
-                while (scale > 1 && text_width_px(ds.live_status, scale) > avail)
+                auto widest = [&](int s) {
+                    return std::max(text_width_px(line1.c_str(), s),
+                                     line2.empty() ? 0 : text_width_px(line2.c_str(), s));
+                };
+                // Scale down if either line overflows the left panel
+                while (scale > 1 && widest(scale) > avail)
                     scale--;
                 int y = view.offset_y - view.margin + pad;
                 // Big result banner (local game end): the score in double scale, with
@@ -2910,10 +2923,15 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                               ds.live_result_banner, Palette::ACCENT);
                     y += bscale * 7 + 10;
                 }
-                int tw = text_width_px(ds.live_status, scale);
-                int x  = view.offset_x - view.margin - pad - tw;
                 SDL_Color col = ds.live_my_turn ? Palette::ACCENT : Palette::TEXT_SECONDARY;
-                draw_text(x, y, scale, ds.live_status, col);
+                int tw = text_width_px(line1.c_str(), scale);
+                int x  = view.offset_x - view.margin - pad - tw;
+                draw_text(x, y, scale, line1.c_str(), col);
+                if (!line2.empty()) {
+                    y += scale * 8 + 3;
+                    int tw2 = text_width_px(line2.c_str(), scale);
+                    draw_text(view.offset_x - view.margin - pad - tw2, y, scale, line2.c_str(), col);
+                }
 
                 // Result and KataGo projected score below the status (GAME_OVER)
                 int next_y = y + scale * 8 + 3;
@@ -3018,18 +3036,6 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     // after the blit would land on top of them. Skip the board-level decorations
     // (dim, box selection, live cursor) while one of those overlays is up.
     bool board_on_screen = !ds.catalog.active && !ds.show_help;
-
-    // History review: dim the board so it's clear we're not in the live game
-    if (board_on_screen && ds.live_in_history) {
-        int bx = view.offset_x - view.margin;
-        int by = view.offset_y - view.margin;
-        int bw = view.board_px + view.margin * 2;
-        int bh = view.board_px + view.margin * 2;
-        SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(sdl, 140, 140, 140, 60);
-        SDL_Rect r = {bx, by, bw, bh};
-        SDL_RenderFillRect(sdl, &r);
-    }
 
     if (board_on_screen) render_box_selection(view, ds);
 

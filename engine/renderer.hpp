@@ -126,7 +126,6 @@ public:
         // Stone removal overlay (STONE_REMOVAL phase only)
         const bool (*live_dead_stones)[MAX_BOARD_SIZE] = nullptr;  // greyed-out stones
         const int  (*live_ownership)[MAX_BOARD_SIZE]   = nullptr;  // territory: 1=black, -1=white
-        bool        live_in_history    = false;   // true while reviewing past moves
         // KataGo move suggestions (GAME_OVER history review)
         const MoveSuggestion* live_suggestions        = nullptr;
         int                   live_suggestion_count   = 0;
@@ -227,6 +226,8 @@ public:
     void board_to_screen(const BoardView& view, int br, int bf, int& x, int& y) const;
 
     void draw_board(const DrawState& ds);
+    // Public: also used standalone by ogs_client's drill-list preview
+    void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE], int board_size = BOARD_SIZE);
 
 private:
     void render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds);
@@ -249,7 +250,6 @@ private:
     void render_game_date(const BoardView& view, const std::string& date);
     void render_help_overlay(const BoardView& view, bool show_help, bool live_mode = false);
     void render_catalog_overlay(const BoardView& view, const DrawState& ds);
-    void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE], int board_size = BOARD_SIZE);
     void render_software_cursor(const BoardView& view, const DrawState& ds);
     void render_board_coordinates(const BoardView& view, const DrawState& ds);
     void render_quit_confirm(const BoardView& view);
