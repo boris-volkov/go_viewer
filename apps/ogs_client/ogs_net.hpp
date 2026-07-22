@@ -24,6 +24,7 @@ public:
     void cmd_cancel_match();
     void cmd_send_move(int game_id, int col, int row);
     void cmd_send_pass(int game_id);
+    void cmd_reconnect_game(int game_id);  // re-send game/connect to pull fresh gamedata (resync)
     void cmd_send_resign(int game_id);
     void cmd_accept_stones(int game_id);
     void cmd_accept_undo(int game_id, int move_number);

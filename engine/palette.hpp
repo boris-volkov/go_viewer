@@ -48,7 +48,18 @@ constexpr SDL_Color OVERLAY_SPEED   = {80,  80,  80,  180};  // speed-change fla
 // ---------------------------------------------------------------------------
 // Interactive / game elements
 
+// Freehand chalk annotation. Warm off-white rather than pure white so it reads as
+// chalk on a slate board, and bright enough to stay legible over stones of either
+// colour. A single solid stroke — no halo.
+constexpr SDL_Color CHALK           = {250, 247, 232, 255};
+// Dark chalk (SHIFT toggles to it) — a soft near-black rather than pure #000, so it
+// still reads as a drawn stroke over the board rather than a hole punched in it.
+constexpr SDL_Color CHALK_DARK      = {18,  16,  14,  255};
+
 constexpr SDL_Color CATALOG_SELECT  = {40,  120, 255, 190};  // catalog highlighted row
+// Mouse-hover row tint: same hue as the selection but far weaker, so "the pointer
+// is here" never reads as "this is selected" (hover does not commit a selection).
+constexpr SDL_Color CATALOG_HOVER   = {40,  120, 255, 60};
 constexpr SDL_Color LIBERTY_DOT     = {220, 50,  50,  200};  // liberty indicator dots
 constexpr SDL_Color BOX_SELECT      = {255, 255, 180, 200};  // box-selection highlight (matches ACCENT)
 

@@ -6,13 +6,26 @@
 #include <cfloat>
 #include <string>
 
-// PlayStation face-button glyphs: draw_text() renders these placeholder characters
-// as the button shapes (see font_glyphs in renderer.cpp). Use in control-hint strings
-// via literal concatenation, e.g.  GLYPH_PS_CROSS "=SELECT".
+// Face-button glyphs: draw_text() renders these placeholder characters as the
+// connected controller's button symbols (see font_glyphs / face-button rendering
+// in renderer.cpp). Use in control-hint strings via literal concatenation,
+// e.g.  GLYPH_PS_CROSS "=SELECT". The chars encode the button *position* (SDL's
+// A/B/X/Y positional layout), not a fixed shape — the actual symbol drawn depends
+// on Renderer::pad_style():
+//   ~  = bottom face button  (PS cross,   Xbox A, Switch B)  — confirm
+//   @  = right  face button  (PS circle,  Xbox B, Switch A)  — cancel/back
+//   #  = left   face button  (PS square,  Xbox X, Switch Y)
+//   ^  = top    face button  (PS triangle,Xbox Y, Switch X)
+// The GLYPH_PS_* names are kept for source readability; despite the "PS" they
+// theme to whatever controller is connected.
 #define GLYPH_PS_CROSS    "~"
 #define GLYPH_PS_CIRCLE   "@"
 #define GLYPH_PS_SQUARE   "#"
 #define GLYPH_PS_TRIANGLE "^"
+
+// Which controller's button symbols/labels the hints render as. Set from the
+// connected pad's SDL type (see Renderer::set_pad_style); defaults to PlayStation.
+enum class PadStyle { PlayStation, Xbox, Nintendo };
 
 // A letter mark ("A", "B", …) placed on a board point during analysis.
 struct BoardLabel { int r = 0; int f = 0; char ch = 'A'; };
@@ -38,7 +51,10 @@ public:
     SDL_Renderer* sdl = nullptr;
 
     explicit Renderer(SDL_Renderer* r) : sdl(r) {}
-    ~Renderer() { if (board_cache_) SDL_DestroyTexture(board_cache_); }
+    ~Renderer() {
+        if (board_cache_) SDL_DestroyTexture(board_cache_);
+        if (annot_layer_) SDL_DestroyTexture(annot_layer_);
+    }
 
     // All draw state needed for one frame
     struct DrawState {
@@ -57,6 +73,10 @@ public:
         // render_catalog_overlay shows this in the title and disables the
         // "delete" hint; go_viewer's own catalog never sets this.
         bool                  catalog_readonly = false;
+        // Freehand chalk mode is armed — shows the on-screen reminder, since in this
+        // mode a click draws instead of placing a stone.
+        bool                  draw_mode        = false;
+        bool                  draw_dark        = false;  // chalk colour: dark, not white
         const std::string&    black_name;
         const std::string&    white_name;
         const std::string&    result_message;
@@ -191,8 +211,9 @@ public:
         int  focus_row    = 0;     // row within focused column
         bool size_sel[3]  = {};    // 9x9, 13x13, 19x19
         bool speed_sel[3] = {};    // fast/blitz, medium/rapid, slow/live  (OGS mode)
-        bool katago_mode  = false; // true = play vs KataGo locally
+        bool katago_mode  = false; // true = this is the KATAGO SETTINGS screen
         int  katago_str   = 2;     // strength index 0-6 fixed ranks, 7 = adaptive (default 10k)
+        int  katago_size  = 2;     // local-play board size: 0=9x9, 1=13x13, 2=19x19
         std::string adaptive_label; // display text for the adaptive row, e.g. "ADAPTIVE (8 KYU)"
         bool show_coords_sel = false; // mirrors App::show_coords_ while the menu is open
         bool analysis_sel    = false; // mirrors App::kata_analysis_enabled_ while the menu is open
@@ -201,6 +222,8 @@ public:
         bool chain_sel       = false; // mirrors App::chain_mode_ (visual links between chained stones)
         bool square_sel      = false; // mirrors App::square_stones_ (tile-style stones)
         bool square_grid_sel = false; // mirrors App::square_grid_ (checkerboard cell layout)
+        bool territory_sel      = false; // mirrors App::show_live_ownership_ (live territory overlay)
+        bool territory_available = true; // false = no KataGo process running — greyed out, inert
         bool ingame       = false; // opened mid-game — hide search/mode controls, board
                                    // size/speed shown read-only for reference only
     };
@@ -211,15 +234,53 @@ public:
     // the caller wants to layer more on top first (present = false).
     // line_colors: optional per-row text-color overrides, parallel to `lines`;
     // alpha 0 = no override (row keeps the normal white/accent scheme).
+    // `hover` is the mouse-hovered row (-1 = none): tinted more faintly than the
+    // selected row, because hovering deliberately does not commit a selection.
     void draw_list_screen(const char* title, const std::vector<std::string>& lines,
                           int index, const char* footer, bool present = true,
-                          const SDL_Color* line_colors = nullptr);
+                          const SDL_Color* line_colors = nullptr, int hover = -1);
+
+    // Hit-test the list draw_list_screen would draw for the same total/index.
+    // Returns the line index under (mx,my), or -1.
+    int  list_screen_item_at(int total, int index, int mx, int my) const;
+
+    // Hit-test the catalog against the layout it was last drawn with. Returns the
+    // entry index under (mx,my), or -1 (also -1 if it hasn't been drawn yet).
+    // Cheap enough to call on every mouse-motion event; see drawn_catalog_layout_.
+    int  catalog_entry_at(int mx, int my) const;
+
+    // Hit-test the settings menu: reports which (column, row) cell a point falls in.
+    // Geometry only — it does not know how many rows a column actually has, so the
+    // caller validates `row` against its own column sizes (the single authority for
+    // which controls exist in the current mode).
+    bool match_menu_cell_at(const MatchMenu& menu, int mx, int my,
+                            int& col, int& row) const;
 
     // START popup action menu: dims the current backbuffer contents and draws a
     // centered command list on top. Draw-only (no present) — draw_board layers it
     // via the DrawState popup fields; list screens call it directly and present.
     void draw_popup_menu(const char* title, const std::string* items,
                          int count, int index);
+
+    // Hit-test the popup that draw_popup_menu would draw for the same arguments —
+    // the mouse counterpart to it, in the same spirit as screen_to_board/board_to_screen.
+    // Returns the item index under (mx,my), or -1 if the point isn't on an item.
+    // `inside_panel` (optional) reports whether the point lands inside the popup box
+    // at all, so callers can tell "missed a row" from "clicked outside to dismiss".
+    int  popup_item_at(const char* title, const std::string* items, int count,
+                       int mx, int my, bool* inside_panel = nullptr) const;
+
+    // ── Freehand chalk annotation ────────────────────────────────────────────
+    // A persistent screen-space scribble layer, as if drawn on the glass: strokes
+    // are stored as pixels in their own texture, so they neither move with the
+    // board position nor cost anything to keep on screen. Segments are stamped in
+    // as they arrive; only an explicit clear removes them.
+    // `dark` picks the near-black stroke instead of chalk white. Chosen per segment
+    // because strokes are baked into the layer as pixels — already-drawn ink keeps
+    // whatever colour it was made with and can't be recoloured after the fact.
+    void annot_segment(int x0, int y0, int x1, int y1, bool dark = false);
+    void annot_clear();
+    bool annot_has_content() const { return annot_any_; }
 
     void get_board_view(BoardView& view, int active_size = BOARD_SIZE) const;
     bool screen_to_board(const BoardView& view, int mx, int my, int& r, int& f) const;
@@ -230,12 +291,96 @@ public:
     void render_mini_board(int x, int y, int size, const char board[][BOARD_SIZE], int board_size = BOARD_SIZE);
 
 private:
+    // Geometry of the popup panel, derived once and shared by draw_popup_menu and
+    // popup_item_at. Neither may compute these rects independently: the width depends
+    // on font metrics and the scale on a screen-width threshold, so two copies of the
+    // math would silently drift apart the first time either is tweaked.
+    struct PopupLayout {
+        SDL_Rect box{};              // the panel itself
+        int  scale       = 2;
+        int  text_h      = 0;        // glyph height
+        int  line_gap    = 0;
+        int  line_h      = 0;        // row stride (text_h + line_gap)
+        int  pad         = 0;
+        bool has_title   = false;
+        int  first_row_y = 0;        // top of item 0's text
+        int  row_x       = 0;        // left edge of a row's highlight band
+        int  row_w       = 0;        // width of a row's highlight band
+    };
+    PopupLayout popup_layout(const char* title, const std::string* items, int count) const;
+
+    // Same contract for the generic full-screen list: draw_list_screen and
+    // list_screen_item_at both derive their rows from this, never independently.
+    struct ListLayout {
+        int scale = 2, text_h = 0, line_gap = 0, line_h = 0, hpad = 0;
+        int top_y     = 0;   // y of the first visible row's text
+        int max_lines = 0;   // rows that fit on screen
+        int scroll    = 0;   // list index of the first visible row
+        int row_x     = 0, row_w = 0;
+    };
+    ListLayout list_screen_layout(int total, int index) const;
+
+    // Catalog geometry. The header block above the list is conditional (button
+    // legend, index-building notice, search bar) and the row width comes from a
+    // measurement pass over every entry — far too much arithmetic to risk keeping
+    // two copies of, so render_catalog_overlay and catalog_entry_at share this.
+    struct CatalogLayout {
+        int scale = 2, th = 0, line_gap = 0, pad = 0, hpad = 0, header_gap = 0, line_h = 0;
+        std::string title;              // measured here, drawn by the caller
+        bool index_ready    = false;
+        bool show_legend    = false, show_building = false, show_search = false;
+        int  title_y = 0, legend_y = 0, building_y = 0, search_y = 0, count_y = 0;
+        int  list_top_y = 0;            // y of the first visible row's text
+        int  max_lines  = 0, scroll = 0;
+        int  max_w = 0, max_black_w = 0, max_white_w = 0;
+        int  vs_w = 0, col_gap = 0, date_col_x = 0, list_right = 0;
+        int  row_x = 0, row_w = 0;      // highlight / hit band
+        int  total = 0;                 // entries the layout was built for
+    };
+    CatalogLayout catalog_layout(const BoardView& view, const Catalog& cat,
+                                 bool live_mode, bool readonly) const;
+
+    // Layout the last render_catalog_overlay actually drew with. catalog_entry_at
+    // hit-tests against this rather than recomputing: the width pass walks every
+    // entry building two std::strings each (>2000 entries in the big pro folders),
+    // which is far too heavy to redo on every mouse-motion event. Publishing the
+    // drawn layout is also the more correct answer — a click should hit the pixels
+    // currently on screen — and it tracks lazily-loaded player names for free.
+    CatalogLayout drawn_catalog_layout_;
+    bool          drawn_catalog_layout_valid_ = false;
+
+    // Settings-menu geometry. The per-column row origins accumulate through
+    // mode-dependent headers (the mode row and the BOARD SIZE / TIME CONTROL
+    // headers only exist out of game), so draw_match_menu and match_menu_cell_at
+    // must read them from here rather than each walking the conditionals.
+    struct MatchMenuLayout {
+        int scale = 2, th = 0, line_gap = 0, line_h = 0, hpad = 0, col_w = 0;
+        int display_col = 2;
+        int cols_top    = 0;         // y the columns start at, before their headers
+        int col_ty[3]   = {0, 0, 0}; // y of row 0 in each column
+    };
+    MatchMenuLayout match_menu_layout(const MatchMenu& menu) const;
+
     void render_board(const BoardView& view, const Overlay* overlay, const DrawState& ds);
     void draw_stone_circle(const BoardView& view, int r, int f, int is_black, Uint8 alpha, bool shadow_pass = false);
     void draw_thick_line(int x1, int y1, int x2, int y2, int thickness, SDL_Color color);
     void draw_dashed_line(int x1, int y1, int x2, int y2, int dash_len, int gap_len);
     int  text_width_px(const char* text, int scale) const;
     void draw_text(int x, int y, int scale, const char* text, SDL_Color color);
+
+public:
+    // Controller symbol/label theming for control hints (see PadStyle). Global
+    // so both the shared glyph renderer and the app-side hint strings agree.
+    static void     set_pad_style(PadStyle s);
+    static PadStyle pad_style();
+    // Rewrite the abbreviated shoulder/trigger/menu/stick labels in a hint string
+    // (L1, R2, OPT, SHARE, L3...) to the current pad style's names. Face-button
+    // glyphs (~ @ # ^) are untouched — draw_text themes those as it renders.
+    static std::string themed_labels(const char* tmpl);
+    // 5x7 bitmap for a character (public so the face-button glyph helper can reuse
+    // letter glyphs for Xbox/Nintendo button symbols).
+    static const unsigned char* get_glyph_rows(char c);
+private:
     void draw_color_swatch(int x, int y, int size, SDL_Color fill, SDL_Color outline);
 
     void render_chain_connections(const BoardView& view, const char board[][MAX_BOARD_SIZE], bool chain_mode, int stone_filter, bool shadows_only = false);
@@ -286,6 +431,15 @@ private:
 
     bool square_stones_ = false;   // mirrored from DrawState each draw_board call
     SDL_Texture* board_cache_ = nullptr;
+
+    // Chalk layer. Deliberately separate from board_cache_: strokes composite on
+    // top of the cached board every frame, so drawing never invalidates the cache
+    // and a stroke costs one short line plus a blit, not a scene rebuild.
+    SDL_Texture* annot_layer_ = nullptr;
+    int          annot_w_     = 0;
+    int          annot_h_     = 0;
+    bool         annot_any_   = false;   // anything drawn since the last clear?
+    void         annot_ensure_layer();
     int          cache_w_     = 0;
     int          cache_h_     = 0;
     uint64_t     cache_hash_  = ~0ULL;   // initialised so first frame always rebuilds
@@ -294,5 +448,4 @@ private:
 
     struct Glyph { char c; unsigned char rows[7]; };
     static const Glyph       font_glyphs[];
-    static const unsigned char* get_glyph_rows(char c);
 };

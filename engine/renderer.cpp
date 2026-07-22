@@ -179,17 +179,93 @@ int Renderer::text_width_px(const char* text, int scale) const {
     return (count * 6 - 1) * scale;
 }
 
-// PlayStation face buttons always render in their standard pad colors, regardless
-// of the surrounding text color — matches the physical controller and makes the
-// button symbols pop out of any prompt they appear in.
-static bool ps_button_color(char c, SDL_Color& out) {
+// Which controller's symbols the face-button placeholder chars render as. File
+// scope so the shared glyph path and the app agree; defaults to PlayStation (the
+// long-standing look, and correct until a differently-typed pad connects).
+static PadStyle g_pad_style = PadStyle::PlayStation;
+
+void     Renderer::set_pad_style(PadStyle s) { g_pad_style = s; }
+PadStyle Renderer::pad_style()               { return g_pad_style; }
+
+// The four face-button placeholder chars (~ @ # ^) encode SDL's positional layout
+// (bottom / right / left / top). Resolve one to the glyph bitmap + color for the
+// current pad style; the face symbol always keeps its own color so it pops out of
+// the surrounding prompt, matching the physical controller. Returns false for any
+// non-face char (normal text).
+static bool face_button_glyph(char c, const unsigned char*& rows, SDL_Color& color) {
+    int pos;  // 0=bottom(confirm) 1=right(cancel) 2=left 3=top
     switch (c) {
-    case '~': out = {124, 178, 232, 255}; return true;  // cross    — blue
-    case '@': out = {240, 105, 105, 255}; return true;  // circle   — red
-    case '#': out = {232, 130, 190, 255}; return true;  // square   — pink
-    case '^': out = { 80, 205, 150, 255}; return true;  // triangle — green
+    case '~': pos = 0; break;
+    case '@': pos = 1; break;
+    case '#': pos = 2; break;
+    case '^': pos = 3; break;
     default:  return false;
     }
+    switch (g_pad_style) {
+    case PadStyle::PlayStation: {
+        static const char shape[4] = {'~', '@', '#', '^'};  // cross circle square triangle
+        static const SDL_Color col[4] = {
+            {124, 178, 232, 255},  // cross    — blue
+            {240, 105, 105, 255},  // circle   — red
+            {232, 130, 190, 255},  // square   — pink
+            { 80, 205, 150, 255},  // triangle — green
+        };
+        rows  = Renderer::get_glyph_rows(shape[pos]);
+        color = col[pos];
+        return true;
+    }
+    case PadStyle::Xbox: {
+        static const char letter[4] = {'A', 'B', 'X', 'Y'};  // by position
+        static const SDL_Color col[4] = {
+            { 96, 192,  96, 255},  // A — green
+            {228,  96,  96, 255},  // B — red
+            { 96, 160, 232, 255},  // X — blue
+            {236, 196,  80, 255},  // Y — amber
+        };
+        rows  = Renderer::get_glyph_rows(letter[pos]);
+        color = col[pos];
+        return true;
+    }
+    case PadStyle::Nintendo: {
+        // Switch physical layout at each position: bottom=B, right=A, left=Y, top=X.
+        // Buttons are unlit white-on-dark, so a single neutral light tone.
+        static const char letter[4] = {'B', 'A', 'Y', 'X'};
+        rows  = Renderer::get_glyph_rows(letter[pos]);
+        color = SDL_Color{225, 225, 225, 255};
+        return true;
+    }
+    }
+    return false;
+}
+
+// Abbreviated shoulder/trigger/menu/stick labels used in hint strings, themed to
+// the current pad style. Face-button glyphs (~ @ # ^) are left untouched — draw_text
+// themes those as it renders. Replacement outputs share no substrings with any
+// source token, so the passes can't re-trigger each other.
+std::string Renderer::themed_labels(const char* tmpl) {
+    std::string s(tmpl ? tmpl : "");
+    if (g_pad_style == PadStyle::PlayStation) return s;  // source tokens are PS labels
+
+    struct Sub { const char* from; const char* to; };
+    static const Sub xbox[] = {
+        {"L1", "LB"}, {"R1", "RB"}, {"L2", "LT"}, {"R2", "RT"},
+        {"L3", "LS"}, {"R3", "RS"}, {"SHARE", "VIEW"}, {"OPT", "MENU"},
+    };
+    static const Sub nsw[] = {
+        {"L1", "L"},  {"R1", "R"},  {"L2", "ZL"}, {"R2", "ZR"},
+        {"L3", "LS"}, {"R3", "RS"}, {"SHARE", "-"}, {"OPT", "+"},
+    };
+    const Sub* subs = (g_pad_style == PadStyle::Xbox) ? xbox : nsw;
+    int n = 8;
+    for (int i = 0; i < n; i++) {
+        const std::string from = subs[i].from, to = subs[i].to;
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    }
+    return s;
 }
 
 void Renderer::draw_text(int x, int y, int scale, const char* text, SDL_Color color) {
@@ -198,11 +274,12 @@ void Renderer::draw_text(int x, int y, int scale, const char* text, SDL_Color co
     for (const char* p = text; *p; ) {
         int bytes;
         char c = utf8_display_char(p, bytes);
-        const unsigned char* rows = get_glyph_rows(c);
         p += bytes;
-        SDL_Color pc;
-        bool ps = ps_button_color(c, pc);
-        if (ps) SDL_SetRenderDrawColor(sdl, pc.r, pc.g, pc.b, pc.a);
+        const unsigned char* rows;
+        SDL_Color fc;
+        bool face = face_button_glyph(c, rows, fc);
+        if (face) SDL_SetRenderDrawColor(sdl, fc.r, fc.g, fc.b, fc.a);
+        else      rows = get_glyph_rows(c);
         for (int row = 0; row < 7; row++) {
             for (int col = 0; col < 5; col++) {
                 if (rows[row] & (1 << (4 - col))) {
@@ -211,7 +288,7 @@ void Renderer::draw_text(int x, int y, int scale, const char* text, SDL_Color co
                 }
             }
         }
-        if (ps) SDL_SetRenderDrawColor(sdl, color.r, color.g, color.b, color.a);
+        if (face) SDL_SetRenderDrawColor(sdl, color.r, color.g, color.b, color.a);
         pen_x += 6 * scale;
     }
 }
@@ -941,23 +1018,25 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
             {"PAD",         "KEYBOARD",     ""},   // column captions (desc empty → gray)
             {"",            "",             ""},
             {nullptr,       nullptr,        "LOBBY"},
-            {GLYPH_PS_CROSS,"ENTER / F",    "FIND GAME"},
+            {GLYPH_PS_CROSS " x2","ENTER x2","FIND MATCH"},
             {GLYPH_PS_SQUARE,"C",           "OPEN CATALOG"},
             {GLYPH_PS_TRIANGLE,"M",         "FREE ANALYSIS"},
-            {GLYPH_PS_CIRCLE,"B",           "OGS PUZZLES"},
-            {"SHARE",       "S",            "MATCH SETTINGS"},
+            {GLYPH_PS_CIRCLE,"B",           "PUZZLES"},
+            {"OPT",         "R / F",        "MENU (MATCH SETTINGS, PRO GAMES, JOSEKI...)"},
+            {"SHARE",       "S",            "SETTINGS MENU"},
             {"",            "",             ""},
             {nullptr,       nullptr,        "GAME"},
             {"D-PAD/STICK", "ARROWS/MOUSE", "MOVE CURSOR"},
             {GLYPH_PS_CROSS,"ENTER/CLICK",  "PLACE STONE"},
             {GLYPH_PS_CIRCLE " x2","B x2",  "PASS"},
-            {"OPT x2",      "R x2",         "RESIGN"},
             {GLYPH_PS_TRIANGLE " x2","M x2","MARK MOVE FOR REVIEW"},
             {GLYPH_PS_SQUARE,"C",           "UNDO (VS KATAGO)"},
             {"L2/R2",       ", . WHEEL",    "STEP MOVE HISTORY"},
             {"R2 HOLD",     "",             "SHOW LAST MOVE"},
+            {"OPT",         "R / F",        "GAME MENU (RESIGN...)"},
             {"",            "",             ""},
             {nullptr,       nullptr,        "GAME OVER / REVIEW"},
+            {"D-PAD/STICK", "ARROWS/MOUSE", "MOVE CURSOR"},
             {"L2/R2",       ", . WHEEL",    "STEP MAIN LINE"},
             {GLYPH_PS_CIRCLE,"B / R.CLICK", "LABEL POINT (A-Z)"},
             {"L1/R1",       "[ ]",          "SWITCH BRANCH"},
@@ -965,20 +1044,25 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
             {GLYPH_PS_TRIANGLE " x2","M x2","MARK/UNMARK MOVE"},
             {GLYPH_PS_SQUARE,"C",           "OPEN CATALOG"},
             {"L3/R3",       "PGUP/PGDN",    "PREV/NEXT FILE"},
-            {"OPT x2",      "R x2",         "BACK TO LOBBY"},
+            {"OPT",         "R / F",        "MENU (LOBBY, DRILL TOOLS...)"},
             {"SHARE",       "S",            "SETTINGS MENU"},
             {"",            "",             ""},
-            {nullptr,       nullptr,        "OGS PUZZLES"},
+            {nullptr,       nullptr,        "PUZZLES"},
+            {"D-PAD",       "ARROWS/MOUSE", "MOVE CURSOR / NAVIGATE LIST"},
             {GLYPH_PS_CROSS,"ENTER/CLICK",  "PLAY MOVE / OPEN"},
             {GLYPH_PS_TRIANGLE,"M",         "FREE PLAY, BOTH SIDES"},
             {"L2/R2",       ", . WHEEL",    "REVIEW (WHILE EXPLORING)"},
             {GLYPH_PS_CIRCLE,"B",           "BACK TO SOLVING / RETRY"},
             {GLYPH_PS_SQUARE,"C",           "BACK TO LIST"},
             {"L3/R3",       "PGUP/PGDN",    "PREV/NEXT PUZZLE"},
+            {"OPT",         "R / F",        "MENU (RETRY, EDIT/RENAME/DELETE DRILL...)"},
             {"",            "",             ""},
             {nullptr,       nullptr,        "CATALOG"},
             {"UP/DOWN",     "ARROWS/WHEEL", "NAVIGATE"},
-            {GLYPH_PS_CROSS,"ENTER/CLICK",  "OPEN GAME"},
+            {"L1/R1",       "[ ]",          "JUMP 10 ROWS"},
+            {"L2/R2",       ", .",          "JUMP TO NEXT LETTER"},
+            {GLYPH_PS_CROSS,"ENTER/CLICK",  "OPEN"},
+            {GLYPH_PS_SQUARE,"C",           "AUTOPLAY FROM HERE"},
             {GLYPH_PS_TRIANGLE " x2","M x2","DELETE GAME"},
             {GLYPH_PS_CIRCLE,"B",           "CLOSE"},
             {"",            "",             ""},
@@ -992,10 +1076,11 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
         int th       = 7 * scale;
         int col_gap  = 6 * scale;
 
+        // Pad column labels (L1, OPT...) theme to the connected controller.
         int pad_w = 0, kb_w = 0;
         for (int i = 0; i < n; i++) {
             if (!rows[i].pad) continue;
-            if (rows[i].pad[0]) pad_w = std::max(pad_w, text_width_px(rows[i].pad, scale));
+            if (rows[i].pad[0]) pad_w = std::max(pad_w, text_width_px(themed_labels(rows[i].pad).c_str(), scale));
             if (rows[i].kb[0])  kb_w  = std::max(kb_w,  text_width_px(rows[i].kb,  scale));
         }
         int desc_x = pad_w + col_gap + kb_w + col_gap;
@@ -1033,7 +1118,7 @@ void Renderer::render_help_overlay(const BoardView& view, bool show_help, bool l
                 // Caption rows (empty desc) draw their key columns in gray
                 SDL_Color kc = rows[i].desc[0] ? col_key : col_header;
                 if (rows[i].pad[0])
-                    draw_text(x + pad, ty, scale, rows[i].pad, kc);
+                    draw_text(x + pad, ty, scale, themed_labels(rows[i].pad).c_str(), kc);
                 if (rows[i].kb[0])
                     draw_text(x + pad + pad_w + col_gap, ty, scale, rows[i].kb, kc);
                 if (rows[i].desc[0])
@@ -1140,6 +1225,54 @@ void Renderer::render_mini_board(int x, int y, int size,
     }
 }
 
+Renderer::MatchMenuLayout Renderer::match_menu_layout(const MatchMenu& menu) const {
+    MatchMenuLayout L;
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    L.scale       = (sw >= 900) ? 3 : 2;
+    L.th          = 7 * L.scale;
+    L.line_gap    = (L.scale >= 3) ? 8 : 5;
+    L.line_h      = L.th + L.line_gap;
+    L.hpad        = 80;
+    L.col_w       = (sw - L.hpad * 2) / 3;
+    // The KataGo screen has no DISPLAY column — those toggles live in MATCH
+    // SETTINGS and the in-game SETTINGS, and duplicating them across screens
+    // would give the same switch two homes.
+    L.display_col = menu.ingame ? 0 : (menu.katago_mode ? -1 : 2);
+
+    // Same sequence draw_match_menu renders: title, hint line.
+    int ty = L.hpad / 2;
+    ty += L.th + L.line_gap * 3;                        // title
+    ty += L.th + L.line_gap * 4;                        // hint line
+    L.cols_top = ty;
+
+    L.col_ty[0] = L.col_ty[1] = L.col_ty[2] = ty;
+    if (!menu.ingame) {
+        L.col_ty[0] += L.line_h + L.line_gap;           // BOARD SIZE header
+        L.col_ty[1] += L.line_h + L.line_gap;           // TIME CONTROL / STRENGTH header
+    }
+    if (L.display_col >= 0)
+        L.col_ty[L.display_col] += L.line_h + L.line_gap;   // DISPLAY header
+    return L;
+}
+
+bool Renderer::match_menu_cell_at(const MatchMenu& menu, int mx, int my,
+                                  int& col, int& row) const {
+    MatchMenuLayout L = match_menu_layout(menu);
+    if (mx < L.hpad || L.col_w <= 0) return false;
+    int c = (mx - L.hpad) / L.col_w;
+    if (c < 0 || c > 2) return false;
+    // Full-stride rows, centred on the text, so there are no dead gaps to click into.
+    int rel = my - (L.col_ty[c] - L.line_gap / 2);
+    if (rel < 0) return false;
+    int r = rel / L.line_h;
+    if (r < 0) return false;
+    col = c;
+    row = r;
+    return true;
+}
+
 void Renderer::draw_match_menu(const MatchMenu& menu) {
     int sw, sh;
     SDL_GetRendererOutputSize(sdl, &sw, &sh);
@@ -1149,62 +1282,53 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     SDL_Rect bg = {0, 0, sw, sh};
     SDL_RenderFillRect(sdl, &bg);
 
-    int scale    = (sw >= 900) ? 3 : 2;
-    int th       = 7 * scale;
-    int line_gap = (scale >= 3) ? 8 : 5;
-    int line_h   = th + line_gap;
-    int hpad     = 80;
-    int col_w    = (sw - hpad * 2) / 3;
-    int display_col = menu.ingame ? 0 : 2;
+    MatchMenuLayout L = match_menu_layout(menu);
+    int scale    = L.scale;
+    int th       = L.th;
+    int line_gap = L.line_gap;
+    int line_h   = L.line_h;
+    int hpad     = L.hpad;
+    int col_w    = L.col_w;
+    int display_col = L.display_col;
 
     int ty = hpad / 2;
-    draw_text(hpad, ty, scale, menu.ingame ? "SETTINGS" : "MATCH SETTINGS", Palette::ACCENT);
+    draw_text(hpad, ty, scale,
+              menu.ingame      ? "SETTINGS"
+              : menu.katago_mode ? "KATAGO SETTINGS"
+                                 : "MATCH SETTINGS", Palette::ACCENT);
     ty += th + line_gap * 3;
 
-    // Mode toggle row — not shown mid-game (only DISPLAY settings apply there)
-    if (!menu.ingame) {
-        const char* ogs_lbl  = menu.katago_mode ? "[ ] OGS MATCH"    : "[X] OGS MATCH";
-        const char* kata_lbl = menu.katago_mode ? "[X] VS KATAGO"     : "[ ] VS KATAGO";
-        SDL_Color ogs_c  = menu.katago_mode ? Palette::TEXT_DIM : Palette::ACCENT;
-        SDL_Color kata_c = menu.katago_mode ? Palette::ACCENT    : Palette::TEXT_DIM;
-        draw_text(hpad,          ty, scale, ogs_lbl,  ogs_c);
-        draw_text(hpad + col_w,  ty, scale, kata_lbl, kata_c);
-        ty += th + line_gap * 2;
-    }
-
-    // Hint line (PlayStation button glyphs — Boris plays on a DualShock)
+    // Hint line (PlayStation button glyphs — Boris plays on a DualShock). The old
+    // L1 mode toggle is gone: OGS and KataGo settings are separate screens off the
+    // popup menu now, so there is no hidden hotkey to advertise.
     if (menu.ingame)
         draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   " GLYPH_PS_CIRCLE "=CLOSE", Palette::TEXT_DIM);
     else if (menu.katago_mode)
-        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=SELECT   DPAD=NAVIGATE   L1=OGS MODE   OPT=CLOSE", Palette::TEXT_DIM);
+        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=SELECT   DPAD=NAVIGATE   OPT=CLOSE", Palette::TEXT_DIM);
     else
-        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   L1=VS KATAGO  OPT=CLOSE", Palette::TEXT_DIM);
+        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   OPT=CLOSE", Palette::TEXT_DIM);
     ty += th + line_gap * 4;
 
-    int col_ty[3] = {ty, ty, ty};
+    int col_ty[3] = {L.col_ty[0], L.col_ty[1], L.col_ty[2]};
 
     static const char* size_labels[3]  = {"9x9", "13x13", "19x19"};
     static const char* speed_labels[3] = {"FAST   (30s + 5x10)", "MEDIUM (5m + 5x30)", "SLOW   (20m + 5x30)"};
     static const char* str_labels[7]   = {
         "20 KYU", "15 KYU", "10 KYU", "5 KYU", "1 KYU", "1 DAN", "5 DAN"
     };
-    static const char* display_labels[5] = {"SHOW COORDINATES", "ENGINE ANALYSIS", "CHAIN LINKS",
-                                            "SQUARE STONES", "SQUARE GRID"};
+    static const char* display_labels[6] = {"SHOW COORDINATES", "ENGINE ANALYSIS", "CHAIN LINKS",
+                                            "SQUARE STONES", "SQUARE GRID", "SHOW TERRITORY"};
 
+    // Column headers all sit on the same line, one row above their column's first
+    // control — col_ty already points past them (see match_menu_layout).
     if (!menu.ingame) {
-        // Column 0 header: BOARD SIZE
-        draw_text(hpad,         col_ty[0], scale, "BOARD SIZE",   Palette::ACCENT);
-        col_ty[0] += line_h + line_gap;
-
-        // Column 1 header: TIME CONTROL or STRENGTH
-        draw_text(hpad + col_w, col_ty[1], scale,
+        draw_text(hpad,         L.cols_top, scale, "BOARD SIZE", Palette::ACCENT);
+        draw_text(hpad + col_w, L.cols_top, scale,
                   menu.katago_mode ? "STRENGTH" : "TIME CONTROL", Palette::ACCENT);
-        col_ty[1] += line_h + line_gap;
     }
-
-    // Column 2 (or 0 when ingame) header: DISPLAY
-    draw_text(hpad + display_col * col_w, col_ty[display_col], scale, "DISPLAY", Palette::ACCENT);
-    col_ty[display_col] += line_h + line_gap;
+    // DISPLAY column: col 2 normally, col 0 in-game, absent on the KataGo screen
+    if (display_col >= 0)
+        draw_text(hpad + display_col * col_w, L.cols_top, scale, "DISPLAY", Palette::ACCENT);
 
     // checkbox item (multi-select). disabled: always dim regardless of focus/
     // selection — used for rows that are present but currently inert (e.g.
@@ -1242,8 +1366,9 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
         // size) but multi-select for OGS search (multiple acceptable sizes widens
         // the automatch pool) — same distinction as STRENGTH vs TIME CONTROL below.
         if (menu.katago_mode) {
+            // Local play uses its own single size, not the OGS multi-select
             for (int i = 0; i < 3; i++)
-                draw_radio(0, i, size_labels[i], menu.size_sel[i]);
+                draw_radio(0, i, size_labels[i], menu.katago_size == i);
         } else {
             for (int i = 0; i < 3; i++)
                 draw_check(0, i, size_labels[i], menu.size_sel[i]);
@@ -1262,11 +1387,14 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
         }
     }
 
-    draw_check(display_col, 0, display_labels[0], menu.show_coords_sel);
-    draw_check(display_col, 1, display_labels[1], menu.analysis_sel, !menu.analysis_available);
-    draw_check(display_col, 2, display_labels[2], menu.chain_sel);
-    draw_check(display_col, 3, display_labels[3], menu.square_sel);
-    draw_check(display_col, 4, display_labels[4], menu.square_grid_sel);
+    if (display_col >= 0) {
+        draw_check(display_col, 0, display_labels[0], menu.show_coords_sel);
+        draw_check(display_col, 1, display_labels[1], menu.analysis_sel, !menu.analysis_available);
+        draw_check(display_col, 2, display_labels[2], menu.chain_sel);
+        draw_check(display_col, 3, display_labels[3], menu.square_sel);
+        draw_check(display_col, 4, display_labels[4], menu.square_grid_sel);
+        draw_check(display_col, 5, display_labels[5], menu.territory_sel, !menu.territory_available);
+    }
 
     // ── Controls reference — fills the otherwise-unused bottom of the menu ──────
     // Three columns mirroring the ESC help overlay, in PlayStation button glyphs,
@@ -1338,9 +1466,36 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     SDL_RenderPresent(sdl);
 }
 
+Renderer::ListLayout Renderer::list_screen_layout(int total, int index) const {
+    ListLayout L;
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    L.scale    = (sw >= 900) ? 3 : 2;
+    L.text_h   = 7 * L.scale;
+    L.line_gap = (L.scale >= 3) ? 8 : 5;
+    L.line_h   = L.text_h + L.line_gap;
+    L.hpad     = 80;
+    // Title occupies the first line; the list starts below it.
+    L.top_y    = L.hpad / 2 + L.text_h + L.line_gap * 3;
+
+    int avail_h  = sh - L.top_y - L.hpad;   // leave room for the footer
+    L.max_lines  = std::max(4, avail_h / L.line_h);
+    // Visible window keeps the highlighted row on screen. Derived purely from
+    // index/total, so there is no stored scroll position to get out of step.
+    L.scroll = 0;
+    if (index >= L.max_lines) L.scroll = index - L.max_lines + 1;
+    if (L.scroll > std::max(0, total - L.max_lines))
+        L.scroll = std::max(0, total - L.max_lines);
+
+    L.row_x = L.hpad - 6;
+    L.row_w = sw - L.hpad * 2 + 12;
+    return L;
+}
+
 void Renderer::draw_list_screen(const char* title, const std::vector<std::string>& lines,
                                 int index, const char* footer, bool present,
-                                const SDL_Color* line_colors) {
+                                const SDL_Color* line_colors, int hover) {
     int sw, sh;
     SDL_GetRendererOutputSize(sdl, &sw, &sh);
 
@@ -1349,45 +1504,79 @@ void Renderer::draw_list_screen(const char* title, const std::vector<std::string
     SDL_Rect bg = {0, 0, sw, sh};
     SDL_RenderFillRect(sdl, &bg);
 
-    int scale    = (sw >= 900) ? 3 : 2;
-    int th       = 7 * scale;
-    int line_gap = (scale >= 3) ? 8 : 5;
-    int line_h   = th + line_gap;
-    int hpad     = 80;
+    int total = (int)lines.size();
+    ListLayout L = list_screen_layout(total, index);
 
-    int ty = hpad / 2;
-    draw_text(hpad, ty, scale, title, Palette::ACCENT);
-    ty += th + line_gap * 3;
+    draw_text(L.hpad, L.hpad / 2, L.scale, title, Palette::ACCENT);
 
-    // Visible window keeps the highlighted row on screen
-    int avail_h   = sh - ty - hpad;   // leave room for the footer
-    int max_lines = std::max(4, avail_h / line_h);
-    int total     = (int)lines.size();
-    int scroll    = 0;
-    if (index >= max_lines) scroll = index - max_lines + 1;
-    if (scroll > std::max(0, total - max_lines)) scroll = std::max(0, total - max_lines);
-
-    for (int i = 0; i < max_lines; i++) {
-        int li = scroll + i;
+    for (int i = 0; i < L.max_lines; i++) {
+        int li = L.scroll + i;
         if (li >= total) break;
-        if (li == index) {
-            SDL_Rect hi = {hpad - 6, ty - 3, sw - hpad * 2 + 12, th + 6};
-            SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
-                                   Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
+        int ry = L.top_y + i * L.line_h;
+        if (li == index || li == hover) {
+            const SDL_Color& c = (li == index) ? Palette::CATALOG_SELECT
+                                               : Palette::CATALOG_HOVER;
+            SDL_Rect hi = {L.row_x, ry - 3, L.row_w, L.text_h + 6};
+            SDL_SetRenderDrawColor(sdl, c.r, c.g, c.b, c.a);
             SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
             SDL_RenderFillRect(sdl, &hi);
         }
         SDL_Color tc = (li == index) ? Palette::ACCENT : Palette::TEXT_WHITE;
         if (line_colors && line_colors[li].a != 0) tc = line_colors[li];
-        draw_text(hpad, ty, scale, lines[li].c_str(), tc);
-        ty += line_h;
+        draw_text(L.hpad, ry, L.scale, lines[li].c_str(), tc);
     }
 
     if (footer && footer[0])
-        draw_text(hpad, sh - hpad / 2 - th, scale, footer, Palette::TEXT_DIM);
+        draw_text(L.hpad, sh - L.hpad / 2 - L.text_h, L.scale, footer, Palette::TEXT_DIM);
 
     if (present)
         SDL_RenderPresent(sdl);
+}
+
+int Renderer::list_screen_item_at(int total, int index, int mx, int my) const {
+    if (total <= 0) return -1;
+    ListLayout L = list_screen_layout(total, index);
+    if (mx < L.row_x || mx >= L.row_x + L.row_w) return -1;
+    // Full-stride rows, no inset dead zone — a list should be forgiving to click.
+    int rel = my - (L.top_y - L.line_gap / 2);
+    if (rel < 0) return -1;
+    int row = rel / L.line_h;
+    if (row < 0 || row >= L.max_lines) return -1;
+    int li = L.scroll + row;
+    return (li >= 0 && li < total) ? li : -1;
+}
+
+// Hint line under the popup items. It participates in the panel's width, so the
+// layout and the draw must use the same string — hence one definition here.
+static const char* const POPUP_HINT = GLYPH_PS_CROSS "=SELECT   " GLYPH_PS_CIRCLE "=CLOSE";
+
+Renderer::PopupLayout Renderer::popup_layout(const char* title, const std::string* items,
+                                             int count) const {
+    PopupLayout L;
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    L.scale     = (sw >= 900) ? 3 : 2;
+    L.text_h    = 7 * L.scale;
+    L.line_gap  = (L.scale >= 3) ? 10 : 6;
+    L.line_h    = L.text_h + L.line_gap;
+    L.pad       = L.line_gap * 3;
+    L.has_title = (title && title[0]);
+
+    int w = text_width_px(POPUP_HINT, L.scale);
+    if (L.has_title) w = std::max(w, text_width_px(title, L.scale));
+    for (int i = 0; i < count; i++)
+        w = std::max(w, text_width_px(items[i].c_str(), L.scale));
+
+    int box_w = w + L.pad * 2;
+    int box_h = L.pad * 2 + count * L.line_h + L.line_gap + L.text_h
+              + (L.has_title ? L.line_h + L.line_gap : 0);
+    L.box = {(sw - box_w) / 2, (sh - box_h) / 2, box_w, box_h};
+
+    L.first_row_y = L.box.y + L.pad + (L.has_title ? L.line_h + L.line_gap : 0);
+    L.row_x       = L.box.x + L.pad - 6;
+    L.row_w       = box_w - L.pad * 2 + 12;
+    return L;
 }
 
 void Renderer::draw_popup_menu(const char* title, const std::string* items,
@@ -1402,50 +1591,188 @@ void Renderer::draw_popup_menu(const char* title, const std::string* items,
     SDL_Rect dim = {0, 0, sw, sh};
     SDL_RenderFillRect(sdl, &dim);
 
-    int scale    = (sw >= 900) ? 3 : 2;
-    int th       = 7 * scale;
-    int line_gap = (scale >= 3) ? 10 : 6;
-    int line_h   = th + line_gap;
-    int pad      = line_gap * 3;
-
-    const char* hint = GLYPH_PS_CROSS "=SELECT   " GLYPH_PS_CIRCLE "=CLOSE";
-    int w = text_width_px(hint, scale);
-    if (title && title[0]) w = std::max(w, text_width_px(title, scale));
-    for (int i = 0; i < count; i++)
-        w = std::max(w, text_width_px(items[i].c_str(), scale));
-
-    int box_w = w + pad * 2;
-    int box_h = pad * 2 + count * line_h + line_gap + th
-              + ((title && title[0]) ? line_h + line_gap : 0);
-    int bx = (sw - box_w) / 2;
-    int by = (sh - box_h) / 2;
+    PopupLayout L = popup_layout(title, items, count);
 
     SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
     SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
-    SDL_Rect box = {bx, by, box_w, box_h};
-    SDL_RenderFillRect(sdl, &box);
+    SDL_RenderFillRect(sdl, &L.box);
     SDL_SetRenderDrawColor(sdl, Palette::ACCENT.r, Palette::ACCENT.g, Palette::ACCENT.b, 255);
-    SDL_RenderDrawRect(sdl, &box);
+    SDL_RenderDrawRect(sdl, &L.box);
 
-    int ty = by + pad;
-    if (title && title[0]) {
-        draw_text(bx + pad, ty, scale, title, Palette::ACCENT);
-        ty += line_h + line_gap;
-    }
+    int tx = L.box.x + L.pad;
+    if (L.has_title)
+        draw_text(tx, L.box.y + L.pad, L.scale, title, Palette::ACCENT);
+
     for (int i = 0; i < count; i++) {
+        int ty = L.first_row_y + i * L.line_h;
         if (i == index) {
-            SDL_Rect hi = {bx + pad - 6, ty - 3, box_w - pad * 2 + 12, th + 6};
+            SDL_Rect hi = {L.row_x, ty - 3, L.row_w, L.text_h + 6};
             SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
             SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
                                    Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
             SDL_RenderFillRect(sdl, &hi);
         }
-        draw_text(bx + pad, ty, scale, items[i].c_str(),
+        draw_text(tx, ty, L.scale, items[i].c_str(),
                   i == index ? Palette::ACCENT : Palette::TEXT_WHITE);
-        ty += line_h;
     }
-    ty += line_gap;
-    draw_text(bx + pad, ty, scale, hint, Palette::TEXT_DIM);
+    draw_text(tx, L.first_row_y + count * L.line_h + L.line_gap, L.scale,
+              POPUP_HINT, Palette::TEXT_DIM);
+}
+
+int Renderer::popup_item_at(const char* title, const std::string* items, int count,
+                            int mx, int my, bool* inside_panel) const {
+    if (inside_panel) *inside_panel = false;
+    if (!items || count <= 0) return -1;
+
+    PopupLayout L = popup_layout(title, items, count);
+    if (inside_panel)
+        *inside_panel = (mx >= L.box.x && mx < L.box.x + L.box.w &&
+                         my >= L.box.y && my < L.box.y + L.box.h);
+
+    if (mx < L.row_x || mx >= L.row_x + L.row_w) return -1;
+    // Rows are hit across their full stride (no inset dead zone like the board's —
+    // a menu should be forgiving), with the band centred on the text.
+    int rel = my - (L.first_row_y - L.line_gap / 2);
+    if (rel < 0) return -1;
+    int idx = rel / L.line_h;
+    return (idx >= 0 && idx < count) ? idx : -1;
+}
+
+Renderer::CatalogLayout Renderer::catalog_layout(const BoardView& view, const Catalog& cat,
+                                                 bool live_mode, bool readonly) const {
+    CatalogLayout L;
+    int total = (int)cat.entries.size();
+
+    L.scale      = (view.square >= 30) ? 3 : 2;
+    L.line_gap   = (L.scale >= 3) ? 8 : 4;
+    L.th         = 7 * L.scale;
+    L.pad        = (L.scale >= 3) ? 10 : 8;
+    L.hpad       = 100;
+    L.header_gap = L.line_gap + (L.scale >= 3 ? 4 : 2);
+    L.line_h     = L.th + L.line_gap;
+
+    // --- Header block ---
+    // Close hint matches the input device: go_viewer's mouse/keyboard catalog
+    // still says ESC; ogs_client (live_mode) has no keyboard here, so it's the
+    // PS glyph instead (same live_mode-gated pattern render_help_overlay uses).
+    const char* close_hint = live_mode ? GLYPH_PS_CIRCLE "=CLOSE" : "ESC to close";
+    char title_buf[160];
+    if (cat.search_mode) {
+        L.title = "CATALOG  (ESC to clear search)";
+    } else if (cat.virtual_player_mode && !cat.virtual_player.empty()) {
+        snprintf(title_buf, sizeof(title_buf), "GAMES: %s  %s",
+                 cat.virtual_player.c_str(), close_hint);
+        L.title = title_buf;
+    } else {
+        // Read-only pro game library gets its own title so it's never mistaken
+        // for the user's own (deletable) catalog.
+        snprintf(title_buf, sizeof(title_buf), "%s  %s%s",
+                 readonly ? "PRO GAME LIBRARY" : "CATALOG",
+                 close_hint, readonly ? "  (READ-ONLY)" : "");
+        L.title = title_buf;
+    }
+
+    // Every conditional header line lives here, once, so the list can never start
+    // at a y the rows weren't measured against.
+    int ty = L.pad;
+    L.title_y = ty;  ty += L.th + L.header_gap;
+    // Button legend — gamepad only (go_viewer's mouse/keyboard catalog has no
+    // equivalent scheme).
+    L.show_legend = live_mode;
+    if (L.show_legend) { L.legend_y = ty; ty += L.th + L.header_gap; }
+
+    L.index_ready   = cat.game_index.loaded();
+    L.show_building = cat.game_index.is_loading() && !L.index_ready;
+    if (L.show_building) { L.building_y = ty; ty += L.th + L.line_gap + (L.scale >= 3 ? 4 : 2); }
+
+    L.show_search = (!cat.search_query.empty() || cat.search_mode);
+    if (L.show_search) {
+        L.search_y = ty; ty += L.th + L.line_gap;
+        L.count_y  = ty; ty += L.th + L.line_gap + (L.scale >= 3 ? 4 : 2);
+    }
+    L.list_top_y = ty;
+
+    // --- Measure list width and black-column width for aligned player names ---
+    char lbl[1024];
+    // Player rank is only ever interesting outside of live play (catalog review
+    // has no "in-progress game" to protect), so this always includes it.
+    auto name_rank = [](const std::string& name, const std::string& rank) -> std::string {
+        std::string n = name.empty() ? "?" : name;
+        if (!rank.empty()) n += " [" + rank + "]";
+        return n;
+    };
+    L.vs_w    = text_width_px("vs", L.scale);
+    L.col_gap = L.scale * 6;   // pixel gap between columns
+    L.max_w   = text_width_px(L.title.c_str(), L.scale);
+
+    for (int i = 0; i < total; i++) {
+        const auto& e = cat.entries[i];
+        int w;
+        if (e.type == 0 && (!e.player_black.empty() || !e.player_white.empty())) {
+            // Four-column: black  vs  white  date
+            std::string bn = name_rank(e.player_black, e.player_black_rank);
+            std::string wn = name_rank(e.player_white, e.player_white_rank);
+            int bw = text_width_px(bn.c_str(), L.scale);
+            int ww = text_width_px(wn.c_str(), L.scale);
+            if (bw > L.max_black_w) L.max_black_w = bw;
+            if (ww > L.max_white_w) L.max_white_w = ww;
+            w = bw + L.col_gap + L.vs_w + L.col_gap + ww;
+        } else {
+            if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.display_name.c_str());
+            else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
+            else if (e.type == 3) snprintf(lbl, sizeof(lbl), "[%s]", e.display_name.c_str());
+            else                  snprintf(lbl, sizeof(lbl), "%s", e.display_name.c_str());
+            w = text_width_px(lbl, L.scale);
+        }
+        if (w > L.max_w) L.max_w = w;
+    }
+    // Date column starts after the white name with extra gap
+    L.date_col_x = L.hpad + L.max_black_w + L.col_gap + L.vs_w + L.col_gap
+                 + L.max_white_w + L.col_gap * 3;
+
+    // The loop above measured each row against its OWN name widths, but rows are
+    // drawn column-aligned (every white name sits at the widest-black-name offset,
+    // etc.) with a trailing date column — so a drawn row can extend past that
+    // per-row max_w. Widen max_w to the real aligned extent, so the selection
+    // highlight bar and the thumbnail area both clear the full drawn line.
+    if (L.max_black_w > 0 || L.max_white_w > 0) {
+        bool any_date = false;
+        for (int i = 0; i < total && !any_date; i++)
+            any_date = (cat.entries[i].type == 0 && !cat.entries[i].date.empty());
+        int aligned_w = L.max_black_w + L.col_gap + L.vs_w + L.col_gap + L.max_white_w;
+        if (any_date)
+            aligned_w = (L.date_col_x - L.hpad) + text_width_px("0000-00-00", L.scale);
+        L.max_w = std::max(L.max_w, aligned_w);
+    }
+    L.list_right = L.hpad + L.max_w;
+
+    // --- Visible window ---
+    int avail_h   = view.screen_h - L.list_top_y - L.pad;
+    L.max_lines   = (avail_h > 0) ? (avail_h / L.line_h) : 4;
+    if (L.max_lines < 4)     L.max_lines = 4;
+    if (L.max_lines > total) L.max_lines = total;
+
+    L.scroll = cat.scroll;
+    if (cat.index < L.scroll)                 L.scroll = cat.index;
+    if (cat.index >= L.scroll + L.max_lines)  L.scroll = cat.index - L.max_lines + 1;
+
+    L.row_x = L.hpad - 3;
+    L.row_w = L.max_w + 6;
+    L.total = total;
+    return L;
+}
+
+int Renderer::catalog_entry_at(int mx, int my) const {
+    if (!drawn_catalog_layout_valid_) return -1;
+    const CatalogLayout& L = drawn_catalog_layout_;
+    if (L.total <= 0) return -1;
+    if (mx < L.row_x || mx >= L.row_x + L.row_w) return -1;
+    int rel = my - (L.list_top_y - L.line_gap / 2);
+    if (rel < 0) return -1;
+    int row = rel / L.line_h;
+    if (row < 0 || row >= L.max_lines) return -1;
+    int ei = L.scroll + row;
+    return (ei >= 0 && ei < L.total) ? ei : -1;
 }
 
 void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds) {
@@ -1458,134 +1785,53 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
     SDL_RenderFillRect(sdl, &bg);
 
-    int total      = (int)cat.entries.size();
-    int scale      = (view.square >= 30) ? 3 : 2;
-    int line_gap   = (scale >= 3) ? 8 : 4;
-    int th         = 7 * scale;
-    int pad        = (scale >= 3) ? 10 : 8;
-    int hpad       = 100;
-    int header_gap = line_gap + (scale >= 3 ? 4 : 2);
-    int line_h     = th + line_gap;
-
-    // tx/ty track the current draw cursor for the left-side list column
-    int tx = hpad;
-    int ty = pad;
-
-    // --- Header ---
-    // Close hint matches the input device: go_viewer's mouse/keyboard catalog
-    // still says ESC; ogs_client (live_mode) has no keyboard here, so it's the
-    // PS glyph instead (same live_mode-gated pattern render_help_overlay uses).
+    int total = (int)cat.entries.size();
+    CatalogLayout L = catalog_layout(view, cat, ds.live_mode, ds.catalog_readonly);
+    // Publish it for catalog_entry_at — clicks hit-test the frame on screen rather
+    // than paying for this width pass again on every mouse move.
+    drawn_catalog_layout_       = L;
+    drawn_catalog_layout_valid_ = true;
     const char* close_hint = ds.live_mode ? GLYPH_PS_CIRCLE "=CLOSE" : "ESC to close";
-    char title_buf[160];
-    const char* title;
-    if (cat.search_mode) {
-        title = "CATALOG  (ESC to clear search)";
-    } else if (cat.virtual_player_mode && !cat.virtual_player.empty()) {
-        snprintf(title_buf, sizeof(title_buf), "GAMES: %s  %s", cat.virtual_player.c_str(), close_hint);
-        title = title_buf;
-    } else {
-        // Read-only pro game library gets its own title so it's never mistaken
-        // for the user's own (deletable) catalog.
-        snprintf(title_buf, sizeof(title_buf), "%s  %s%s",
-                 ds.catalog_readonly ? "PRO GAME LIBRARY" : "CATALOG",
-                 close_hint, ds.catalog_readonly ? "  (READ-ONLY)" : "");
-        title = title_buf;
-    }
-    draw_text(tx, ty, scale, title, Palette::ACCENT);
-    ty += th + header_gap;
+    int tx    = L.hpad;
+    int scale = L.scale;
 
-    // Button legend — gamepad only (go_viewer's mouse/keyboard catalog has no
-    // equivalent scheme). Shown inline, in-context, so which physical button does
-    // what is never a guessing game while actually browsing.
-    if (ds.live_mode) {
+    // --- Header (positions all come from the layout) ---
+    draw_text(tx, L.title_y, scale, L.title.c_str(), Palette::ACCENT);
+
+    // Shown inline, in-context, so which physical button does what is never a
+    // guessing game while actually browsing.
+    if (L.show_legend) {
         std::string legend = GLYPH_PS_CROSS "=OPEN   " GLYPH_PS_SQUARE "=AUTOPLAY   ";
         if (!ds.catalog_readonly)
             legend += GLYPH_PS_TRIANGLE "x2=DELETE   ";
         legend += close_hint;
-        draw_text(tx, ty, scale, legend.c_str(), Palette::TEXT_DIM);
-        ty += th + header_gap;
+        draw_text(tx, L.legend_y, scale, legend.c_str(), Palette::TEXT_DIM);
     }
+    if (L.show_building)
+        draw_text(tx, L.building_y, scale, "Building index...", Palette::TEXT_WHITE);
 
-    // --- Index status / search bar ---
-    bool index_ready   = cat.game_index.loaded();
-    bool index_loading = cat.game_index.is_loading();
-
-    if (index_loading && !index_ready) {
-        // Show a brief "building..." hint below the header
-        draw_text(tx, ty, scale, "Building index...", Palette::TEXT_WHITE);
-        ty += th + line_gap + (scale >= 3 ? 4 : 2);
-    }
-
-    if (!cat.search_query.empty() || cat.search_mode) {
+    if (L.show_search) {
         char search_lbl[256];
-        if (!index_ready && !cat.search_query.empty()) {
-            snprintf(search_lbl, sizeof(search_lbl), "SEARCH: %s_  (indexing...)", cat.search_query.c_str());
+        if (!L.index_ready && !cat.search_query.empty()) {
+            snprintf(search_lbl, sizeof(search_lbl), "SEARCH: %s_  (indexing...)",
+                     cat.search_query.c_str());
         } else {
             snprintf(search_lbl, sizeof(search_lbl), "SEARCH: %s_", cat.search_query.c_str());
         }
-        draw_text(tx, ty, scale, search_lbl, Palette::ACCENT);
-        ty += th + line_gap;
+        draw_text(tx, L.search_y, scale, search_lbl, Palette::ACCENT);
         char count_lbl[64];
-        snprintf(count_lbl, sizeof(count_lbl), "%d result%s",
-                 total, total == 1 ? "" : "s");
-        draw_text(tx, ty, scale, count_lbl, Palette::TEXT_WHITE);
-        ty += th + line_gap + (scale >= 3 ? 4 : 2);
+        snprintf(count_lbl, sizeof(count_lbl), "%d result%s", total, total == 1 ? "" : "s");
+        draw_text(tx, L.count_y, scale, count_lbl, Palette::TEXT_WHITE);
     }
 
-    // --- Measure list width and black-column width for aligned player names ---
     char lbl[1024];
-    // Player rank is only ever interesting outside of live play (catalog review
-    // has no "in-progress game" to protect), so this always includes it.
     auto name_rank = [](const std::string& name, const std::string& rank) -> std::string {
         std::string n = name.empty() ? "?" : name;
         if (!rank.empty()) n += " [" + rank + "]";
         return n;
     };
-    int vs_w     = text_width_px("vs", scale);
-    int col_gap  = scale * 6;   // pixel gap between columns
-    int max_w       = text_width_px(title, scale);
-    int max_black_w = 0;        // widest black-player name across all entries
-    int max_white_w = 0;        // widest white-player name across all entries
-
-    for (int i = 0; i < total; i++) {
-        const auto& e = cat.entries[i];
-        int w;
-        if (e.type == 0 && (!e.player_black.empty() || !e.player_white.empty())) {
-            // Four-column: black  vs  white  date
-            std::string bn = name_rank(e.player_black, e.player_black_rank);
-            std::string wn = name_rank(e.player_white, e.player_white_rank);
-            int bw = text_width_px(bn.c_str(), scale);
-            int ww = text_width_px(wn.c_str(), scale);
-            if (bw > max_black_w) max_black_w = bw;
-            if (ww > max_white_w) max_white_w = ww;
-            w = bw + col_gap + vs_w + col_gap + ww;
-        } else {
-            if      (e.type == 1) snprintf(lbl, sizeof(lbl), "[DIR] %s", e.display_name.c_str());
-            else if (e.type == 2) snprintf(lbl, sizeof(lbl), "[..]");
-            else if (e.type == 3) snprintf(lbl, sizeof(lbl), "[%s]", e.display_name.c_str());
-            else                  snprintf(lbl, sizeof(lbl), "%s", e.display_name.c_str());
-            w = text_width_px(lbl, scale);
-        }
-        if (w > max_w) max_w = w;
-    }
-    // Date column starts after the white name with extra gap
-    int date_col_x = tx + max_black_w + col_gap + vs_w + col_gap + max_white_w + col_gap * 3;
-
-    // The loop above measured each row against its OWN name widths, but rows are
-    // drawn column-aligned (every white name sits at the widest-black-name offset,
-    // etc.) with a trailing date column — so a drawn row can extend past that
-    // per-row max_w. Widen max_w to the real aligned extent, so the selection
-    // highlight bar and the thumbnail area both clear the full drawn line.
-    if (max_black_w > 0 || max_white_w > 0) {
-        bool any_date = false;
-        for (int i = 0; i < total && !any_date; i++)
-            any_date = (cat.entries[i].type == 0 && !cat.entries[i].date.empty());
-        int aligned_w = max_black_w + col_gap + vs_w + col_gap + max_white_w;
-        if (any_date)
-            aligned_w = (date_col_x - tx) + text_width_px("0000-00-00", scale);
-        max_w = std::max(max_w, aligned_w);
-    }
-    int list_right = hpad + max_w;
+    int max_black_w = L.max_black_w, col_gap = L.col_gap, vs_w = L.vs_w;
+    int date_col_x  = L.date_col_x,  list_right = L.list_right;
 
     // --- Thumbnails ---
     int thumb_inner_gap = 40;
@@ -1618,24 +1864,17 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
     }
 
     // --- Entry list ---
-    int avail_h   = view.screen_h - ty - pad;
-    int max_lines = (avail_h > 0) ? (avail_h / line_h) : 4;
-    if (max_lines < 4)     max_lines = 4;
-    if (max_lines > total) max_lines = total;
-
-    int scroll = cat.scroll;
-    int idx    = cat.index;
-    if (idx < scroll) scroll = idx;
-    if (idx >= scroll + max_lines) scroll = idx - max_lines + 1;
-
-    for (int i = 0; i < max_lines; i++) {
-        int ei = scroll + i;
+    int idx = cat.index;
+    for (int i = 0; i < L.max_lines; i++) {
+        int ei = L.scroll + i;
         if (ei >= total) break;
         const auto& e = cat.entries[ei];
+        int ty = L.list_top_y + i * L.line_h;
 
-        // Highlight bar for the selected entry
+        // Highlight bar for the selected entry. No hover variant on purpose — see
+        // the catalog note in ogs_client's mouse-motion handler.
         if (ei == idx) {
-            SDL_Rect hi = {hpad - 3, ty - 3, max_w + 6, th + 6};
+            SDL_Rect hi = {L.row_x, ty - 3, L.row_w, L.th + 6};
             SDL_SetRenderDrawColor(sdl, Palette::CATALOG_SELECT.r, Palette::CATALOG_SELECT.g,
                                    Palette::CATALOG_SELECT.b, Palette::CATALOG_SELECT.a);
             SDL_RenderFillRect(sdl, &hi);
@@ -1664,9 +1903,70 @@ void Renderer::render_catalog_overlay(const BoardView& view, const DrawState& ds
             else                  snprintf(lbl, sizeof(lbl), "%s", e.display_name.c_str());
             draw_text(tx, ty, scale, lbl, Palette::TEXT_WHITE);
         }
-
-        ty += line_h;
     }
+}
+
+// ── Freehand chalk annotation ───────────────────────────────────────────────
+// Strokes live as pixels in their own full-screen texture rather than as a list of
+// points replayed each frame: the layer is stamped once per segment and then just
+// blitted, so an hour of scribbling costs exactly one blit per frame.
+
+void Renderer::annot_ensure_layer() {
+    int w = 0, h = 0;
+    SDL_GetRendererOutputSize(sdl, &w, &h);
+    if (annot_layer_ && annot_w_ == w && annot_h_ == h) return;
+
+    // Size changed (or first use) — a screen-space scribble has no meaning at a
+    // different resolution, so start clean rather than stretch it.
+    if (annot_layer_) SDL_DestroyTexture(annot_layer_);
+    annot_layer_ = SDL_CreateTexture(sdl, SDL_PIXELFORMAT_RGBA8888,
+                                     SDL_TEXTUREACCESS_TARGET, w, h);
+    if (!annot_layer_) return;
+    SDL_SetTextureBlendMode(annot_layer_, SDL_BLENDMODE_BLEND);
+    annot_w_ = w;
+    annot_h_ = h;
+    annot_any_ = false;
+
+    SDL_Texture* prev = SDL_GetRenderTarget(sdl);
+    SDL_SetRenderTarget(sdl, annot_layer_);
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, 0, 0, 0, 0);
+    SDL_RenderClear(sdl);
+    SDL_SetRenderTarget(sdl, prev);
+}
+
+void Renderer::annot_segment(int x0, int y0, int x1, int y1, bool dark) {
+    annot_ensure_layer();
+    if (!annot_layer_) return;
+
+    // draw_thick_line collapses a zero-length segment to a single 1px point, which
+    // would make a pen tap invisible. Give it a hair of direction so the tap lands
+    // as a proper round-ish chalk mark at full width.
+    if (x0 == x1 && y0 == y1) x1 += 1;
+
+    int sw = 0, sh = 0;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+    // Scale with the display so the line feels the same weight on any monitor.
+    // Roughly 9px at 1080p, 12px at 1440p, 18px at 4K — a smaller divisor is a
+    // fatter stick of chalk.
+    int core = std::max(5, sh / 120);
+
+    SDL_Texture* prev = SDL_GetRenderTarget(sdl);
+    SDL_SetRenderTarget(sdl, annot_layer_);
+    draw_thick_line(x0, y0, x1, y1, core, dark ? Palette::CHALK_DARK : Palette::CHALK);
+    SDL_SetRenderTarget(sdl, prev);
+    annot_any_ = true;
+}
+
+void Renderer::annot_clear() {
+    if (!annot_layer_) { annot_any_ = false; return; }
+    SDL_Texture* prev = SDL_GetRenderTarget(sdl);
+    SDL_SetRenderTarget(sdl, annot_layer_);
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, 0, 0, 0, 0);
+    SDL_RenderClear(sdl);
+    SDL_SetRenderTarget(sdl, prev);
+    annot_any_ = false;
 }
 
 // Draw a dashed line between two pixel points, alternating drawn/skipped segments.
@@ -2892,23 +3192,36 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     }
     if (!ds.free_mode) {
         if (ds.live_mode) {
-            // Status line in the same top-left spot as mode status. An embedded
-            // '\n' (long hint text, e.g. puzzle explore-mode) splits it into two
-            // lines instead of forcing one long line down to the smallest scale.
+            // Status line in the same top-left spot as mode status. Call sites
+            // insert '\n' at logical, readable break points for long messages
+            // (button-hint groups, "solved"/"wrong" text, etc.) rather than
+            // relying on auto word-wrap, which tended to split awkwardly mid-hint
+            // (e.g. between a button glyph and its label). Scale still shrinks
+            // as a last resort for anything that overflows despite the breaks
+            // (e.g. arbitrary server-provided text with no embedded '\n').
             if (ds.live_status && ds.live_status[0]) {
                 std::string status_str(ds.live_status);
-                size_t nl = status_str.find('\n');
-                std::string line1 = (nl == std::string::npos) ? status_str : status_str.substr(0, nl);
-                std::string line2 = (nl == std::string::npos) ? std::string() : status_str.substr(nl + 1);
 
                 int scale = (view.square >= 30) ? 3 : 2;
                 int pad   = (view.square >= 30) ? 16 : 8;
                 int avail = view.offset_x - view.margin - pad - 4;
+
+                std::vector<std::string> lines;
+                {
+                    size_t start = 0;
+                    while (start <= status_str.size()) {
+                        size_t nl  = status_str.find('\n', start);
+                        size_t end = (nl == std::string::npos) ? status_str.size() : nl;
+                        lines.push_back(status_str.substr(start, end - start));
+                        if (nl == std::string::npos) break;
+                        start = nl + 1;
+                    }
+                }
                 auto widest = [&](int s) {
-                    return std::max(text_width_px(line1.c_str(), s),
-                                     line2.empty() ? 0 : text_width_px(line2.c_str(), s));
+                    int w = 0;
+                    for (auto& l : lines) w = std::max(w, text_width_px(l.c_str(), s));
+                    return w;
                 };
-                // Scale down if either line overflows the left panel
                 while (scale > 1 && widest(scale) > avail)
                     scale--;
                 int y = view.offset_y - view.margin + pad;
@@ -2924,13 +3237,11 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                     y += bscale * 7 + 10;
                 }
                 SDL_Color col = ds.live_my_turn ? Palette::ACCENT : Palette::TEXT_SECONDARY;
-                int tw = text_width_px(line1.c_str(), scale);
-                int x  = view.offset_x - view.margin - pad - tw;
-                draw_text(x, y, scale, line1.c_str(), col);
-                if (!line2.empty()) {
-                    y += scale * 8 + 3;
-                    int tw2 = text_width_px(line2.c_str(), scale);
-                    draw_text(view.offset_x - view.margin - pad - tw2, y, scale, line2.c_str(), col);
+                for (size_t i = 0; i < lines.size(); i++) {
+                    int tw = text_width_px(lines[i].c_str(), scale);
+                    int x  = view.offset_x - view.margin - pad - tw;
+                    draw_text(x, y, scale, lines[i].c_str(), col);
+                    if (i + 1 < lines.size()) y += scale * 8 + 3;
                 }
 
                 // Result and KataGo projected score below the status (GAME_OVER)
@@ -2947,14 +3258,19 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
                         if (margin[0] == 'R' || margin[0] == 'r') {
                             // who = winner; the *loser* resigned
                             const char* loser = (rm[0] == 'B') ? "WHITE" : "BLACK";
-                            snprintf(rbuf, sizeof(rbuf), "RESULT: %s RESIGNED", loser);
+                            snprintf(rbuf, sizeof(rbuf), "%s RESIGNED", loser);
                         } else if (margin[0] == 'T' || margin[0] == 't')
-                            snprintf(rbuf, sizeof(rbuf), "RESULT: %s TIME", who);
+                            snprintf(rbuf, sizeof(rbuf), "%s TIME", who);
                         else
-                            snprintf(rbuf, sizeof(rbuf), "RESULT: %s +%s", who, margin);
+                            snprintf(rbuf, sizeof(rbuf), "%s +%s", who, margin);
                     } else {
-                        snprintf(rbuf, sizeof(rbuf), "RESULT: %s", rm);
+                        snprintf(rbuf, sizeof(rbuf), "%s", rm);
                     }
+                    // "RESULT:" and the value go on separate lines; the value line
+                    // (e.g. "BLACK RESIGNED") tends to overflow the right-aligned
+                    // column when combined with the label on one line.
+                    draw_text(lright - text_width_px("RESULT:", lscale), next_y, lscale, "RESULT:", Palette::ACCENT);
+                    next_y += lscale * 8 + 3;
                     draw_text(lright - text_width_px(rbuf, lscale), next_y, lscale, rbuf, Palette::ACCENT);
                     next_y += lscale * 8 + 3;
                 }
@@ -3083,6 +3399,23 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     }
 
     render_board_coordinates(view, ds);
+
+    // Chalk sits above everything on the board — it's drawn on the glass, so it
+    // ignores which position is showing — but below the popup, so a menu opened
+    // over a scribbled board stays readable.
+    if (annot_layer_ && annot_any_)
+        SDL_RenderCopy(sdl, annot_layer_, nullptr, nullptr);
+    if (ds.draw_mode) {
+        // In this mode a click draws instead of placing a stone, so say so.
+        // State only, no key hints — just enough to explain why a click isn't
+        // placing a stone. Always in chalk white, whatever colour is armed: a black
+        // label on the dark panels would be the one thing you couldn't read.
+        int scale = (view.screen_w >= 900) ? 3 : 2;
+        draw_text(view.screen_w / 40, view.screen_h / 40, scale,
+                  ds.draw_dark ? "DRAWING (BLACK)" : "DRAWING (WHITE)",
+                  Palette::CHALK);
+    }
+
     if (ds.popup_items && ds.popup_count > 0)
         draw_popup_menu(ds.popup_title, ds.popup_items, ds.popup_count, ds.popup_index);
     render_software_cursor(view, ds);

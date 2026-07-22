@@ -329,6 +329,14 @@ void OgsNet::cmd_send_pass(int game_id) {
     enqueue_event("game/move", payload.dump());
 }
 
+// Re-send game/connect so OGS re-emits gamedata — the main thread calls this to
+// force an authoritative board rebuild when the live move stream has desynced.
+// Same payload as the automatch auto-connect.
+void OgsNet::cmd_reconnect_game(int game_id) {
+    json conn = {{"game_id", game_id}, {"player_id", my_player_id}, {"chat", false}};
+    enqueue_event("game/connect", conn.dump());
+}
+
 void OgsNet::cmd_send_resign(int game_id) {
     json payload = {{"game_id", game_id}, {"player_id", my_player_id}};
     enqueue_event("game/resign", payload.dump());

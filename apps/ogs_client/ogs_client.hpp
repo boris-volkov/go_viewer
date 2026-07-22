@@ -77,8 +77,15 @@ struct MatchPrefs {
     // Speeds    — index 0=blitz (fast), 1=rapid (medium), 2=live (slow)  (OGS mode only)
     bool speeds[3] = {false, true, true};
     // Local play vs KataGo human SL model
-    bool katago_mode = false;
+    // No katago_mode flag: OGS and local settings are separate screens (MATCH
+    // SETTINGS / KATAGO SETTINGS) and which game you start is chosen explicitly
+    // in the popup, so there is no persistent "mode" to remember.
     int  katago_str  = 7;   // index into strength table (0=20k … 6=5d, 7=adaptive)
+    // Board size for local play, kept apart from `sizes` above: that one is a
+    // multi-select widening the OGS automatch pool, this is the single size one
+    // local game is played on. Sharing them meant picking 9x9 for KataGo silently
+    // narrowed OGS automatch to 9x9-only. Index: 0=9x9, 1=13x13, 2=19x19.
+    int  katago_size = 2;
 };
 
 // ── Outbound: main thread → network thread ─────────────────────────────────
