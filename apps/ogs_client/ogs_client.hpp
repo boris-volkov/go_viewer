@@ -3,12 +3,24 @@
 #include <vector>
 #include <utility>
 
+// ── Correspondence games ───────────────────────────────────────────────────
+// One row in the "MY GAMES" list, built from the OGS ui/overview response. This
+// is a lightweight summary only — opening a row sends game/connect and the full
+// board arrives through the usual GAME_CONNECTED path, same as a live game.
+struct CorrGameSummary {
+    int         id         = 0;
+    std::string opp;                 // opponent's username (the side that isn't me)
+    int         board_size = 19;
+    bool        my_move    = false;  // true = it's my turn (clock.current_player == me)
+};
+
 // ── Inbound: network thread → main thread ──────────────────────────────────
 
 enum class NetMsgType {
     AUTH_OK,         // authenticated; player info set in OgsNet
     AUTH_FAIL,       // login or socket auth failed; check msg.text for reason
     MATCH_FOUND,     // automatch start; game_id valid; we auto-send game/connect
+    CORR_LIST_UPDATED, // ui/overview fetch finished; corr_games holds the parsed list
     GAME_CONNECTED,  // gamedata received; board state, names, clocks populated
     OPPONENT_MOVE,   // opponent played; col/row valid (-1/-1 = pass)
     CLOCK_UPDATE,    // black_secs / white_secs updated
@@ -67,6 +79,9 @@ struct NetMsg {
 
     // STONE_REMOVAL: raw JSON ownership array (2D, [row][col]: 1=black, -1=white, 0=neutral)
     std::string ownership_json;
+
+    // CORR_LIST_UPDATED: the user's ongoing correspondence games (whose-turn included)
+    std::vector<CorrGameSummary> corr_games;
 };
 
 // ── Match preferences (used to build automatch payload) ───────────────────

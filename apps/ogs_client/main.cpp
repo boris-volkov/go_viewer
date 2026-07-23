@@ -108,6 +108,7 @@ enum class AppState {
     LOBBY,             // authenticated, idle
     MATCH_MENU,        // match settings menu open
     SEARCHING,         // automatch in queue
+    CORR_LIST,         // browsing my ongoing correspondence games ("MY GAMES")
     PLAYING,           // live game active
     STONE_REMOVAL,     // game ended, awaiting stone removal acceptance
     GAME_OVER,         // game finished, showing result
@@ -926,6 +927,20 @@ private:
     void  load_adaptive();
     void  save_adaptive();
     void  update_adaptive(const std::string& result);
+
+    // Correspondence game state
+    std::vector<CorrGameSummary> corr_games_;   // rows in the MY GAMES list
+    int  corr_index_       = 0;                  // list cursor
+    int  corr_hover_       = -1;                 // mouse-hovered row (-1 = none)
+    int  corr_lines_drawn_ = 0;                  // rows the last draw handed the list screen
+    bool corr_loading_     = false;              // an overview fetch is in flight
+    bool is_corr_game_     = false;              // the open game came from the corr list
+    void open_corr_list();      // enter CORR_LIST and (re)fetch the overview
+    void refresh_corr_list();   // kick off an overview fetch without changing state
+    void draw_corr_list();
+    void handle_corr_button(Uint8 btn);
+    void leave_corr_game();     // disconnect the open corr game, return to MY GAMES
+    int  corr_hit(int mx, int my) const;  // list row under a screen point, or -1
 
     // Local game state
     bool        is_local_game_       = false;
@@ -1812,6 +1827,11 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
+    if (state_ == AppState::CORR_LIST) {
+        handle_corr_button(btn);
+        return;
+    }
+
     if (state_ == AppState::LOBBY) {
         if (btn == SDL_CONTROLLER_BUTTON_X) {
             open_game_catalog();
@@ -2277,6 +2297,7 @@ void App::open_popup_menu() {
             state_ = AppState::SEARCHING;
             set_status("SEARCHING...");
         });
+        add("MY GAMES (CORRESPONDENCE)", [this]() { open_corr_list(); });
         if (!kata_human_model_.empty())
             add("PLAY VS KATAGO", [this]() { start_local_game(); });
         add("MATCH SETTINGS",  [this]() { open_settings_menu(); });
@@ -2299,8 +2320,23 @@ void App::open_popup_menu() {
         });
         break;
 
+    case AppState::CORR_LIST:
+        popup_title_ = "MY GAMES";
+        add("REFRESH", [this]() {
+            refresh_corr_list();
+            set_status("MY GAMES");
+        });
+        add("RETURN TO LOBBY", lobby);
+        add("SETTINGS", [this]() { open_settings_menu(); });
+        break;
+
     case AppState::PLAYING:
         popup_title_ = "GAME MENU";
+        // Correspondence: step away without ending the game — it stays your turn (or
+        // the opponent's) and you drop back to the list. Listed first so it's the
+        // easy, safe exit; RESIGN stays confirm-gated below it.
+        if (is_corr_game_)
+            add("BACK TO MY GAMES", [this]() { leave_corr_game(); });
         if (is_local_game_)
             add("UNDO MOVE", [this]() { undo_local_move(); });
         add("RESIGN", [this]() { do_resign(); }, /*confirm=*/true);
@@ -3436,6 +3472,7 @@ static std::string kata_rank_label(int idx) {
 }
 
 void App::start_local_game() {
+    is_corr_game_ = false;  // a local game is never a correspondence game
     // Board size comes from KATAGO SETTINGS' own single-select, not the OGS
     // multi-select — those are separate settings on separate screens now.
     static const int kSizes[3] = {9, 13, 19};
@@ -3537,6 +3574,7 @@ void App::start_local_game() {
 
 void App::start_practice_from_position() {
     if (state_ != AppState::GAME_OVER || !analysis_cur_) return;
+    is_corr_game_ = false;  // a practice game is local, never correspondence
 
     // Reference the position in place — GameState is ~12MB (it embeds a full
     // GameSnapshot[MAX_MOVES] by value), so it must never be a local/by-value
@@ -4713,6 +4751,123 @@ void App::handle_joseki_button(Uint8 btn) {
     }
 }
 
+// ── Correspondence games (MY GAMES) ───────────────────────────────────────────
+
+// Snapshot the games OGS has pushed over the socket as active_game events (cached
+// in OgsNet). No network round-trip — the REST ui/overview endpoint rejects the
+// socket JWT (403). While MY GAMES is open, CORR_LIST_UPDATED pushes keep it live.
+void App::refresh_corr_list() {
+    corr_games_   = net_.corr_games_snapshot();
+    corr_loading_ = false;
+    if (corr_index_ >= (int)corr_games_.size())
+        corr_index_ = std::max(0, (int)corr_games_.size() - 1);
+}
+
+void App::open_corr_list() {
+    save_companion();  // persist any open review before switching away
+    analysis_root_.reset();
+    analysis_cur_ = nullptr;
+    analysis_tree_render_.clear();
+    is_local_game_ = false;
+    state_      = AppState::CORR_LIST;
+    corr_index_ = 0;
+    corr_hover_ = -1;
+    refresh_corr_list();
+    set_status("MY GAMES");
+    draw();
+}
+
+void App::draw_corr_list() {
+    std::vector<std::string> lines;
+    std::vector<SDL_Color>   colors;
+    static const SDL_Color MOVE_COL = {120, 230, 120, 255};  // your-move rows, green
+    static const SDL_Color WAIT_COL = {190, 190, 190, 255};  // waiting on opponent, grey
+
+    for (const auto& g : corr_games_) {
+        std::string row = g.my_move ? GLYPH_PS_CROSS " " : "  ";
+        row += g.opp;
+        row += "   " + std::to_string(g.board_size) + "x" + std::to_string(g.board_size);
+        row += g.my_move ? "   YOUR MOVE" : "   WAITING";
+        lines.push_back(row);
+        colors.push_back(g.my_move ? MOVE_COL : WAIT_COL);
+    }
+    if (corr_loading_ && corr_games_.empty()) {
+        lines.push_back("LOADING...");
+        colors.push_back(WAIT_COL);
+    } else if (corr_games_.empty()) {
+        lines.push_back("(no correspondence games)");
+        colors.push_back(WAIT_COL);
+    }
+
+    int to_move = 0;
+    for (const auto& g : corr_games_) if (g.my_move) to_move++;
+    std::string title = "MY GAMES — " + std::to_string(to_move) + " TO MOVE / " +
+                        std::to_string((int)corr_games_.size()) + " ACTIVE";
+    std::string footer = GLYPH_PS_CROSS " OPEN   " GLYPH_PS_TRIANGLE " REFRESH   "
+                         GLYPH_PS_CIRCLE " LOBBY";
+
+    bool self_present = !popup_active_;
+    corr_lines_drawn_ = (int)lines.size();
+    renderer_->draw_list_screen(title.c_str(), lines, corr_index_, footer.c_str(),
+                                self_present, colors.data(), corr_hover_);
+    if (popup_active_)
+        renderer_->draw_popup_menu(popup_title_.c_str(), popup_labels_.data(),
+                                   (int)popup_labels_.size(), popup_index_);
+    if (!self_present)
+        SDL_RenderPresent(renderer_->sdl);
+}
+
+void App::handle_corr_button(Uint8 btn) {
+    int n = (int)corr_games_.size();
+    switch (btn) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        if (n > 0) { corr_index_ = (corr_index_ - 1 + n) % n; draw(); }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        if (n > 0) { corr_index_ = (corr_index_ + 1) % n; draw(); }
+        break;
+    case SDL_CONTROLLER_BUTTON_A:
+        // Open the highlighted game: game/connect → GAME_CONNECTED rebuilds the
+        // board and switches to PLAYING, exactly as a live game does.
+        if (n > 0 && corr_index_ >= 0 && corr_index_ < n) {
+            is_corr_game_ = true;
+            set_status("OPENING GAME...");
+            net_.cmd_open_game(corr_games_[corr_index_].id);
+            draw();
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_Y:
+        refresh_corr_list();
+        set_status("MY GAMES");
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_B:
+        state_ = AppState::LOBBY;
+        set_status("");
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_START:
+        open_popup_menu();
+        break;
+    default: break;
+    }
+}
+
+// Leave the open correspondence game without ending it: drop its live stream and
+// return to MY GAMES, re-fetching so the list reflects any move just made.
+void App::leave_corr_game() {
+    if (game_.game_id) net_.cmd_disconnect_game(game_.game_id);
+    is_corr_game_ = false;
+    open_corr_list();
+}
+
+// Row under a screen point, using the same row count the last draw passed the list
+// screen (which can include a LOADING/empty placeholder that isn't a real game).
+int App::corr_hit(int mx, int my) const {
+    if (state_ != AppState::CORR_LIST || corr_lines_drawn_ <= 0) return -1;
+    return renderer_->list_screen_item_at(corr_lines_drawn_, corr_index_, mx, my);
+}
+
 // OGS rank number → display string: 1..29 = 29k..1k, 30+ = 1d+. 0 = unrated.
 static std::string ogs_rank_str(int r) {
     if (r <= 0)  return "?";
@@ -5600,8 +5755,21 @@ void App::handle_net_msg(const NetMsg& msg) {
         break;
 
     case NetMsgType::MATCH_FOUND:
+        is_corr_game_ = false;  // an automatch game is live, not from the corr list
         set_status("MATCH FOUND — CONNECTING...");
         draw();
+        break;
+
+    case NetMsgType::CORR_LIST_UPDATED:
+        corr_loading_ = false;
+        corr_games_   = msg.corr_games;
+        if (state_ == AppState::CORR_LIST) {
+            if (corr_index_ >= (int)corr_games_.size())
+                corr_index_ = std::max(0, (int)corr_games_.size() - 1);
+            // msg.text is set only on fetch/parse failure — surface it if present.
+            set_status(msg.text.empty() ? "MY GAMES" : msg.text);
+            draw();
+        }
         break;
 
     case NetMsgType::GAME_CONNECTED: {
@@ -6266,6 +6434,10 @@ void App::draw() {
         draw_puzzle_browser();
         return;
     }
+    if (state_ == AppState::CORR_LIST) {
+        draw_corr_list();
+        return;
+    }
     if (catalog_.active) {
         // Parse names for the entire listing, not just the visible window. The first
         // frame after entering a directory pays one pass of 4KB header reads; every
@@ -6719,6 +6891,11 @@ void App::event_loop() {
                         int h = pz_hit(e.motion.x, e.motion.y);
                         if (h != pz_hover_) { pz_hover_ = h; motion_redraw = true; }
                     }
+                    // MY GAMES list: same cheap hover tint as the puzzle browser.
+                    else if (state_ == AppState::CORR_LIST) {
+                        int h = corr_hit(e.motion.x, e.motion.y);
+                        if (h != corr_hover_) { corr_hover_ = h; motion_redraw = true; }
+                    }
                     // Snap the board cursor to the hovered grid point (mouse and pad
                     // coexist — the cursor just follows whichever moved last)
                     else if (!catalog_.active && state_ != AppState::MATCH_MENU &&
@@ -6823,6 +7000,18 @@ void App::event_loop() {
                                     draw();
                                 }
                             }
+                        } else if (state_ == AppState::CORR_LIST) {
+                            // Same two-step: click selects, clicking the selected row
+                            // opens the game (guarding the LOADING/empty placeholder row).
+                            int h = corr_hit(e.button.x, e.button.y);
+                            if (h >= 0 && h < (int)corr_games_.size()) {
+                                if (h == corr_index_) {
+                                    handle_corr_button(SDL_CONTROLLER_BUTTON_A);
+                                } else {
+                                    corr_index_ = h;
+                                    draw();
+                                }
+                            }
                         }
                     } else if (e.button.button == SDL_BUTTON_RIGHT) {
                         // Right-click is a mouse gesture, not an alias for circle.
@@ -6846,7 +7035,8 @@ void App::event_loop() {
                     // Wheel: scroll lists in the catalog/menu/browser/popup, step moves on a board
                     bool list_ctx = popup_active_ || catalog_.active ||
                                     state_ == AppState::MATCH_MENU ||
-                                    state_ == AppState::PUZZLE_BROWSE;
+                                    state_ == AppState::PUZZLE_BROWSE ||
+                                    state_ == AppState::CORR_LIST;
                     Uint8 up_btn   = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_UP   : (Uint8)0xFD;
                     Uint8 down_btn = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_DOWN : (Uint8)0xFE;
                     for (int s = e.wheel.y; s > 0; s--) handle_controller_button(up_btn);

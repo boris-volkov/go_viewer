@@ -209,6 +209,91 @@ void OgsNet::fetch_sgf(int game_id, const std::string& path) {
     net_log(("fetch_sgf: saved " + path).c_str());
 }
 
+// One "active_game" event: the server's push of a game the user is in. These
+// arrive right after authenticate (one per ongoing game) and again whenever a game
+// changes (e.g. a move flips whose turn it is), so corr_games_ stays current for as
+// long as the socket is up.
+void OgsNet::handle_active_game(const std::string& payload_json) {
+    // Log the first payload in full, once — the exact field layout (whose-turn key,
+    // players, size, speed) can then be verified against a real game.
+    static bool logged_shape = false;
+    if (!logged_shape) {
+        logged_shape = true;
+        net_log(("active_game shape: " + payload_json.substr(0, 1500)).c_str());
+    }
+
+    try {
+        auto d = json::parse(payload_json);
+        int gid = d.value("id", d.value("game_id", 0));
+        if (gid == 0) { push_corr_list(); return; }
+
+        auto grab = [](const json& o, int& id, std::string& name) {
+            if (!o.is_object()) return;
+            if (o.contains("id") && o["id"].is_number_integer()) id = o["id"].get<int>();
+            name = o.value("username", name);
+        };
+        int black_id = 0, white_id = 0;
+        std::string black_name = "Black", white_name = "White";
+        grab(d.value("black", json::object()), black_id, black_name);
+        grab(d.value("white", json::object()), white_id, white_name);
+
+        // Only the user's own games (active_game is also how observed games arrive).
+        if (black_id != my_player_id && white_id != my_player_id) { push_corr_list(); return; }
+
+        // Whose turn: player_to_move, or clock.current_player as a fallback.
+        int ptm = d.value("player_to_move", 0);
+        if (ptm == 0 && d.contains("clock") && d["clock"].is_object())
+            ptm = d["clock"].value("current_player", 0);
+
+        CorrGameSummary s;
+        s.id         = gid;
+        s.board_size = d.value("width", d.value("size", 19));
+        s.opp        = (black_id == my_player_id) ? white_name : black_name;
+        s.my_move    = (ptm != 0 && ptm == my_player_id);
+
+        // Correspondence vs live: active_game has no speed field, but time_per_move
+        // (seconds allotted per move) separates them cleanly — correspondence is
+        // hours-to-days per move, live is seconds-to-minutes. Drop anything with a
+        // small positive per-move time as live; 0/absent means no clock (an unlimited
+        // correspondence game), which we keep. 3600s (1h) is a safe cutoff — no live
+        // speed tier (blitz/rapid/live) approaches an hour per move.
+        int  tpm     = d.value("time_per_move", 0);
+        bool is_live = (tpm > 0 && tpm < 3600);
+
+        std::string phase = d.value("phase", "");
+        {
+            std::lock_guard<std::mutex> lk(corr_mu_);
+            if (phase == "finished" || is_live) corr_games_.erase(gid);
+            else                                corr_games_[gid] = s;
+        }
+    } catch (const std::exception& e) {
+        net_log(("active_game parse error: " + std::string(e.what())).c_str());
+    }
+    push_corr_list();
+}
+
+// Push the current cache to the main thread as a CORR_LIST_UPDATED snapshot.
+void OgsNet::push_corr_list() {
+    NetMsg m;
+    m.type = NetMsgType::CORR_LIST_UPDATED;
+    {
+        std::lock_guard<std::mutex> lk(corr_mu_);
+        m.corr_games.reserve(corr_games_.size());
+        for (const auto& kv : corr_games_) m.corr_games.push_back(kv.second);
+    }
+    push_msg(std::move(m));
+}
+
+// Locked copy of the cache — for the main thread's on-demand refresh (the events
+// may all have arrived before the user opened MY GAMES).
+std::vector<CorrGameSummary> OgsNet::corr_games_snapshot() {
+    std::vector<CorrGameSummary> out;
+    std::lock_guard<std::mutex> lk(corr_mu_);
+    out.reserve(corr_games_.size());
+    for (const auto& kv : corr_games_) out.push_back(kv.second);
+    return out;
+}
+
 // Base64url decode (for JWT payload).
 static std::string base64url_decode(const std::string& in) {
     std::string s = in;
@@ -335,6 +420,27 @@ void OgsNet::cmd_send_pass(int game_id) {
 void OgsNet::cmd_reconnect_game(int game_id) {
     json conn = {{"game_id", game_id}, {"player_id", my_player_id}, {"chat", false}};
     enqueue_event("game/connect", conn.dump());
+}
+
+// Open a game the user picked from their correspondence list. Same connect payload
+// as the automatch auto-connect, but here we also claim active_game_id_ (automatch
+// does that in its automatch/start handler) so move/clock/phase events for this game
+// are recognised. Clear any stale removed-stones from a previously-open game.
+void OgsNet::cmd_open_game(int game_id) {
+    active_game_id_ = game_id;
+    removed_stones_.clear();
+    json conn = {{"game_id", game_id}, {"player_id", my_player_id}, {"chat", false}};
+    net_log(("cmd_open_game: connecting to " + std::to_string(game_id)).c_str());
+    enqueue_event("game/connect", conn.dump());
+}
+
+// Stop receiving a game's live event stream. Sent when the user backs out of a
+// correspondence board so events for games they're no longer viewing don't pile up.
+void OgsNet::cmd_disconnect_game(int game_id) {
+    json payload = {{"game_id", game_id}, {"player_id", my_player_id}};
+    net_log(("cmd_disconnect_game: " + std::to_string(game_id)).c_str());
+    enqueue_event("game/disconnect", payload.dump());
+    if (active_game_id_ == game_id) active_game_id_ = 0;
 }
 
 void OgsNet::cmd_send_resign(int game_id) {
@@ -701,6 +807,12 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
         } catch (const std::exception& e) {
             fprintf(stderr, "[ogs_net] automatch/start parse: %s\n", e.what());
         }
+        return;
+    }
+
+    // ---------- active game (the user's ongoing games list) ----------
+    if (name == "active_game") {
+        handle_active_game(payload_json);
         return;
     }
 

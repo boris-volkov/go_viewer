@@ -3,6 +3,7 @@
 #include <libwebsockets.h>
 #include <string>
 #include <queue>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -25,6 +26,13 @@ public:
     void cmd_send_move(int game_id, int col, int row);
     void cmd_send_pass(int game_id);
     void cmd_reconnect_game(int game_id);  // re-send game/connect to pull fresh gamedata (resync)
+
+    // Correspondence: connect to an arbitrary game the way automatch auto-connects,
+    // but for a game the user picked from their list — sets active_game_id_ so the
+    // subsequent move/clock/phase events route to it.
+    void cmd_open_game(int game_id);
+    // Leave a game's live stream (game/disconnect). Clears active_game_id_ if it matched.
+    void cmd_disconnect_game(int game_id);
     void cmd_send_resign(int game_id);
     void cmd_accept_stones(int game_id);
     void cmd_accept_undo(int game_id, int move_number);
@@ -36,6 +44,13 @@ public:
     // Download the completed game's SGF from the OGS API and write it to path.
     // Blocks — call from a background thread, not from the SDL event loop.
     void fetch_sgf(int game_id, const std::string& path);
+
+    // Snapshot the user's ongoing games. These arrive over the socket as
+    // "active_game" events (the server pushes one per game after authenticate and
+    // whenever a game changes) and are cached in corr_games_ — the REST ui/overview
+    // endpoint rejects the socket JWT with 403, so there is no HTTP call here. Cheap
+    // (a locked copy of the cache); safe to call from the SDL main thread.
+    std::vector<CorrGameSummary> corr_games_snapshot();
 
     // Read-only after AUTH_OK — safe to read from main thread without lock.
     std::string my_username;
@@ -76,6 +91,11 @@ private:
     std::string removed_stones_;   // dead-stone list from server's stone removal event
     std::string game_result_;      // outcome string from last gamedata (e.g. "W+Resign")
 
+    // The user's ongoing games, keyed by game id, built from active_game events on
+    // the network thread and read via corr_games_snapshot() under corr_mu_.
+    std::mutex                     corr_mu_;
+    std::map<int, CorrGameSummary> corr_games_;
+
     // Automatch UUID (kept for cancellation)
     std::string match_uuid_;
 
@@ -96,6 +116,11 @@ private:
 
     // Dispatch a decoded Socket.IO event.
     void on_event(const std::string& name, const std::string& payload_json);
+
+    // Update corr_games_ from one active_game event, then push a CORR_LIST_UPDATED
+    // snapshot so an open MY GAMES list reflects it live.
+    void handle_active_game(const std::string& payload_json);
+    void push_corr_list();
 
     // Enqueue a raw Socket.IO string for sending on the next writable callback.
     void enqueue_raw(const std::string& raw);
