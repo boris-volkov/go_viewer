@@ -1,10 +1,6 @@
 username=your-ogs-username
 password=your-ogs-password
 
-# Optional: paste a JWT token instead of (or in addition to) username/password.
-# Get it from browser devtools on online-go.com → Application → Local Storage → ogs_user_jwt
-# jwt=eyJ...
-
 # Optional: KataGo analysis engine. All three fields required to enable analysis.
 # Paths may be absolute (C:\path\to\...) or relative — a relative path resolves
 # against the folder ogs_client.exe itself is in, regardless of how it's launched.

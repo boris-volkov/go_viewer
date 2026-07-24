@@ -67,13 +67,13 @@ static std::string resolve_path(const std::string& p) {
     return exe_dir() + p;
 }
 
-static bool load_config(std::string& username, std::string& password, std::string& jwt,
+static bool load_config(std::string& username, std::string& password,
                         std::string& kata_exe, std::string& kata_model, std::string& kata_cfg,
                         std::string& kata_model_9x9, std::string& kata_human_model) {
     std::string path = exe_dir() + "config.ini";
     FILE* fp = fopen(path.c_str(), "r");
     if (!fp) return false;
-    char line[4096];  // jwt values can be long
+    char line[4096];  // generous — KataGo paths can be long
     while (fgets(line, sizeof(line), fp)) {
         char* eq = strchr(line, '=');
         if (!eq) continue;
@@ -84,7 +84,6 @@ static bool load_config(std::string& username, std::string& password, std::strin
             val[--vlen] = '\0';
         if      (strcmp(line, "username")           == 0) username          = val;
         else if (strcmp(line, "password")           == 0) password          = val;
-        else if (strcmp(line, "jwt")                == 0) jwt               = val;
         else if (strcmp(line, "katago_exe")         == 0) kata_exe          = val;
         else if (strcmp(line, "katago_model")       == 0) kata_model        = val;
         else if (strcmp(line, "katago_config")      == 0) kata_cfg          = val;
@@ -97,7 +96,9 @@ static bool load_config(std::string& username, std::string& password, std::strin
     kata_cfg         = resolve_path(kata_cfg);
     kata_model_9x9   = resolve_path(kata_model_9x9);
     kata_human_model = resolve_path(kata_human_model);
-    return !username.empty();  // password optional if jwt provided
+    // A username means "try to log in"; a bad/empty password just fails auth and
+    // drops to the credential prompt. No username means go straight to the prompt.
+    return !username.empty();
 }
 
 // ── App state machine ─────────────────────────────────────────────────────────
@@ -7680,9 +7681,9 @@ int App::run() {
         return 1;
     }
 
-    std::string username, password, jwt;
+    std::string username, password;
     std::string kata_exe, kata_model, kata_cfg, kata_model_9x9, kata_human_model;
-    load_config(username, password, jwt, kata_exe, kata_model, kata_cfg,
+    load_config(username, password, kata_exe, kata_model, kata_cfg,
                 kata_model_9x9, kata_human_model);
     my_username_       = username;
     kata_exe_          = kata_exe;
@@ -7699,7 +7700,7 @@ int App::run() {
     if (!username.empty()) {
         set_status("CONNECTING...");
         draw();
-        net_.start(username, password, jwt);
+        net_.start(username, password);
     } else {
         state_     = AppState::CREDENTIAL_PROMPT;
         cred_step_ = 1;

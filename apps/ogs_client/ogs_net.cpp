@@ -519,35 +519,6 @@ void OgsNet::decline_challenge(int challenge_id) {
     fetch_challenges();
 }
 
-// Base64url decode (for JWT payload).
-static std::string base64url_decode(const std::string& in) {
-    std::string s = in;
-    for (char& c : s) {
-        if (c == '-') c = '+';
-        else if (c == '_') c = '/';
-    }
-    while (s.size() % 4) s += '=';
-    std::string out;
-    int val = 0, valb = -8;
-    for (unsigned char c : s) {
-        if (c == '=') break;
-        int v;
-        if      (c >= 'A' && c <= 'Z') v = c - 'A';
-        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
-        else if (c >= '0' && c <= '9') v = c - '0' + 52;
-        else if (c == '+')             v = 62;
-        else if (c == '/')             v = 63;
-        else continue;
-        val = (val << 6) + v;
-        valb += 6;
-        if (valb >= 0) {
-            out += char((val >> valb) & 0xFF);
-            valb -= 8;
-        }
-    }
-    return out;
-}
-
 // ── OgsNet lifecycle ─────────────────────────────────────────────────────────
 
 OgsNet::OgsNet() {}
@@ -556,11 +527,9 @@ OgsNet::~OgsNet() {
     stop();
 }
 
-bool OgsNet::start(const std::string& username, const std::string& password,
-                   const std::string& jwt_override) {
+bool OgsNet::start(const std::string& username, const std::string& password) {
     username_ = username;
     password_ = password;
-    jwt_ = jwt_override;  // do_auth() uses this if non-empty, skips REST login
     stop_flag_ = false;
     thread_ = std::thread([this] { net_loop(); });
     return true;
@@ -784,39 +753,13 @@ std::string OgsNet::rest_write_hdr() const {
 }
 
 bool OgsNet::do_auth() {
-    // Fast path: jwt= in config.ini — decode player info from token, skip REST login.
-    if (!jwt_.empty()) {
-        auto dot1 = jwt_.find('.');
-        auto dot2 = dot1 != std::string::npos ? jwt_.find('.', dot1 + 1) : std::string::npos;
-        if (dot2 != std::string::npos) {
-            try {
-                std::string payload_json = base64url_decode(jwt_.substr(dot1 + 1, dot2 - dot1 - 1));
-                auto payload = json::parse(payload_json);
-                my_player_id = payload.at("id").get<int>();
-                my_username  = payload.value("username", username_);
-                // Fetch chat_auth from ui/config (needed for authenticate event)
-                std::string cfg_resp; long cfg_code = 0;
-                if (curl_request("https://online-go.com/api/v1/ui/config/", "",
-                                 "", "Authorization: Bearer " + jwt_,
-                                 cfg_resp, cfg_code) && cfg_code == 200) {
-                    try { chat_auth_ = json::parse(cfg_resp).value("chat_auth", ""); }
-                    catch (...) {}
-                }
-                // Also open a REST session (best-effort) — challenge list/accept/
-                // decline need it; the socket JWT alone is refused by those endpoints.
-                establish_session();
-                return true;
-            } catch (const std::exception& e) {
-                (void)e;
-                jwt_.clear();
-            }
-        }
-    }
-
-    // Full session login (no jwt configured, or it failed to parse).
+    // One path: log in with username/password (establish_session), then read the
+    // socket JWT + player info out of ui/config. That single login yields both of the
+    // things the app needs — the JWT authenticates the WebSocket, and the session
+    // cookie it also leaves behind authorises the REST calls (challenges, friends).
+    // The user never provides or sees a token.
     if (!establish_session()) return false;
 
-    // GET ui/config with the session cookie → real user JWT + player info.
     std::string resp;
     long code = 0;
     if (!curl_request("https://online-go.com/api/v1/ui/config/",

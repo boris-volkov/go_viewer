@@ -14,10 +14,10 @@ public:
     OgsNet();
     ~OgsNet();
 
-    // Called once from main thread. Spawns the network thread which authenticates
-    // then opens the Socket.IO connection. Returns false if thread fails to start.
-    bool start(const std::string& username, const std::string& password,
-               const std::string& jwt_override = "");
+    // Called once from main thread. Spawns the network thread which logs in with the
+    // username/password, then opens the Socket.IO connection. False if the thread
+    // fails to start (a bad login surfaces later as an AUTH_FAIL message).
+    bool start(const std::string& username, const std::string& password);
     void stop();
 
     // Thread-safe commands from the main thread.

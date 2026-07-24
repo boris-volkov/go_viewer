@@ -12,15 +12,10 @@ Play, analyze, and study Go with a PlayStation controller.
 
 1. Build `ogs_client` — see [Building](#building) below.
 2. Copy `apps/ogs_client/config.ini.example` to `apps/ogs_client/config.ini`.
-3. Add your OGS login. Pick whichever applies:
-   - **Most accounts** — fill in `username=` and `password=`. The client logs
-     in the same way the website does; nothing else is needed.
-   - **Signed up via Google / Facebook / etc., with no separate OGS
-     password?** Use a JWT instead: log into
-     [online-go.com](https://online-go.com) in a browser, open DevTools
-     (F12) → **Application** tab → **Local Storage** → `https://online-go.com`
-     → copy the value of the `ogs_user_jwt` key → paste it into `jwt=` in
-     `config.ini`.
+3. Add your OGS login: fill in `username=` and `password=`. The client logs in
+   the same way the website does; nothing else is needed. (You can also leave
+   them blank and enter them in the app on first launch.) Accounts that signed
+   up via Google/Facebook and never set an OGS password aren't supported.
 4. *(Optional)* KataGo analysis — point `katago_exe` / `katago_model` /
    `katago_config` at a local KataGo install; see the comments in
    `config.ini.example` for the exact fields and a model download link.
