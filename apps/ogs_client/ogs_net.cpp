@@ -97,7 +97,8 @@ static bool curl_request(const std::string& url,
                          const std::string& cookiejar,
                          const std::string& extra_hdr,
                          std::string& response_out,
-                         long& http_code_out)
+                         long& http_code_out,
+                         const std::string& method = "")
 {
     CURL* c = curl_easy_init();
     if (!c) return false;
@@ -126,7 +127,21 @@ static bool curl_request(const std::string& url,
         curl_easy_setopt(c, CURLOPT_COOKIEFILE, "");
     }
 
-    if (!body.empty()) {
+    if (method == "POST") {
+        // Explicit POST — works with an empty body (e.g. challenge accept).
+        curl_easy_setopt(c, CURLOPT_POST, 1L);
+        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
+        if (!body.empty())
+            curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+    } else if (!method.empty()) {
+        // DELETE / PUT / etc.
+        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method.c_str());
+        if (!body.empty()) {
+            curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+            curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
+        }
+    } else if (!body.empty()) {
+        // Default: a non-empty body implies POST (unchanged prior behaviour).
         curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
         curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
     }
@@ -292,6 +307,208 @@ std::vector<CorrGameSummary> OgsNet::corr_games_snapshot() {
     out.reserve(corr_games_.size());
     for (const auto& kv : corr_games_) out.push_back(kv.second);
     return out;
+}
+
+// ── Challenges (authenticated REST via the session cookie) ────────────────────
+
+void OgsNet::fetch_challenges() {
+    NetMsg m;
+    m.type = NetMsgType::CHALLENGES_UPDATED;
+    std::string resp;
+    long code = 0;
+    bool ok = curl_request("https://online-go.com/api/v1/me/challenges/", "",
+                           cookiejar_, rest_read_hdr(), resp, code);
+    if (!ok || code != 200) {
+        net_log(("fetch_challenges: HTTP " + std::to_string(code)).c_str());
+        net_log(("fetch_challenges raw: " + resp.substr(0, 300)).c_str());
+        m.text = "CHALLENGES HTTP " + std::to_string(code);
+        push_msg(std::move(m));
+        return;
+    }
+    try {
+        auto d = json::parse(resp);
+        // The list may be a bare array or a paginated { count, results:[...] }.
+        const json& arr = (d.is_object() && d.contains("results")) ? d["results"] : d;
+        if (arr.is_array() && !arr.empty())
+            net_log(("challenge shape: " + arr[0].dump().substr(0, 900)).c_str());
+
+        if (arr.is_array()) for (const auto& c : arr) {
+            ChallengeSummary cs;
+            cs.id = c.value("id", 0);
+
+            // Challenger object (id + username). If it's me, this is one of my own
+            // outgoing challenges — not something for me to accept, so skip it.
+            int challenger_id = 0;
+            if (c.contains("challenger") && c["challenger"].is_object()) {
+                challenger_id = c["challenger"].value("id", 0);
+                cs.challenger = c["challenger"].value("username", "?");
+            } else {
+                cs.challenger = c.value("challenger_username", c.value("username", "?"));
+            }
+            if (challenger_id != 0 && challenger_id == my_player_id) continue;
+
+            // Game params live under a nested "game" object on me/challenges/.
+            const json& g = (c.contains("game") && c["game"].is_object()) ? c["game"] : c;
+            cs.board_size = g.value("width", g.value("board_size", 19));
+            cs.ranked     = g.value("ranked", false);
+
+            std::string speed;
+            if (g.contains("time_control_parameters") && g["time_control_parameters"].is_object())
+                speed = g["time_control_parameters"].value("speed", "");
+            if (speed.empty() && g.contains("time_control")) {
+                if (g["time_control"].is_object())      speed = g["time_control"].value("speed", "");
+                else if (g["time_control"].is_string()) speed = g["time_control"].get<std::string>();
+            }
+            if (speed.empty()) speed = g.value("speed", "");
+            cs.correspondence = (speed == "correspondence" || speed.empty());
+            cs.time_desc      = speed.empty() ? "?" : speed;
+
+            m.challenges.push_back(std::move(cs));
+        }
+        net_log(("fetch_challenges: " + std::to_string((int)m.challenges.size()) +
+                 " incoming challenge(s)").c_str());
+    } catch (const std::exception& e) {
+        net_log(("fetch_challenges parse error: " + std::string(e.what())).c_str());
+        m.text = "CHALLENGES PARSE FAILED";
+    }
+    push_msg(std::move(m));
+}
+
+void OgsNet::accept_challenge(int challenge_id) {
+    NetMsg m;
+    m.type = NetMsgType::CHALLENGE_RESULT;
+    std::string url = "https://online-go.com/api/v1/me/challenges/" +
+                      std::to_string(challenge_id) + "/accept/";
+    std::string resp;
+    long code = 0;
+    bool ok = curl_request(url, "", cookiejar_, rest_write_hdr(), resp, code, "POST");
+    net_log(("accept_challenge " + std::to_string(challenge_id) + ": HTTP " +
+             std::to_string(code) + " " + resp.substr(0, 200)).c_str());
+
+    if (ok && (code == 200 || code == 201 || code == 204)) {
+        m.text = "CHALLENGE ACCEPTED";
+        // The response usually carries the created game's id.
+        try {
+            auto d = json::parse(resp);
+            if (d.contains("game")) {
+                if (d["game"].is_number_integer()) m.game_id = d["game"].get<int>();
+                else if (d["game"].is_object())    m.game_id = d["game"].value("id", 0);
+            } else if (d.contains("game_id")) {
+                m.game_id = d.value("game_id", 0);
+            }
+        } catch (...) {}
+    } else {
+        m.text = "ACCEPT FAILED (" + std::to_string(code) + ")";
+    }
+    push_msg(std::move(m));
+    fetch_challenges();   // refresh — the accepted challenge drops off the list
+}
+
+void OgsNet::fetch_friends() {
+    NetMsg m;
+    m.type = NetMsgType::FRIENDS_UPDATED;
+    std::string resp;
+    long code = 0;
+    bool ok = curl_request("https://online-go.com/api/v1/me/friends/", "",
+                           cookiejar_, rest_read_hdr(), resp, code);
+    if (!ok || code != 200) {
+        net_log(("fetch_friends: HTTP " + std::to_string(code)).c_str());
+        m.text = "FRIENDS HTTP " + std::to_string(code);
+        push_msg(std::move(m));
+        return;
+    }
+    try {
+        auto d = json::parse(resp);
+        const json& arr = (d.is_object() && d.contains("results")) ? d["results"] : d;
+        if (arr.is_array() && !arr.empty())
+            net_log(("friend shape: " + arr[0].dump().substr(0, 400)).c_str());
+        if (arr.is_array()) for (const auto& f : arr) {
+            // A row may be the player object itself or wrap it under "user".
+            const json& p = (f.is_object() && f.contains("user") && f["user"].is_object())
+                                ? f["user"] : f;
+            FriendSummary fs;
+            fs.id       = p.value("id", 0);
+            fs.username = p.value("username", "");
+            if (fs.id != 0 && !fs.username.empty()) m.friends.push_back(std::move(fs));
+        }
+        net_log(("fetch_friends: " + std::to_string((int)m.friends.size()) +
+                 " friend(s)").c_str());
+    } catch (const std::exception& e) {
+        net_log(("fetch_friends parse error: " + std::string(e.what())).c_str());
+        m.text = "FRIENDS PARSE FAILED";
+    }
+    push_msg(std::move(m));
+}
+
+void OgsNet::send_challenge(const ChallengeRequest& req) {
+    NetMsg m;
+    m.type = NetMsgType::CHALLENGE_RESULT;
+
+    json tcp = {
+        {"system",            "fischer"},
+        {"speed",             "correspondence"},
+        {"initial_time",      req.initial_time},
+        {"time_increment",    req.time_increment},
+        {"max_time",          req.max_time},
+        {"pause_on_weekends", true}
+    };
+    json game = {
+        {"name",                    "Friendly Match"},
+        {"rules",                   "japanese"},
+        {"ranked",                  req.ranked},
+        {"width",                   req.board_size},
+        {"height",                  req.board_size},
+        {"handicap",                0},
+        {"komi_auto",               "automatic"},
+        {"disable_analysis",        false},
+        {"pause_on_weekends",       true},
+        {"time_control",            "fischer"},
+        {"time_control_parameters", tcp},
+        {"private",                 false}
+    };
+    json payload = {
+        {"initialized",      false},
+        {"min_ranking",      -1000},
+        {"max_ranking",      1000},
+        {"challenger_color", req.color},
+        {"game",             game},
+        {"aga_ranked",       false}
+    };
+
+    // A named opponent goes to that player's challenge endpoint; opponent_id 0 posts
+    // an open challenge to the general list, which anyone may accept.
+    std::string url = req.opponent_id > 0
+        ? "https://online-go.com/api/v1/players/" + std::to_string(req.opponent_id) + "/challenge/"
+        : "https://online-go.com/api/v1/challenges/";
+
+    std::string resp;
+    long code = 0;
+    bool ok = curl_request(url, payload.dump(), cookiejar_, rest_write_hdr(),
+                           resp, code, "POST");
+    net_log(("send_challenge -> " + url + " HTTP " + std::to_string(code) + " " +
+             resp.substr(0, 300)).c_str());
+
+    m.text = (ok && (code == 200 || code == 201))
+                 ? "CHALLENGE SENT"
+                 : "CHALLENGE FAILED (" + std::to_string(code) + ")";
+    push_msg(std::move(m));
+}
+
+void OgsNet::decline_challenge(int challenge_id) {
+    NetMsg m;
+    m.type = NetMsgType::CHALLENGE_RESULT;
+    std::string url = "https://online-go.com/api/v1/me/challenges/" +
+                      std::to_string(challenge_id) + "/";
+    std::string resp;
+    long code = 0;
+    bool ok = curl_request(url, "", cookiejar_, rest_write_hdr(), resp, code, "DELETE");
+    net_log(("decline_challenge " + std::to_string(challenge_id) + ": HTTP " +
+             std::to_string(code)).c_str());
+    m.text = (ok && (code == 200 || code == 202 || code == 204))
+                 ? "CHALLENGE DECLINED"
+                 : "DECLINE FAILED (" + std::to_string(code) + ")";
+    push_msg(std::move(m));
+    fetch_challenges();
 }
 
 // Base64url decode (for JWT payload).
@@ -485,8 +702,81 @@ bool OgsNet::poll_msg(NetMsg& out) {
 
 // ── Auth (runs on network thread before WebSocket opens) ─────────────────────
 
+// CSRF → password login → persistent cookiejar_/csrf_. Best-effort.
+bool OgsNet::establish_session() {
+    if (username_.empty() || password_.empty()) {
+        net_log("establish_session: no username/password — REST writes disabled");
+        return false;
+    }
+    const char* tmp = getenv("TEMP");
+    if (!tmp) tmp = getenv("TMP");
+    if (!tmp) tmp = "/tmp";
+    cookiejar_ = std::string(tmp) + "/ogs_cookies.txt";
+    remove(cookiejar_.c_str());
+
+    std::string resp;
+    long code = 0;
+
+    // Step 1: GET /api/v1/ to receive the csrftoken cookie.
+    if (!curl_request("https://online-go.com/api/v1/", "", cookiejar_, "", resp, code)) {
+        net_log("establish_session: CSRF GET failed");
+        cookiejar_.clear();
+        return false;
+    }
+    csrf_ = read_cookie(cookiejar_, "csrftoken");
+    if (csrf_.empty()) {
+        net_log("establish_session: no csrftoken cookie");
+        cookiejar_.clear();
+        return false;
+    }
+
+    // Step 2: POST credentials with CSRF header. OGS has moved its login route over
+    // time — /api/v1/login/ now 404s — so try the known ones and keep the first that
+    // works. A wrong URL just 404s harmlessly.
+    json login_body = {{"username", username_}, {"password", password_}};
+    static const char* kLoginUrls[] = {
+        "https://online-go.com/api/v0/login",
+        "https://online-go.com/api/v1/login/",
+    };
+    bool logged_in = false;
+    for (const char* lu : kLoginUrls) {
+        resp.clear();
+        code = 0;
+        if (curl_request(lu, login_body.dump(), cookiejar_,
+                         "X-CSRFToken: " + csrf_, resp, code) && code == 200) {
+            net_log((std::string("establish_session: login OK via ") + lu).c_str());
+            logged_in = true;
+            break;
+        }
+        net_log((std::string("establish_session: login HTTP ") + std::to_string(code) +
+                 " via " + lu).c_str());
+    }
+    if (!logged_in) {
+        cookiejar_.clear();
+        csrf_.clear();
+        return false;
+    }
+    // The csrftoken cookie can rotate after login — re-read for subsequent writes.
+    std::string c2 = read_cookie(cookiejar_, "csrftoken");
+    if (!c2.empty()) csrf_ = c2;
+    net_log("establish_session: REST session established");
+    return true;
+}
+
+// With a login session, auth rides on the cookie (no extra header for reads, CSRF
+// for writes). Without one, fall back to the socket JWT as a bearer token.
+std::string OgsNet::rest_read_hdr() const {
+    if (!cookiejar_.empty()) return "";
+    return "Authorization: Bearer " + jwt_;
+}
+
+std::string OgsNet::rest_write_hdr() const {
+    if (!cookiejar_.empty()) return "X-CSRFToken: " + csrf_;
+    return "Authorization: Bearer " + jwt_;
+}
+
 bool OgsNet::do_auth() {
-    // Fast path: jwt= in config.ini — decode player info from token, skip REST.
+    // Fast path: jwt= in config.ini — decode player info from token, skip REST login.
     if (!jwt_.empty()) {
         auto dot1 = jwt_.find('.');
         auto dot2 = dot1 != std::string::npos ? jwt_.find('.', dot1 + 1) : std::string::npos;
@@ -504,6 +794,9 @@ bool OgsNet::do_auth() {
                     try { chat_auth_ = json::parse(cfg_resp).value("chat_auth", ""); }
                     catch (...) {}
                 }
+                // Also open a REST session (best-effort) — challenge list/accept/
+                // decline need it; the socket JWT alone is refused by those endpoints.
+                establish_session();
                 return true;
             } catch (const std::exception& e) {
                 (void)e;
@@ -512,40 +805,15 @@ bool OgsNet::do_auth() {
         }
     }
 
-    // Full session cookie login: CSRF → login → ui/config.
-    std::string cookiejar;
-    const char* tmp = getenv("TEMP");
-    if (!tmp) tmp = getenv("TMP");
-    if (!tmp) tmp = "/tmp";
-    cookiejar = std::string(tmp) + "/ogs_cookies.txt";
-    remove(cookiejar.c_str());
+    // Full session login (no jwt configured, or it failed to parse).
+    if (!establish_session()) return false;
 
+    // GET ui/config with the session cookie → real user JWT + player info.
     std::string resp;
     long code = 0;
-
-    // Step 1: GET /api/v1/ to receive the csrftoken cookie.
-    if (!curl_request("https://online-go.com/api/v1/", "", cookiejar, "", resp, code))
-        return false;
-
-    std::string csrf = read_cookie(cookiejar, "csrftoken");
-    if (csrf.empty()) return false;
-
-    // Step 2: POST credentials with CSRF header.
-    json login_body = {{"username", username_}, {"password", password_}};
-    resp.clear();
-    if (!curl_request("https://online-go.com/api/v1/login/",
-                      login_body.dump(), cookiejar,
-                      "X-CSRFToken: " + csrf, resp, code))
-        return false;
-    if (code != 200) return false;
-
-    // Step 3: GET ui/config with session cookie → real user JWT.
-    resp.clear();
     if (!curl_request("https://online-go.com/api/v1/ui/config/",
-                      "", cookiejar, "", resp, code))
+                      "", cookiejar_, "", resp, code) || code != 200)
         return false;
-    if (code != 200) return false;
-
     try {
         auto cfg = json::parse(resp);
         jwt_          = cfg.at("user_jwt").get<std::string>();

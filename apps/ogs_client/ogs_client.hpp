@@ -14,13 +14,44 @@ struct CorrGameSummary {
     bool        my_move    = false;  // true = it's my turn (clock.current_player == me)
 };
 
+// A friend, from GET /api/v1/me/friends/ — the opponent picker for a new challenge.
+struct FriendSummary {
+    int         id = 0;
+    std::string username;
+};
+
+// Parameters for a challenge we are issuing (see OgsNet::send_challenge).
+struct ChallengeRequest {
+    int         opponent_id    = 0;        // 0 = open challenge (anyone may accept)
+    int         board_size     = 19;
+    bool        ranked         = true;
+    // Correspondence Fischer clock, in seconds.
+    int         initial_time   = 259200;   // 3 days
+    int         time_increment = 259200;   // +3 days per move
+    int         max_time       = 604800;   // 7 day cap
+    std::string color          = "automatic";  // automatic | black | white
+};
+
+// One row in the incoming-challenges list, from GET /api/v1/me/challenges/.
+struct ChallengeSummary {
+    int         id            = 0;      // challenge id — for accept/decline
+    std::string challenger;             // who is challenging me
+    int         board_size    = 19;
+    bool        ranked        = false;
+    bool        correspondence = true;  // false = a live challenge
+    std::string time_desc;              // short human summary of the time control
+};
+
 // ── Inbound: network thread → main thread ──────────────────────────────────
 
 enum class NetMsgType {
     AUTH_OK,         // authenticated; player info set in OgsNet
     AUTH_FAIL,       // login or socket auth failed; check msg.text for reason
     MATCH_FOUND,     // automatch start; game_id valid; we auto-send game/connect
-    CORR_LIST_UPDATED, // ui/overview fetch finished; corr_games holds the parsed list
+    CORR_LIST_UPDATED,  // active_game events processed; corr_games holds the list
+    CHALLENGES_UPDATED, // me/challenges fetch finished; challenges holds the list
+    CHALLENGE_RESULT,   // an accept/decline/send finished; text = result message
+    FRIENDS_UPDATED,    // me/friends fetch finished; friends holds the list
     GAME_CONNECTED,  // gamedata received; board state, names, clocks populated
     OPPONENT_MOVE,   // opponent played; col/row valid (-1/-1 = pass)
     CLOCK_UPDATE,    // black_secs / white_secs updated
@@ -82,6 +113,12 @@ struct NetMsg {
 
     // CORR_LIST_UPDATED: the user's ongoing correspondence games (whose-turn included)
     std::vector<CorrGameSummary> corr_games;
+
+    // CHALLENGES_UPDATED: challenges awaiting the user's response
+    std::vector<ChallengeSummary> challenges;
+
+    // FRIENDS_UPDATED: the user's friends, as challenge opponents
+    std::vector<FriendSummary> friends;
 };
 
 // ── Match preferences (used to build automatch payload) ───────────────────

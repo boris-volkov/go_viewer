@@ -52,6 +52,21 @@ public:
     // (a locked copy of the cache); safe to call from the SDL main thread.
     std::vector<CorrGameSummary> corr_games_snapshot();
 
+    // Challenges (authenticated REST via the session cookie). Each blocks on HTTP —
+    // call from a background thread, not the SDL event loop.
+    //   fetch_challenges   — GET me/challenges/, push CHALLENGES_UPDATED
+    //   accept_challenge   — POST me/challenges/{id}/accept/, then re-fetch
+    //   decline_challenge  — DELETE me/challenges/{id}/, then re-fetch
+    void fetch_challenges();
+    void accept_challenge(int challenge_id);
+    void decline_challenge(int challenge_id);
+
+    //   fetch_friends  — GET me/friends/, push FRIENDS_UPDATED (challenge opponents)
+    //   send_challenge — POST players/{id}/challenge/, or challenges/ when
+    //                    req.opponent_id is 0 (an open challenge anyone may accept)
+    void fetch_friends();
+    void send_challenge(const ChallengeRequest& req);
+
     // Read-only after AUTH_OK — safe to read from main thread without lock.
     std::string my_username;
     int         my_player_id = 0;
@@ -63,6 +78,12 @@ private:
     // JWT + player info, set by do_auth() before WebSocket opens.
     std::string jwt_;
     std::string chat_auth_;   // from /api/v1/ui/config — needed for authenticate event
+
+    // Session cookie + CSRF for authenticated REST calls (challenges list/accept/
+    // decline, friends). The socket JWT is refused (403) by those endpoints, so REST
+    // uses a real login session like the website does. Set by establish_session().
+    std::string cookiejar_;   // path to the Netscape cookie file (empty = no session)
+    std::string csrf_;        // csrftoken cookie value, for X-CSRFToken on writes
 
     // libwebsockets context and connection
     lws_context* ctx_ = nullptr;
@@ -105,6 +126,17 @@ private:
 
     // Returns false if login or config fetch failed.
     bool do_auth();
+
+    // CSRF → password login → persistent cookiejar_/csrf_ for authenticated REST.
+    // Best-effort: needs username_/password_; returns false if either is missing or
+    // the login fails (the socket JWT still works, REST writes just won't).
+    bool establish_session();
+
+    // Auth for a REST call: the login session (cookie, + CSRF on writes) when we have
+    // one, otherwise the socket JWT as a bearer. Bearer support is endpoint-specific
+    // (ui/config accepts it, ui/overview 403s), so every caller logs the HTTP code.
+    std::string rest_read_hdr()  const;   // extra header for GET
+    std::string rest_write_hdr() const;   // extra header for POST/DELETE
 
     // WebSocket callbacks (called from lws_callback_fn → dispatched to these)
     void on_ws_open();

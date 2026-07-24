@@ -109,6 +109,8 @@ enum class AppState {
     MATCH_MENU,        // match settings menu open
     SEARCHING,         // automatch in queue
     CORR_LIST,         // browsing my ongoing correspondence games ("MY GAMES")
+    CHALLENGES,        // browsing incoming challenges (accept / decline)
+    CHALLENGE_CREATE,  // composing a challenge to send (opponent + game settings)
     PLAYING,           // live game active
     STONE_REMOVAL,     // game ended, awaiting stone removal acceptance
     GAME_OVER,         // game finished, showing result
@@ -941,6 +943,41 @@ private:
     void handle_corr_button(Uint8 btn);
     void leave_corr_game();     // disconnect the open corr game, return to MY GAMES
     int  corr_hit(int mx, int my) const;  // list row under a screen point, or -1
+
+    // Incoming challenges (accept / decline)
+    std::vector<ChallengeSummary> challenges_;
+    int  chal_index_          = 0;
+    int  chal_hover_          = -1;
+    int  chal_lines_drawn_    = 0;
+    bool chal_loading_        = false;
+    bool chal_accept_confirm_ = false;   // A armed once, awaiting the confirm press
+    bool chal_decline_confirm_= false;   // Y armed once, awaiting the confirm press
+    void open_challenges();     // enter CHALLENGES and fetch the list
+    void refresh_challenges();  // (re)fetch me/challenges on a worker thread
+    void draw_challenges();
+    void handle_chal_button(Uint8 btn);
+    int  chal_hit(int mx, int my) const;
+
+    // Composing a challenge to send. Rows 0-4 are settings (left/right cycles the
+    // value), row 5 is SEND. Opponent index 0 = open challenge, 1.. = friends_.
+    std::vector<FriendSummary> friends_;
+    bool friends_loading_  = false;
+    int  cc_row_           = 0;
+    int  cc_opp_           = 0;      // 0 = open challenge, else 1 + index into friends_
+    int  cc_size_          = 2;      // 0=9x9, 1=13x13, 2=19x19
+    bool cc_ranked_        = true;
+    int  cc_pace_          = 1;      // 0=1 day, 1=3 days, 2=7 days per move
+    int  cc_color_         = 0;      // 0=automatic, 1=black, 2=white
+    bool cc_send_confirm_  = false;
+    int  cc_hover_         = -1;
+    int  cc_lines_drawn_   = 0;
+    static const int CC_ROWS = 6;    // 5 settings + SEND
+    void open_challenge_create();
+    void draw_challenge_create();
+    void handle_cc_button(Uint8 btn);
+    void cc_cycle(int delta);        // change the focused row's value
+    void cc_send();                  // build the request and fire it
+    int  cc_hit(int mx, int my) const;
 
     // Local game state
     bool        is_local_game_       = false;
@@ -1832,6 +1869,16 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
+    if (state_ == AppState::CHALLENGES) {
+        handle_chal_button(btn);
+        return;
+    }
+
+    if (state_ == AppState::CHALLENGE_CREATE) {
+        handle_cc_button(btn);
+        return;
+    }
+
     if (state_ == AppState::LOBBY) {
         if (btn == SDL_CONTROLLER_BUTTON_X) {
             open_game_catalog();
@@ -2298,6 +2345,8 @@ void App::open_popup_menu() {
             set_status("SEARCHING...");
         });
         add("MY GAMES (CORRESPONDENCE)", [this]() { open_corr_list(); });
+        add("CHALLENGES",               [this]() { open_challenges(); });
+        add("CREATE CHALLENGE",         [this]() { open_challenge_create(); });
         if (!kata_human_model_.empty())
             add("PLAY VS KATAGO", [this]() { start_local_game(); });
         add("MATCH SETTINGS",  [this]() { open_settings_menu(); });
@@ -2326,6 +2375,24 @@ void App::open_popup_menu() {
             refresh_corr_list();
             set_status("MY GAMES");
         });
+        add("RETURN TO LOBBY", lobby);
+        add("SETTINGS", [this]() { open_settings_menu(); });
+        break;
+
+    case AppState::CHALLENGES:
+        popup_title_ = "CHALLENGES";
+        add("REFRESH", [this]() {
+            set_status("CHALLENGES — LOADING...");
+            refresh_challenges();
+        });
+        add("CREATE CHALLENGE", [this]() { open_challenge_create(); });
+        add("RETURN TO LOBBY", lobby);
+        add("SETTINGS", [this]() { open_settings_menu(); });
+        break;
+
+    case AppState::CHALLENGE_CREATE:
+        popup_title_ = "NEW CHALLENGE";
+        add("INCOMING CHALLENGES", [this]() { open_challenges(); });
         add("RETURN TO LOBBY", lobby);
         add("SETTINGS", [this]() { open_settings_menu(); });
         break;
@@ -4868,6 +4935,278 @@ int App::corr_hit(int mx, int my) const {
     return renderer_->list_screen_item_at(corr_lines_drawn_, corr_index_, mx, my);
 }
 
+// ── Incoming challenges (accept / decline) ────────────────────────────────────
+
+// GET me/challenges/ on a worker thread; the reply arrives as CHALLENGES_UPDATED.
+void App::refresh_challenges() {
+    if (chal_loading_) return;
+    chal_loading_ = true;
+    std::thread([this] { net_.fetch_challenges(); }).detach();
+}
+
+void App::open_challenges() {
+    save_companion();
+    analysis_root_.reset();
+    analysis_cur_ = nullptr;
+    analysis_tree_render_.clear();
+    is_local_game_ = false;
+    state_      = AppState::CHALLENGES;
+    chal_index_ = 0;
+    chal_hover_ = -1;
+    chal_accept_confirm_  = false;
+    chal_decline_confirm_ = false;
+    set_status("CHALLENGES — LOADING...");
+    refresh_challenges();
+    draw();
+}
+
+void App::draw_challenges() {
+    std::vector<std::string> lines;
+    std::vector<SDL_Color>   colors;
+    static const SDL_Color ROW_COL = {210, 210, 210, 255};
+
+    for (const auto& c : challenges_) {
+        std::string row = c.challenger;
+        row += "   " + std::to_string(c.board_size) + "x" + std::to_string(c.board_size);
+        row += c.ranked ? "   RANKED" : "   CASUAL";
+        row += c.correspondence ? "   CORR" : "   LIVE";
+        lines.push_back(row);
+        colors.push_back(ROW_COL);
+    }
+    if (chal_loading_ && challenges_.empty()) {
+        lines.push_back("LOADING...");
+        colors.push_back(ROW_COL);
+    } else if (challenges_.empty()) {
+        lines.push_back("(no incoming challenges)");
+        colors.push_back(ROW_COL);
+    }
+
+    std::string title  = "CHALLENGES — " + std::to_string((int)challenges_.size()) + " INCOMING";
+    std::string footer = GLYPH_PS_CROSS " ACCEPT   " GLYPH_PS_TRIANGLE " DECLINE   "
+                         GLYPH_PS_CIRCLE " BACK";
+
+    bool self_present = !popup_active_;
+    chal_lines_drawn_ = (int)lines.size();
+    renderer_->draw_list_screen(title.c_str(), lines, chal_index_, footer.c_str(),
+                                self_present, colors.data(), chal_hover_);
+    if (popup_active_)
+        renderer_->draw_popup_menu(popup_title_.c_str(), popup_labels_.data(),
+                                   (int)popup_labels_.size(), popup_index_);
+    if (!self_present)
+        SDL_RenderPresent(renderer_->sdl);
+}
+
+void App::handle_chal_button(Uint8 btn) {
+    int n = (int)challenges_.size();
+    auto disarm = [&]() { chal_accept_confirm_ = false; chal_decline_confirm_ = false; };
+    switch (btn) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        if (n > 0) { chal_index_ = (chal_index_ - 1 + n) % n; disarm(); draw(); }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        if (n > 0) { chal_index_ = (chal_index_ + 1) % n; disarm(); draw(); }
+        break;
+    case SDL_CONTROLLER_BUTTON_A:
+        // Accepting starts a real game — double-press confirm, same idiom as resign.
+        if (n > 0 && chal_index_ >= 0 && chal_index_ < n) {
+            if (!chal_accept_confirm_) {
+                chal_accept_confirm_  = true;
+                chal_decline_confirm_ = false;
+                flash_       = "PRESS " GLYPH_PS_CROSS " AGAIN TO ACCEPT vs " +
+                               challenges_[chal_index_].challenger;
+                flash_until_ = SDL_GetTicks() + 2500;
+            } else {
+                chal_accept_confirm_ = false;
+                int id = challenges_[chal_index_].id;
+                set_status("ACCEPTING...");
+                std::thread([this, id] { net_.accept_challenge(id); }).detach();
+            }
+            draw();
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_Y:
+        // Declining is destructive too — same confirm gate.
+        if (n > 0 && chal_index_ >= 0 && chal_index_ < n) {
+            if (!chal_decline_confirm_) {
+                chal_decline_confirm_ = true;
+                chal_accept_confirm_  = false;
+                flash_       = "PRESS " GLYPH_PS_TRIANGLE " AGAIN TO DECLINE";
+                flash_until_ = SDL_GetTicks() + 2500;
+            } else {
+                chal_decline_confirm_ = false;
+                int id = challenges_[chal_index_].id;
+                set_status("DECLINING...");
+                std::thread([this, id] { net_.decline_challenge(id); }).detach();
+            }
+            draw();
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_B:
+        state_ = AppState::LOBBY;
+        set_status("");
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_START:
+        open_popup_menu();
+        break;
+    default: break;
+    }
+}
+
+int App::chal_hit(int mx, int my) const {
+    if (state_ != AppState::CHALLENGES || chal_lines_drawn_ <= 0) return -1;
+    return renderer_->list_screen_item_at(chal_lines_drawn_, chal_index_, mx, my);
+}
+
+// ── Composing a challenge ─────────────────────────────────────────────────────
+
+// Correspondence pace presets: seconds of initial time / per-move increment, and
+// the cap on banked time. Index matches cc_pace_.
+static const int  kCcPaceInit[3] = { 86400,  259200,  604800  };  // 1d / 3d / 7d
+static const int  kCcPaceMax [3] = { 259200, 604800,  1209600 };  // 3d / 7d / 14d
+static const char* kCcPaceLbl[3] = { "1 DAY / MOVE", "3 DAYS / MOVE", "7 DAYS / MOVE" };
+static const int  kCcSizes   [3] = { 9, 13, 19 };
+static const char* kCcSizeLbl[3] = { "9x9", "13x13", "19x19" };
+static const char* kCcColorLbl[3]= { "AUTOMATIC", "BLACK", "WHITE" };
+static const char* kCcColorVal[3]= { "automatic", "black", "white" };
+
+void App::open_challenge_create() {
+    save_companion();
+    analysis_root_.reset();
+    analysis_cur_ = nullptr;
+    analysis_tree_render_.clear();
+    is_local_game_ = false;
+    state_    = AppState::CHALLENGE_CREATE;
+    cc_row_   = 0;
+    cc_hover_ = -1;
+    cc_send_confirm_ = false;
+    // Friends are the opponent picker — fetch once per visit (open challenge still
+    // works if the list is empty or the fetch fails).
+    if (!friends_loading_) {
+        friends_loading_ = true;
+        std::thread([this] { net_.fetch_friends(); }).detach();
+    }
+    set_status("NEW CHALLENGE");
+    draw();
+}
+
+void App::draw_challenge_create() {
+    std::string opp;
+    if (cc_opp_ > 0 && cc_opp_ - 1 < (int)friends_.size())
+        opp = friends_[cc_opp_ - 1].username;
+    else if (friends_loading_ && friends_.empty())
+        opp = "OPEN CHALLENGE (LOADING FRIENDS...)";
+    else
+        opp = "OPEN CHALLENGE (ANYONE)";
+
+    std::vector<std::string> lines;
+    std::vector<SDL_Color>   colors;
+    static const SDL_Color ROW_COL  = {210, 210, 210, 255};
+    static const SDL_Color SEND_COL = {120, 230, 120, 255};
+
+    lines.push_back(std::string("OPPONENT:     ") + opp);            colors.push_back(ROW_COL);
+    lines.push_back(std::string("BOARD SIZE:   ") + kCcSizeLbl[cc_size_]);  colors.push_back(ROW_COL);
+    lines.push_back(std::string("RANKED:       ") + (cc_ranked_ ? "YES" : "NO")); colors.push_back(ROW_COL);
+    lines.push_back(std::string("PACE:         ") + kCcPaceLbl[cc_pace_]);  colors.push_back(ROW_COL);
+    lines.push_back(std::string("YOUR COLOR:   ") + kCcColorLbl[cc_color_]); colors.push_back(ROW_COL);
+    lines.push_back("SEND CHALLENGE");                                colors.push_back(SEND_COL);
+
+    std::string footer = "D-PAD L/R CHANGE   " GLYPH_PS_CROSS " SEND   "
+                         GLYPH_PS_CIRCLE " BACK";
+
+    bool self_present = !popup_active_;
+    cc_lines_drawn_ = (int)lines.size();
+    renderer_->draw_list_screen("NEW CHALLENGE (CORRESPONDENCE)", lines, cc_row_,
+                                footer.c_str(), self_present, colors.data(), cc_hover_);
+    if (popup_active_)
+        renderer_->draw_popup_menu(popup_title_.c_str(), popup_labels_.data(),
+                                   (int)popup_labels_.size(), popup_index_);
+    if (!self_present)
+        SDL_RenderPresent(renderer_->sdl);
+}
+
+void App::cc_cycle(int delta) {
+    switch (cc_row_) {
+    case 0: {   // opponent: 0 = open challenge, then one slot per friend
+        int n = (int)friends_.size() + 1;
+        cc_opp_ = (cc_opp_ + delta + n) % n;
+        break;
+    }
+    case 1: cc_size_  = (cc_size_  + delta + 3) % 3; break;
+    case 2: cc_ranked_= !cc_ranked_;                 break;
+    case 3: cc_pace_  = (cc_pace_  + delta + 3) % 3; break;
+    case 4: cc_color_ = (cc_color_ + delta + 3) % 3; break;
+    default: break;   // SEND row has no value to cycle
+    }
+}
+
+void App::cc_send() {
+    ChallengeRequest req;
+    req.opponent_id = (cc_opp_ > 0 && cc_opp_ - 1 < (int)friends_.size())
+                          ? friends_[cc_opp_ - 1].id : 0;
+    req.board_size     = kCcSizes[cc_size_];
+    req.ranked         = cc_ranked_;
+    req.initial_time   = kCcPaceInit[cc_pace_];
+    req.time_increment = kCcPaceInit[cc_pace_];
+    req.max_time       = kCcPaceMax [cc_pace_];
+    req.color          = kCcColorVal[cc_color_];
+    set_status("SENDING CHALLENGE...");
+    std::thread([this, req] { net_.send_challenge(req); }).detach();
+}
+
+void App::handle_cc_button(Uint8 btn) {
+    switch (btn) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        cc_row_ = (cc_row_ - 1 + CC_ROWS) % CC_ROWS;
+        cc_send_confirm_ = false;
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        cc_row_ = (cc_row_ + 1) % CC_ROWS;
+        cc_send_confirm_ = false;
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        cc_cycle(-1);
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        cc_cycle(+1);
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_A:
+        if (cc_row_ == CC_ROWS - 1) {
+            // Sending creates a real challenge — double-press confirm.
+            if (!cc_send_confirm_) {
+                cc_send_confirm_ = true;
+                flash_       = "PRESS " GLYPH_PS_CROSS " AGAIN TO SEND CHALLENGE";
+                flash_until_ = SDL_GetTicks() + 2500;
+            } else {
+                cc_send_confirm_ = false;
+                cc_send();
+            }
+        } else {
+            cc_cycle(+1);   // on a settings row, cross advances the value
+        }
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_B:
+        state_ = AppState::LOBBY;
+        set_status("");
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_START:
+        open_popup_menu();
+        break;
+    default: break;
+    }
+}
+
+int App::cc_hit(int mx, int my) const {
+    if (state_ != AppState::CHALLENGE_CREATE || cc_lines_drawn_ <= 0) return -1;
+    return renderer_->list_screen_item_at(cc_lines_drawn_, cc_row_, mx, my);
+}
+
 // OGS rank number → display string: 1..29 = 29k..1k, 30+ = 1d+. 0 = unrated.
 static std::string ogs_rank_str(int r) {
     if (r <= 0)  return "?";
@@ -5772,6 +6111,40 @@ void App::handle_net_msg(const NetMsg& msg) {
         }
         break;
 
+    case NetMsgType::CHALLENGES_UPDATED:
+        chal_loading_ = false;
+        challenges_   = msg.challenges;
+        if (state_ == AppState::CHALLENGES) {
+            if (chal_index_ >= (int)challenges_.size())
+                chal_index_ = std::max(0, (int)challenges_.size() - 1);
+            chal_accept_confirm_  = false;   // list changed — cancel any armed confirm
+            chal_decline_confirm_ = false;
+            set_status(msg.text.empty() ? "CHALLENGES" : msg.text);
+            draw();
+        }
+        break;
+
+    case NetMsgType::CHALLENGE_RESULT:
+        // Accept/decline/send outcome — flash it; the follow-up CHALLENGES_UPDATED
+        // (from the re-fetch) refreshes the list, and an accepted game arrives via
+        // active_game.
+        flash_       = msg.text;
+        flash_until_ = SDL_GetTicks() + 3000;
+        if (state_ == AppState::CHALLENGE_CREATE) set_status("NEW CHALLENGE");
+        if (state_ == AppState::CHALLENGES || state_ == AppState::CHALLENGE_CREATE) draw();
+        break;
+
+    case NetMsgType::FRIENDS_UPDATED:
+        friends_loading_ = false;
+        friends_         = msg.friends;
+        // A shorter list can strand the opponent cursor past the end.
+        if (cc_opp_ > (int)friends_.size()) cc_opp_ = 0;
+        if (state_ == AppState::CHALLENGE_CREATE) {
+            if (!msg.text.empty()) set_status(msg.text);   // fetch failure
+            draw();
+        }
+        break;
+
     case NetMsgType::GAME_CONNECTED: {
         game_.result.clear();
         game_.pending_col  = -2;
@@ -6438,6 +6811,14 @@ void App::draw() {
         draw_corr_list();
         return;
     }
+    if (state_ == AppState::CHALLENGES) {
+        draw_challenges();
+        return;
+    }
+    if (state_ == AppState::CHALLENGE_CREATE) {
+        draw_challenge_create();
+        return;
+    }
     if (catalog_.active) {
         // Parse names for the entire listing, not just the visible window. The first
         // frame after entering a directory pays one pass of 4KB header reads; every
@@ -6896,6 +7277,14 @@ void App::event_loop() {
                         int h = corr_hit(e.motion.x, e.motion.y);
                         if (h != corr_hover_) { corr_hover_ = h; motion_redraw = true; }
                     }
+                    else if (state_ == AppState::CHALLENGES) {
+                        int h = chal_hit(e.motion.x, e.motion.y);
+                        if (h != chal_hover_) { chal_hover_ = h; motion_redraw = true; }
+                    }
+                    else if (state_ == AppState::CHALLENGE_CREATE) {
+                        int h = cc_hit(e.motion.x, e.motion.y);
+                        if (h != cc_hover_) { cc_hover_ = h; motion_redraw = true; }
+                    }
                     // Snap the board cursor to the hovered grid point (mouse and pad
                     // coexist — the cursor just follows whichever moved last)
                     else if (!catalog_.active && state_ != AppState::MATCH_MENU &&
@@ -7012,6 +7401,33 @@ void App::event_loop() {
                                     draw();
                                 }
                             }
+                        } else if (state_ == AppState::CHALLENGES) {
+                            // Click selects; clicking the selected row arms/confirms
+                            // accept (the same confirm-gated A path). Decline is pad Y.
+                            int h = chal_hit(e.button.x, e.button.y);
+                            if (h >= 0 && h < (int)challenges_.size()) {
+                                if (h == chal_index_) {
+                                    handle_chal_button(SDL_CONTROLLER_BUTTON_A);
+                                } else {
+                                    chal_index_ = h;
+                                    chal_accept_confirm_  = false;
+                                    chal_decline_confirm_ = false;
+                                    draw();
+                                }
+                            }
+                        } else if (state_ == AppState::CHALLENGE_CREATE) {
+                            // Click focuses a row; clicking the focused row advances
+                            // its value (or arms/confirms SEND, via the same A path).
+                            int h = cc_hit(e.button.x, e.button.y);
+                            if (h >= 0 && h < CC_ROWS) {
+                                if (h == cc_row_) {
+                                    handle_cc_button(SDL_CONTROLLER_BUTTON_A);
+                                } else {
+                                    cc_row_ = h;
+                                    cc_send_confirm_ = false;
+                                    draw();
+                                }
+                            }
                         }
                     } else if (e.button.button == SDL_BUTTON_RIGHT) {
                         // Right-click is a mouse gesture, not an alias for circle.
@@ -7036,7 +7452,9 @@ void App::event_loop() {
                     bool list_ctx = popup_active_ || catalog_.active ||
                                     state_ == AppState::MATCH_MENU ||
                                     state_ == AppState::PUZZLE_BROWSE ||
-                                    state_ == AppState::CORR_LIST;
+                                    state_ == AppState::CORR_LIST ||
+                                    state_ == AppState::CHALLENGES ||
+                                    state_ == AppState::CHALLENGE_CREATE;
                     Uint8 up_btn   = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_UP   : (Uint8)0xFD;
                     Uint8 down_btn = list_ctx ? (Uint8)SDL_CONTROLLER_BUTTON_DPAD_DOWN : (Uint8)0xFE;
                     for (int s = e.wheel.y; s > 0; s--) handle_controller_button(up_btn);
