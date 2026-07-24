@@ -528,6 +528,15 @@ OgsNet::~OgsNet() {
 }
 
 bool OgsNet::start(const std::string& username, const std::string& password) {
+    // Reap a previous attempt's thread first. After a failed login the net thread
+    // returns but thread_ stays joinable, and assigning a fresh std::thread over a
+    // joinable one calls std::terminate() — which is exactly the crash seen when a
+    // login is rejected (wrong password, rate-limited, ...) and the user retries.
+    if (thread_.joinable()) {
+        stop_flag_ = true;
+        if (ctx_) lws_cancel_service(ctx_);
+        thread_.join();
+    }
     username_ = username;
     password_ = password;
     stop_flag_ = false;
@@ -726,7 +735,7 @@ bool OgsNet::establish_session() {
             break;
         }
         net_log((std::string("establish_session: login HTTP ") + std::to_string(code) +
-                 " via " + lu).c_str());
+                 " via " + lu + "  " + resp.substr(0, 200)).c_str());
     }
     if (!logged_in) {
         cookiejar_.clear();
