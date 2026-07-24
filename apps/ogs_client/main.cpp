@@ -563,6 +563,9 @@ private:
     // Flash message
     std::string flash_;
     Uint32      flash_until_    = 0;
+    // Set when a list screen painted flash_ into its footer. Those screens repaint
+    // only on input, so without a nudge an expired flash would sit there stale.
+    bool        flash_on_list_  = false;
     Uint32      ko_flash_until_   = 0;
     Uint32      kata_query_after_      = 0;    // deferred KataGo query — fires after user settles
     bool        kata_analysis_enabled_ = true; // toggled in the settings menu (BACK)
@@ -4872,6 +4875,11 @@ void App::draw_corr_list() {
                         std::to_string((int)corr_games_.size()) + " ACTIVE";
     std::string footer = GLYPH_PS_CROSS " OPEN   " GLYPH_PS_TRIANGLE " REFRESH   "
                          GLYPH_PS_CIRCLE " LOBBY";
+    // See draw_challenge_create — list screens don't render flash_ on their own.
+    if (!flash_.empty() && flash_until_ > SDL_GetTicks()) {
+        footer = flash_;
+        flash_on_list_ = true;
+    }
 
     bool self_present = !popup_active_;
     corr_lines_drawn_ = (int)lines.size();
@@ -4984,6 +4992,12 @@ void App::draw_challenges() {
     std::string title  = "CHALLENGES — " + std::to_string((int)challenges_.size()) + " INCOMING";
     std::string footer = GLYPH_PS_CROSS " ACCEPT   " GLYPH_PS_TRIANGLE " DECLINE   "
                          GLYPH_PS_CIRCLE " BACK";
+    // See draw_challenge_create: list screens don't render flash_, so the accept/
+    // decline confirm prompts and their results would otherwise be invisible.
+    if (!flash_.empty() && flash_until_ > SDL_GetTicks()) {
+        footer = flash_;
+        flash_on_list_ = true;
+    }
 
     bool self_present = !popup_active_;
     chal_lines_drawn_ = (int)lines.size();
@@ -5113,6 +5127,12 @@ void App::draw_challenge_create() {
 
     std::string footer = "D-PAD L/R CHANGE   " GLYPH_PS_CROSS " SEND   "
                          GLYPH_PS_CIRCLE " BACK";
+    // Flash messages are drawn by the board view, not the list screen — without this
+    // the double-press confirm prompt and the send result are both invisible here.
+    if (!flash_.empty() && flash_until_ > SDL_GetTicks()) {
+        footer = flash_;
+        flash_on_list_ = true;
+    }
 
     bool self_present = !popup_active_;
     cc_lines_drawn_ = (int)lines.size();
@@ -7595,6 +7615,16 @@ void App::event_loop() {
         if (pz_pending_reply_ && now >= pz_reply_at_ && state_ == AppState::PUZZLE_PLAY) {
             pz_fire_pending_reply();
             draw();
+        }
+
+        // A list screen showed flash_ in its footer and the message has now lapsed.
+        // Those screens repaint only on input, so repaint once to clear it (the wait
+        // timeout above already wakes us at flash_until_).
+        if (flash_on_list_ && (flash_.empty() || now >= flash_until_)) {
+            flash_on_list_ = false;
+            if (state_ == AppState::CORR_LIST || state_ == AppState::CHALLENGES ||
+                state_ == AppState::CHALLENGE_CREATE)
+                draw();
         }
 
         // If a background query's response never arrives (lost/corrupted on the way

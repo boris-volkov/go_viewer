@@ -106,6 +106,14 @@ static bool curl_request(const std::string& url,
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, "Accept: application/json");
+    // Django enforces strict Referer checking on HTTPS for unsafe methods, and also
+    // validates Origin when it is present. A browser sends both; curl sends neither,
+    // so POST/DELETE were rejected with
+    //   403 {"detail":"CSRF Failed: Referer checking failed - no Referer."}
+    // even with a valid session cookie and X-CSRFToken. Every request in this client
+    // targets online-go.com, so setting them unconditionally is safe.
+    headers = curl_slist_append(headers, "Referer: https://online-go.com/");
+    headers = curl_slist_append(headers, "Origin: https://online-go.com");
     if (!extra_hdr.empty())
         headers = curl_slist_append(headers, extra_hdr.c_str());
 
