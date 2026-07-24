@@ -240,6 +240,13 @@ public:
                           int index, const char* footer, bool present = true,
                           const SDL_Color* line_colors = nullptr, int hover = -1);
 
+    // The login prompt's own screen. The bitmap font is uppercase-only (lowercase
+    // folds to the same glyph), so capitals are drawn in the accent colour to make
+    // case visible when verifying a typed password. step: 1=username, 2=password;
+    // `typed` is the field being edited, `username` the committed first field.
+    void draw_credential_screen(int step, const std::string& username,
+                                const std::string& typed, const char* footer);
+
     // Hit-test the list draw_list_screen would draw for the same total/index.
     // Returns the line index under (mx,my), or -1.
     int  list_screen_item_at(int total, int index, int mx, int my) const;

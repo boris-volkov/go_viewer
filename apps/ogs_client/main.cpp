@@ -101,6 +101,34 @@ static bool load_config(std::string& username, std::string& password,
     return !username.empty();
 }
 
+// Persist a prompt-entered login into config.ini so the next launch auto-connects.
+// Updates the username=/password= lines in place (appends them if absent), leaving
+// everything else — comments, KataGo paths — untouched. Plaintext, the same as any
+// config.ini login; the file is the user's own and is gitignored.
+static void save_credentials(const std::string& username, const std::string& password) {
+    std::string path = exe_dir() + "config.ini";
+    std::vector<std::string> lines;
+    bool have_user = false, have_pass = false;
+    if (FILE* fp = fopen(path.c_str(), "r")) {
+        char buf[4096];
+        while (fgets(buf, sizeof(buf), fp)) {
+            std::string line(buf);
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+                line.pop_back();
+            if      (line.rfind("username=", 0) == 0) { line = "username=" + username; have_user = true; }
+            else if (line.rfind("password=", 0) == 0) { line = "password=" + password; have_pass = true; }
+            lines.push_back(std::move(line));
+        }
+        fclose(fp);
+    }
+    if (!have_user) lines.push_back("username=" + username);
+    if (!have_pass) lines.push_back("password=" + password);
+    if (FILE* out = fopen(path.c_str(), "w")) {
+        for (const auto& l : lines) { fputs(l.c_str(), out); fputc('\n', out); }
+        fclose(out);
+    }
+}
+
 // ── App state machine ─────────────────────────────────────────────────────────
 
 enum class AppState {
@@ -550,6 +578,7 @@ private:
     // Credential prompt text input
     int         cred_step_ = 0;  // 0=off, 1=username, 2=password
     std::string cred_username_, cred_password_, cred_buf_;
+    bool        cred_from_prompt_ = false;  // set on submit; save creds once AUTH_OK confirms them
 
     // Status line (changes with state)
     std::string status_;
@@ -4957,27 +4986,14 @@ int App::corr_hit(int mx, int my) const {
 // ── Credential prompt ─────────────────────────────────────────────────────────
 
 void App::draw_credential_prompt() {
-    std::vector<std::string> lines;
-    if (cred_step_ <= 1) {
-        lines.push_back("USERNAME:  " + cred_buf_ + "_");
-    } else {
-        lines.push_back("USERNAME:  " + cred_username_);
-        lines.push_back("PASSWORD:  " + std::string(cred_buf_.size(), '*') + "_");
-    }
-    lines.push_back("");
-    lines.push_back(cred_step_ <= 1 ? "Type your OGS username, then ENTER"
-                                    : "Type your OGS password, then ENTER");
-
-    // Login failures arrive as a flash; list screens don't render flash_ on their
-    // own, so surface it in the footer (same pattern as the challenge screens).
+    // Login failures arrive as a flash; the credential screen renders it in the
+    // footer (the board view that normally draws flash_ isn't used in this state).
     std::string footer = "KEYBOARD ENTRY";
     if (!flash_.empty() && flash_until_ > SDL_GetTicks()) {
         footer = flash_;
         flash_on_list_ = true;
     }
-    int active = (cred_step_ <= 1) ? 0 : 1;   // highlight the field being typed
-    renderer_->draw_list_screen("OGS LOGIN", lines, active, footer.c_str(),
-                                /*present=*/true, nullptr, -1);
+    renderer_->draw_credential_screen(cred_step_, cred_username_, cred_buf_, footer.c_str());
 }
 
 // ── Incoming challenges (accept / decline) ────────────────────────────────────
@@ -6134,6 +6150,15 @@ void App::handle_net_msg(const NetMsg& msg) {
     case NetMsgType::AUTH_OK:
         state_ = AppState::LOBBY;
         set_status("");
+        // Persist a prompt login now that the server has accepted it, so the next
+        // launch auto-connects. Only for prompt-entered creds (config logins are
+        // already saved), and only after AUTH_OK so a wrong password is never stored.
+        if (cred_from_prompt_) {
+            save_credentials(cred_username_, cred_password_);
+            cred_from_prompt_ = false;
+            flash_       = "LOGIN SAVED";
+            flash_until_ = SDL_GetTicks() + 3000;
+        }
         load_demo_game();
         draw();
         break;
@@ -7198,7 +7223,9 @@ void App::event_loop() {
                     if (state_ == AppState::CREDENTIAL_PROMPT) {
                         if (handle_cred_key(k, cred_step_, cred_buf_,
                                             cred_username_, cred_password_)) {
-                            // Both credentials entered — start connecting
+                            // Both credentials entered — start connecting. Mark them
+                            // as prompt-entered so AUTH_OK can persist them.
+                            cred_from_prompt_ = true;
                             state_ = AppState::CONNECTING;
                             set_status("CONNECTING...");
                             net_.start(cred_username_, cred_password_);

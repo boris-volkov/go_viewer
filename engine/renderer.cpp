@@ -1533,6 +1533,99 @@ void Renderer::draw_list_screen(const char* title, const std::vector<std::string
         SDL_RenderPresent(sdl);
 }
 
+// Literal symbol glyphs for the five chars whose shared-font slot holds something
+// else: ~ @ # ^ are the face-button shapes and * is the menu-cursor dot. Only the
+// login screen needs these drawn as their real ASCII symbols, so they live here
+// instead of in font_glyphs (which the rest of the app relies on for the reuse).
+static bool login_symbol_glyph(char c, unsigned char out[7]) {
+    static const unsigned char AT[7]   = {0x0E,0x11,0x17,0x15,0x17,0x10,0x0E};
+    static const unsigned char HASH[7] = {0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A};
+    static const unsigned char CARET[7]= {0x04,0x0A,0x11,0x00,0x00,0x00,0x00};
+    static const unsigned char TILDE[7]= {0x00,0x00,0x0D,0x16,0x00,0x00,0x00};
+    static const unsigned char STAR[7] = {0x00,0x04,0x15,0x0E,0x15,0x04,0x00};
+    const unsigned char* g = nullptr;
+    switch (c) {
+        case '@': g = AT;    break;
+        case '#': g = HASH;  break;
+        case '^': g = CARET; break;
+        case '~': g = TILDE; break;
+        case '*': g = STAR;  break;
+        default: return false;
+    }
+    memcpy(out, g, 7);
+    return true;
+}
+
+void Renderer::draw_credential_screen(int step, const std::string& username,
+                                      const std::string& typed, const char* footer) {
+    int sw, sh;
+    SDL_GetRendererOutputSize(sdl, &sw, &sh);
+
+    SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(sdl, Palette::GRID.r, Palette::GRID.g, Palette::GRID.b, 255);
+    SDL_Rect bg = {0, 0, sw, sh};
+    SDL_RenderFillRect(sdl, &bg);
+
+    int scale = (sw >= 900) ? 3 : 2;
+    int th    = 7 * scale;
+    int gap   = th;                 // roomy line spacing
+    int hpad  = 6 * scale * 3;      // ~3 characters in from the edge
+
+    draw_text(hpad, hpad / 2, scale, "OGS LOGIN", Palette::ACCENT);
+
+    const SDL_Color base = Palette::TEXT_WHITE;   // lowercase / symbols
+    const SDL_Color cap  = Palette::ACCENT;       // capitals — the case signal
+
+    // A label, then the value with uppercase letters drawn in `cap`. The font is
+    // uppercase-only (lowercase folds to the same glyph), so colour is the only way
+    // to tell 'a' from 'A' — which is the whole point when checking a password.
+    auto field = [&](int y, const char* lbl, const std::string& val, bool caret) {
+        draw_text(hpad, y, scale, lbl, Palette::TEXT_SECONDARY);
+        int pen = hpad + (int)strlen(lbl) * 6 * scale;
+        std::string show = val + (caret ? "_" : "");
+        for (unsigned char c : show) {
+            bool up = (c >= 'A' && c <= 'Z');
+            const SDL_Color& col = up ? cap : base;
+            SDL_SetRenderDrawColor(sdl, col.r, col.g, col.b, col.a);
+            unsigned char sym[7];
+            const unsigned char* rows = login_symbol_glyph((char)c, sym)
+                                            ? sym : get_glyph_rows((char)c);
+            for (int r = 0; r < 7; r++)
+                for (int cc = 0; cc < 5; cc++)
+                    if (rows[r] & (1 << (4 - cc))) {
+                        SDL_Rect px = {pen + cc * scale, y + r * scale, scale, scale};
+                        SDL_RenderFillRect(sdl, &px);
+                    }
+            pen += 6 * scale;
+        }
+    };
+
+    int y = sh / 3;
+    field(y, "USERNAME:  ", (step <= 1) ? typed : username, step <= 1);
+    if (step >= 2) {
+        y += th + gap;
+        field(y, "PASSWORD:  ", typed, true);
+    }
+
+    y += (th + gap) * 2;
+    draw_text(hpad, y, scale,
+              step <= 1 ? "TYPE YOUR OGS USERNAME, THEN ENTER"
+                        : "TYPE YOUR OGS PASSWORD, THEN ENTER",
+              Palette::TEXT_DIM);
+
+    // The font has no distinct lowercase, so the accent colour is the case cue —
+    // spell that out, with the word COLOR itself drawn in the accent to show it.
+    y += th + gap;
+    const char* leg = "CAPITAL LETTERS SHOWN IN ";
+    draw_text(hpad, y, scale, leg, Palette::TEXT_DIM);
+    draw_text(hpad + (int)strlen(leg) * 6 * scale, y, scale, "COLOR", Palette::ACCENT);
+
+    if (footer && footer[0])
+        draw_text(hpad, sh - hpad / 2 - th, scale, footer, Palette::TEXT_DIM);
+
+    SDL_RenderPresent(sdl);
+}
+
 int Renderer::list_screen_item_at(int total, int index, int mx, int my) const {
     if (total <= 0) return -1;
     ListLayout L = list_screen_layout(total, index);
