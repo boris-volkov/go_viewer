@@ -1054,6 +1054,11 @@ private:
 
     void set_status(const std::string& s) { status_ = s; }
 
+    // Its own screen — make_ds() suppresses the live status line entirely in
+    // CREDENTIAL_PROMPT (live=false → live_status=nullptr), so the prompt has to draw
+    // itself or nothing appears at all (which is exactly what it did before).
+    void draw_credential_prompt();
+
     Renderer::DrawState make_ds();
 };
 
@@ -1093,6 +1098,11 @@ bool App::init() {
 
     renderer_ = new Renderer(sdl_rend_);
     SDL_ShowCursor(SDL_DISABLE);
+    // Enable SDL text input so the credential prompt receives real composed
+    // characters (SDL_TEXTINPUT) — raw keycodes are always lowercase/unshifted,
+    // which mangles capitals and shifted symbols in passwords. Harmless to leave on
+    // for the whole session; game controls still come through as SDL_KEYDOWN.
+    SDL_StartTextInput();
 
     // Optional: load an external community controller-mapping DB dropped next to
     // the exe (gamecontrollerdb.txt), so pads SDL's built-in table doesn't know
@@ -4944,6 +4954,32 @@ int App::corr_hit(int mx, int my) const {
     return renderer_->list_screen_item_at(corr_lines_drawn_, corr_index_, mx, my);
 }
 
+// ── Credential prompt ─────────────────────────────────────────────────────────
+
+void App::draw_credential_prompt() {
+    std::vector<std::string> lines;
+    if (cred_step_ <= 1) {
+        lines.push_back("USERNAME:  " + cred_buf_ + "_");
+    } else {
+        lines.push_back("USERNAME:  " + cred_username_);
+        lines.push_back("PASSWORD:  " + std::string(cred_buf_.size(), '*') + "_");
+    }
+    lines.push_back("");
+    lines.push_back(cred_step_ <= 1 ? "Type your OGS username, then ENTER"
+                                    : "Type your OGS password, then ENTER");
+
+    // Login failures arrive as a flash; list screens don't render flash_ on their
+    // own, so surface it in the footer (same pattern as the challenge screens).
+    std::string footer = "KEYBOARD ENTRY";
+    if (!flash_.empty() && flash_until_ > SDL_GetTicks()) {
+        footer = flash_;
+        flash_on_list_ = true;
+    }
+    int active = (cred_step_ <= 1) ? 0 : 1;   // highlight the field being typed
+    renderer_->draw_list_screen("OGS LOGIN", lines, active, footer.c_str(),
+                                /*present=*/true, nullptr, -1);
+}
+
 // ── Incoming challenges (accept / decline) ────────────────────────────────────
 
 // GET me/challenges/ on a worker thread; the reply arrives as CHALLENGES_UPDATED.
@@ -6820,6 +6856,10 @@ Renderer::DrawState App::make_ds() {
 }
 
 void App::draw() {
+    if (state_ == AppState::CREDENTIAL_PROMPT) {
+        draw_credential_prompt();
+        return;
+    }
     if (state_ == AppState::MATCH_MENU) {
         renderer_->draw_match_menu(match_menu_);
         return;
@@ -6860,6 +6900,9 @@ void App::draw() {
 // ── Credential prompt ─────────────────────────────────────────────────────────
 
 // Returns true when credentials are complete and accepted.
+// Control keys only (Enter advances/submits, Backspace deletes). Character entry
+// comes through SDL_TEXTINPUT — raw keycodes here can't represent shifted input
+// (Shift+a reports 'a', Shift+1 reports '1'), which corrupted passwords.
 static bool handle_cred_key(SDL_Keycode key, int& step,
                              std::string& buf,
                              std::string& username,
@@ -6873,11 +6916,6 @@ static bool handle_cred_key(SDL_Keycode key, int& step,
     }
     if (key == SDLK_BACKSPACE) {
         if (!buf.empty()) buf.pop_back();
-        return false;
-    }
-    // Printable ASCII
-    if (key >= SDLK_SPACE && key <= SDLK_z && key < 127) {
-        buf += (char)key;
     }
     return false;
 }
@@ -7145,6 +7183,15 @@ void App::event_loop() {
                         draw();
                     }
 
+                } else if (e.type == SDL_TEXTINPUT) {
+                    // Real composed characters (respects Shift, caps lock, layout).
+                    // Only the credential prompt consumes them; elsewhere they're
+                    // ignored and controls still arrive via SDL_KEYDOWN.
+                    if (state_ == AppState::CREDENTIAL_PROMPT && cred_step_ >= 1) {
+                        cred_buf_ += e.text.text;
+                        draw();
+                    }
+
                 } else if (e.type == SDL_KEYDOWN) {
                     SDL_Keycode k = e.key.keysym.sym;
 
@@ -7156,7 +7203,7 @@ void App::event_loop() {
                             set_status("CONNECTING...");
                             net_.start(cred_username_, cred_password_);
                         }
-                        draw();
+                        draw();  // re-renders the prompt from the current cred state
                     } else if (drill_rename_active_ && state_ == AppState::PUZZLE_BROWSE) {
                         // Typing a new drill name — capture everything (same
                         // plain-keycode entry as the credential prompt)
@@ -7704,7 +7751,6 @@ int App::run() {
     } else {
         state_     = AppState::CREDENTIAL_PROMPT;
         cred_step_ = 1;
-        set_status("ENTER OGS USERNAME (ENTER to confirm, then password)");
         draw();
     }
 
