@@ -77,3 +77,4 @@ puzzle_collections.txt
 
 # Release packaging output
 dist/
+release/
