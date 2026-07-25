@@ -92,6 +92,16 @@ public:
         int   territory_w_score  = 0;
         bool  territory_answered = false;
         bool  territory_correct  = false;
+        // "Who won?" quiz (ogs_client): a finished professional position with the
+        // result hidden until the player guesses black or white. Drawn over a
+        // free_mode board (no HUD), so the overlay owns the whole presentation —
+        // it reads the players/result/date from black_name, white_name,
+        // result_message and game_date, which stay blank until answered.
+        bool  who_won_active   = false;
+        bool  who_won_answered = false;
+        bool  who_won_correct  = false;
+        int   who_won_right    = 0;   // correct answers so far this session
+        int   who_won_total    = 0;   // questions answered so far
         // Stone visibility filter for playback (hold B or W key)
         int   stone_filter = 0;   // 0=all, 1=black only, 2=white only
         // Software cursor (drawn by renderer, bypasses OS DPI scaling entirely)
@@ -398,6 +408,7 @@ private:
     void render_guess_score(const BoardView& view, bool guess_mode, int score);
     void render_mode_status(const BoardView& view, bool analysis_mode, bool game_mode, bool guess_mode, bool territory_drill, bool paused);
     void render_territory_overlay(const BoardView& view, const DrawState& ds);
+    void render_who_won_overlay(const BoardView& view, const DrawState& ds);
     void render_result_message(const BoardView& view, const DrawState& ds);
     void render_game_date(const BoardView& view, const std::string& date);
     void render_help_overlay(const BoardView& view, bool show_help, bool live_mode = false);

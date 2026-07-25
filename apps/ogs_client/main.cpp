@@ -140,6 +140,7 @@ enum class AppState {
     CORR_LIST,         // browsing my ongoing correspondence games ("MY GAMES")
     CHALLENGES,        // browsing incoming challenges (accept / decline)
     CHALLENGE_CREATE,  // composing a challenge to send (opponent + game settings)
+    WHO_WON,           // quiz: guess the winner of a finished professional position
     PLAYING,           // live game active
     STONE_REMOVAL,     // game ended, awaiting stone removal acceptance
     GAME_OVER,         // game finished, showing result
@@ -201,6 +202,7 @@ struct SgfGame {
     char  black_name[NAME_LEN]            = "Black";
     char  white_name[NAME_LEN]            = "White";
     char  result[32]                      = {};
+    char  date[32]                        = {};    // from DT[] property
     float komi                            = 7.5f;  // from KM[] property
 };
 
@@ -389,6 +391,10 @@ static bool load_sgf(const std::string& path, SgfGame& g) {
             }
             if (*p == 'R' && *(p+1) == 'E' && *(p+2) == '[') {
                 p += 3; p = read_val(p, g.result, sizeof(g.result));
+                prev_alpha = false; continue;
+            }
+            if (*p == 'D' && *(p+1) == 'T' && *(p+2) == '[') {
+                p += 3; p = read_val(p, g.date, sizeof(g.date));
                 prev_alpha = false; continue;
             }
         }
@@ -1011,6 +1017,24 @@ private:
     void cc_cycle(int delta);        // change the focused row's value
     void cc_send();                  // build the request and fire it
     int  cc_hit(int mx, int my) const;
+
+    // "Who won?" quiz — a finished pro position, guess black or white.
+    // GameState is ~12MB, but App itself is heap-allocated (new App()), so this
+    // member is fine where a local would blow the stack.
+    GameState   wq_board_;
+    int         wq_bs_       = BOARD_SIZE;
+    std::string wq_black_, wq_white_, wq_date_, wq_result_;
+    std::string wq_path_;              // the SGF this position came from
+    int         wq_winner_   = 1;      // 1 = black won, 0 = white won
+    bool        wq_answered_ = false;
+    bool        wq_correct_  = false;
+    int         wq_right_    = 0;      // running tally
+    int         wq_total_    = 0;
+    std::vector<std::string> wq_pool_; // candidate SGF paths, listed once per session
+    void open_who_won();
+    void wq_load_next();               // pick a random eligible game and show its final position
+    void handle_wq_button(Uint8 btn);
+    void wq_answer(int guess_black);   // 1 = guessed black, 0 = guessed white
 
     // Local game state
     bool        is_local_game_       = false;
@@ -1922,6 +1946,11 @@ void App::handle_controller_button(Uint8 btn) {
         return;
     }
 
+    if (state_ == AppState::WHO_WON) {
+        handle_wq_button(btn);
+        return;
+    }
+
     if (state_ == AppState::LOBBY) {
         if (btn == SDL_CONTROLLER_BUTTON_X) {
             open_game_catalog();
@@ -2400,6 +2429,7 @@ void App::open_popup_menu() {
         add("GAME CATALOG",    [this]() { open_game_catalog(); });
         add("PRO GAMES",       [this]() { open_pro_catalog(); });
         add("PUZZLES",         [this]() { open_puzzle_browser(); });
+        add("WHO WON? QUIZ",   [this]() { open_who_won(); });
         add("JOSEKI EXPLORER", [this]() { open_joseki_explorer(); });
         add("FREE ANALYSIS",   [this]() { start_free_analysis(); });
         break;
@@ -2430,6 +2460,19 @@ void App::open_popup_menu() {
         });
         add("CREATE CHALLENGE", [this]() { open_challenge_create(); });
         add("RETURN TO LOBBY", lobby);
+        add("SETTINGS", [this]() { open_settings_menu(); });
+        break;
+
+    case AppState::WHO_WON:
+        popup_title_ = "WHO WON?";
+        add("NEXT POSITION", [this]() { wq_load_next(); });
+        if (wq_answered_ && !wq_path_.empty())
+            add("REVIEW THIS GAME", [this]() { load_sgf_for_review(wq_path_); });
+        add("RETURN TO LOBBY", [this]() {
+            state_ = AppState::LOBBY;
+            set_status("");
+            load_demo_game();
+        });
         add("SETTINGS", [this]() { open_settings_menu(); });
         break;
 
@@ -4996,6 +5039,143 @@ void App::draw_credential_prompt() {
     renderer_->draw_credential_screen(cred_step_, cred_username_, cred_buf_, footer.c_str());
 }
 
+// ── "Who won?" quiz ───────────────────────────────────────────────────────────
+
+// Can this game be a quiz question? Two kinds qualify. A counted game (numeric
+// margin, e.g. "B+2.5") was played out and scored, so its final position is
+// genuinely scorable. A resignation only qualifies if it ran deep enough that the
+// position is essentially complete — most of the library's resignations stop well
+// before that. Jigo is excluded outright: a drawn game has no winner to guess, and
+// so are timeouts and forfeits, where the board doesn't tell you who won.
+static const int WQ_MIN_RESIGN_MOVES = 250;
+
+static bool wq_eligible(const SgfGame& g, int& winner_black) {
+    const char* r = g.result;
+    if ((r[0] != 'B' && r[0] != 'W') || r[1] != '+') return false;
+    winner_black = (r[0] == 'B') ? 1 : 0;
+    char kind = r[2];
+    if (kind >= '0' && kind <= '9') return true;                 // counted
+    if ((kind == 'R' || kind == 'r') && g.move_count >= WQ_MIN_RESIGN_MOVES)
+        return true;                                             // deep resignation
+    return false;
+}
+
+void App::wq_load_next() {
+    // List the professional library once per session (same lookup the lobby
+    // screensaver uses: next to the exe, else the dev layout two levels up).
+    if (wq_pool_.empty()) {
+        std::string dir = exe_dir() + "games";
+        std::vector<std::string> rel;
+        if (!Catalog::list_sgf_files(dir, rel) || rel.empty()) {
+            dir = exe_dir() + "../../games";
+            rel.clear();
+            Catalog::list_sgf_files(dir, rel);
+        }
+        for (const auto& r : rel) wq_pool_.push_back(Catalog::join_path(dir, r));
+    }
+    if (wq_pool_.empty()) {
+        set_status("NO PRO GAMES FOUND");
+        return;
+    }
+
+    // About a third of the library qualifies, so a handful of random draws lands
+    // one; the cap just stops a pathological library from spinning forever.
+    SgfGame g;
+    int winner = 1;
+    bool found = false;
+    for (int tries = 0; tries < 60 && !found; tries++) {
+        const std::string& path = wq_pool_[(size_t)std::rand() % wq_pool_.size()];
+        if (path == wq_path_) continue;          // don't ask the same game twice running
+        if (!load_sgf(path, g))     continue;
+        if (!wq_eligible(g, winner)) continue;
+        wq_path_ = path;
+        found = true;
+    }
+    if (!found) {
+        set_status("NO SCORABLE POSITIONS FOUND");
+        return;
+    }
+
+    // Replay to the final position. Same rules pass as sgf_board_at(), but writing
+    // into a GameState so the full board renderer can draw it.
+    int sz = g.board_size;
+    wq_bs_ = sz;
+    wq_board_.reset();
+    wq_board_.board_size    = sz;
+    wq_board_.turn_is_black = 1;
+    int cap_r[MAX_BOARD_SIZE * MAX_BOARD_SIZE], cap_f[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
+    for (int i = 0; i < g.move_count; i++) {
+        int r, f;
+        if (!parse_sgf_move(g.moves[i], r, f)) continue;
+        if (r < 0 || r >= sz || f < 0 || f >= sz) continue;
+        if (wq_board_.board[r][f] != 0) continue;
+        bool is_black = (g.colors[i] == 1);
+        if (GoRules::would_be_suicide(wq_board_.board, r, f, is_black, sz)) continue;
+        wq_board_.board[r][f] = is_black ? 1 : 2;
+        int cap_count = 0;
+        GoRules::find_captured(wq_board_.board, is_black, r, f, cap_r, cap_f, cap_count, sz);
+        for (int j = 0; j < cap_count; j++) wq_board_.board[cap_r[j]][cap_f[j]] = 0;
+    }
+
+    wq_black_    = g.black_name;
+    wq_white_    = g.white_name;
+    wq_date_     = g.date;
+    wq_result_   = g.result;
+    wq_winner_   = winner;
+    wq_answered_ = false;
+    wq_correct_  = false;
+}
+
+void App::open_who_won() {
+    save_companion();  // persist any open review before switching away
+    analysis_root_.reset();
+    analysis_cur_ = nullptr;
+    analysis_tree_render_.clear();
+    is_local_game_ = false;
+    demo_active_   = false;   // the lobby screensaver would fight for the board
+    state_    = AppState::WHO_WON;
+    wq_right_ = 0;            // a fresh run each time it's opened
+    wq_total_ = 0;
+    wq_path_.clear();
+    set_status("");
+    wq_load_next();
+    draw();
+}
+
+void App::wq_answer(int guess_black) {
+    if (wq_answered_) return;   // already revealed — ignore until the next question
+    wq_answered_ = true;
+    wq_correct_  = (guess_black == wq_winner_);
+    wq_total_++;
+    if (wq_correct_) wq_right_++;
+    draw();
+}
+
+void App::handle_wq_button(Uint8 btn) {
+    switch (btn) {
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  wq_answer(1); break;   // guess black
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: wq_answer(0); break;   // guess white
+    case SDL_CONTROLLER_BUTTON_A:
+        if (wq_answered_) { wq_load_next(); draw(); }
+        break;
+    case SDL_CONTROLLER_BUTTON_Y:
+        // Study the game this position came from — only once the answer is out,
+        // since the review shows the result.
+        if (wq_answered_ && !wq_path_.empty()) load_sgf_for_review(wq_path_);
+        break;
+    case SDL_CONTROLLER_BUTTON_B:
+        state_ = AppState::LOBBY;
+        set_status("");
+        load_demo_game();   // hand the board back to the screensaver
+        draw();
+        break;
+    case SDL_CONTROLLER_BUTTON_START:
+        open_popup_menu();
+        break;
+    default: break;
+    }
+}
+
 // ── Incoming challenges (accept / decline) ────────────────────────────────────
 
 // GET me/challenges/ on a worker thread; the reply arrives as CHALLENGES_UPDATED.
@@ -6675,22 +6855,30 @@ Renderer::DrawState App::make_ds() {
     // When reviewing history, display the historical board state;
     // in GAME_OVER display the current analysis node;
     // otherwise in idle states show the demo screensaver game if loaded.
-    bool show_demo = demo_active_ && !playing && state_ != AppState::CREDENTIAL_PROMPT;
+    bool who_won   = (state_ == AppState::WHO_WON);
+    bool show_demo = demo_active_ && !playing && !who_won &&
+                     state_ != AppState::CREDENTIAL_PROMPT;
     const GameState& disp_board =
-        (state_ == AppState::GAME_OVER && analysis_cur_) ? analysis_cur_->board
+        who_won                                           ? wq_board_
+        : (state_ == AppState::GAME_OVER && analysis_cur_) ? analysis_cur_->board
         : in_history                                      ? game_.history[game_.history_pos]
         : show_demo                                       ? demo_.board
         :                                                   game_.board;
 
     // References bound here must outlive this call — all are App member variables.
-    const std::string& bname = playing    ? black_label_
+    // In the quiz the players stay hidden until the guess is in: seeing a famous
+    // name next to the board is a hint, and the point is to read the position.
+    const std::string& bname = who_won    ? (wq_answered_ ? wq_black_ : empty_str_)
+                             : playing    ? black_label_
                              : show_demo  ? demo_.black_name
                              :              empty_str_;
-    const std::string& wname = playing    ? white_label_
+    const std::string& wname = who_won    ? (wq_answered_ ? wq_white_ : empty_str_)
+                             : playing    ? white_label_
                              : show_demo  ? demo_.white_name
                              :              empty_str_;
 
-    int active_bs = playing   ? game_.board_size
+    int active_bs = who_won   ? wq_bs_
+                  : playing   ? game_.board_size
                   : show_demo ? demo_.board_size
                   :             BOARD_SIZE;
 
@@ -6702,7 +6890,9 @@ Renderer::DrawState App::make_ds() {
         .guess_mode             = false,
         .guess_score            = 0,
         .chain_mode             = chain_mode_,
-        .free_mode              = false,
+        // The quiz owns the whole screen: a bare board with no HUD, and its own
+        // overlay panel drawn beside it.
+        .free_mode              = who_won,
         .active_board_size      = active_bs,
         .show_help              = show_help_,
         .catalog                = catalog_,
@@ -6711,8 +6901,10 @@ Renderer::DrawState App::make_ds() {
         .draw_dark              = chalk_dark_,
         .black_name             = bname,
         .white_name             = wname,
-        .result_message         = (state_ == AppState::GAME_OVER) ? game_.result : empty_str_,
-        .game_date              = empty_str_,
+        .result_message         = who_won ? (wq_answered_ ? wq_result_ : empty_str_)
+                                          : (state_ == AppState::GAME_OVER) ? game_.result
+                                                                            : empty_str_,
+        .game_date              = (who_won && wq_answered_) ? wq_date_ : empty_str_,
         .game_comment           = (state_ == AppState::PUZZLE_PLAY) ? pz_comment_
                                 : (state_ == AppState::JOSEKI)      ? jk_comment_ : empty_str_,
         .move_delay_ms          = MOVE_DELAY_MS,
@@ -6724,6 +6916,11 @@ Renderer::DrawState App::make_ds() {
         .territory_w_score      = 0,
         .territory_answered     = false,
         .territory_correct      = false,
+        .who_won_active         = who_won,
+        .who_won_answered       = wq_answered_,
+        .who_won_correct        = wq_correct_,
+        .who_won_right          = wq_right_,
+        .who_won_total          = wq_total_,
         .stone_filter           = 0,
         .cursor_x               = -1,
         .cursor_y               = -1,

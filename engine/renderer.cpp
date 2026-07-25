@@ -2393,6 +2393,84 @@ void Renderer::render_territory_overlay(const BoardView& view, const DrawState& 
     }
 }
 
+// "Who won?" quiz. Sits in the panel left of the board (the board itself is drawn
+// in free_mode, so nothing else competes for that space). Before answering, only
+// the position is on screen — players and result are withheld so nothing gives the
+// result away; the reveal fills them in.
+void Renderer::render_who_won_overlay(const BoardView& view, const DrawState& ds) {
+    if (!ds.who_won_active) return;
+    int scale = (view.square >= 30) ? 3 : 2;
+    int pad   = (view.square >= 30) ? 16 : 8;
+    int th    = 7 * scale;
+    int lh    = th + 6;
+    int tx    = pad * 2;
+    int avail = view.offset_x - view.margin - tx - pad;
+
+    SDL_Color white  = Palette::SCORE_TEXT;
+    SDL_Color dim    = Palette::TEXT_SECONDARY;
+    SDL_Color accent = Palette::ACCENT;
+    SDL_Color green  = Palette::SCORE_CORRECT;
+    SDL_Color red    = {255, 100, 100, 255};
+
+    // Shrink to fit the panel rather than overflowing onto the board.
+    auto fit = [&](const char* s, int sc) {
+        while (sc > 1 && text_width_px(s, sc) > avail) sc--;
+        return sc;
+    };
+
+    int y = view.offset_y - view.margin + pad;
+    draw_text(tx, y, scale, "WHO WON?", accent);
+    y += lh * 2;
+
+    if (!ds.who_won_answered) {
+        draw_text(tx, y, scale, "GUESS THE", white);      y += lh;
+        draw_text(tx, y, scale, "WINNER:",   white);      y += lh * 2;
+        draw_text(tx, y, scale, "< BLACK",   white);      y += lh;
+        draw_text(tx, y, scale, "WHITE >",   white);      y += lh * 2;
+        draw_text(tx, y, scale, "DPAD L/R",  dim);
+    } else {
+        draw_text(tx, y, scale,
+                  ds.who_won_correct ? "CORRECT!" : "WRONG",
+                  ds.who_won_correct ? green : red);
+        y += lh * 2;
+
+        if (!ds.result_message.empty()) {
+            int s = fit(ds.result_message.c_str(), scale + 1);
+            draw_text(tx, y, s, ds.result_message.c_str(), accent);
+            y += s * 7 + 12;
+        }
+        // Players, one per line — pro names are long, so they get their own rows.
+        if (!ds.black_name.empty()) {
+            draw_text(tx, y, fit("B", scale), "B", dim);
+            int s = fit(ds.black_name.c_str(), scale);
+            draw_text(tx + 6 * scale * 2, y, s, ds.black_name.c_str(), white);
+            y += lh;
+        }
+        if (!ds.white_name.empty()) {
+            draw_text(tx, y, fit("W", scale), "W", dim);
+            int s = fit(ds.white_name.c_str(), scale);
+            draw_text(tx + 6 * scale * 2, y, s, ds.white_name.c_str(), white);
+            y += lh;
+        }
+        if (!ds.game_date.empty()) {
+            y += lh / 2;
+            draw_text(tx, y, fit(ds.game_date.c_str(), scale), ds.game_date.c_str(), dim);
+            y += lh;
+        }
+        y += lh;
+        draw_text(tx, y, scale, GLYPH_PS_CROSS " NEXT", accent);
+    }
+
+    // Running tally, pinned to the bottom of the panel.
+    if (ds.who_won_total > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d / %d", ds.who_won_right, ds.who_won_total);
+        int by = view.offset_y - view.margin + view.board_px + 2 * view.margin - pad - th;
+        draw_text(tx, by - lh, scale, "SCORE", dim);
+        draw_text(tx, by,      scale, buf,     white);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Analysis tree panel (post-game review, ogs_client only)
 
@@ -3404,6 +3482,7 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     }
 
     render_territory_overlay(view, ds);
+    render_who_won_overlay(view, ds);
     render_analysis_tree(view, ds);
     render_score_graph(view, ds);
 
