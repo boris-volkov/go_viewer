@@ -2817,10 +2817,9 @@ uint64_t Renderer::compute_cache_hash(const DrawState& ds) const {
     mix8(uint8_t(speed_on));
     if (speed_on) mix64(uint64_t(ds.move_delay_ms));
 
-    // Flash message
-    bool flash_on = ds.flash_message_until > 0 && now < ds.flash_message_until;
-    mix8(uint8_t(flash_on));
-    if (flash_on) mix_str(ds.flash_message);
+    // Flash messages are deliberately absent: they're drawn after the cached texture
+    // is blitted, so they can't affect it. Hashing them here used to rebuild the
+    // entire board cache every time a notification appeared or expired.
 
     // Save input overlay
     mix8(uint8_t(ds.save_input_step));
@@ -3489,7 +3488,9 @@ void Renderer::render_board_content(const BoardView& view, const Overlay* overla
     render_help_overlay(view, ds.show_help, ds.live_mode);
     render_catalog_overlay(view, ds);
     render_save_input(view, ds);
-    render_flash_message(view, ds);
+    // Flash notifications are NOT drawn here. They used to be, which put them inside
+    // the cached board texture — so the board coordinates, drawn after the cache is
+    // blitted, landed on top of them. render_board() draws them last instead.
     if (ds.quit_confirm) render_quit_confirm(view);
 }
 
@@ -3585,6 +3586,11 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
 
     if (ds.popup_items && ds.popup_count > 0)
         draw_popup_menu(ds.popup_title, ds.popup_items, ds.popup_count, ds.popup_index);
+    // Notifications go on top of everything except the cursor — above the board
+    // coordinates (which otherwise overdrew them), the chalk layer and the popup.
+    // Drawing them outside the cached texture also means a flash appearing or
+    // expiring no longer rebuilds the whole board cache.
+    render_flash_message(view, ds);
     render_software_cursor(view, ds);
     if (!ds.suppress_present)
         SDL_RenderPresent(sdl);
