@@ -11,6 +11,7 @@
 #include "analysis_state.hpp"
 #include "catalog.hpp"
 #include "renderer.hpp"
+#include "palette.hpp"      // CHALK / CHALK_DARK for the drawing-mode cursor tint
 #include "ogs_client.hpp"
 #include "ogs_net.hpp"
 #include "katago.hpp"
@@ -670,6 +671,11 @@ private:
     bool pen_down_  = false;   // left button held while in draw mode
     int  pen_x_     = 0;       // last stamped point, for segment continuity
     int  pen_y_     = 0;
+    // Current pointer position, tracked from motion events (not SDL_GetMouseState)
+    // so it's in the same coordinate space as pen_x_/pen_y_ and the hit-tests.
+    // Drives the chalk crosshair cursor in drawing mode.
+    int  mouse_x_   = -1;
+    int  mouse_y_   = -1;
     void toggle_draw_mode();
 
     // Help overlay / quit confirm
@@ -4218,6 +4224,14 @@ void App::open_settings_menu() {
 void App::toggle_draw_mode() {
     draw_mode_ = !draw_mode_;
     pen_down_  = false;
+    // The chalk crosshair replaces the OS pointer while drawing; hand the pointer
+    // back on the way out (but only if the mouse was the active input, so a pad
+    // session doesn't suddenly sprout a cursor).
+    if (draw_mode_) {
+        SDL_ShowCursor(SDL_DISABLE);
+    } else if (cursor_shown_) {
+        SDL_ShowCursor(SDL_ENABLE);
+    }
     flash_       = draw_mode_ ? "DRAWING MODE" : "DRAWING MODE OFF";
     flash_until_ = SDL_GetTicks() + 1500;
     draw();
@@ -6922,9 +6936,14 @@ Renderer::DrawState App::make_ds() {
         .who_won_right          = wq_right_,
         .who_won_total          = wq_total_,
         .stone_filter           = 0,
-        .cursor_x               = -1,
-        .cursor_y               = -1,
-        .cursor_type            = 0,
+        // Drawing mode replaces the OS pointer with a chalk-tinted crosshair, so the
+        // cursor itself shows that a click draws and which colour is armed (it used
+        // to be a text label, which collided with the status line). Off in every
+        // other state, where the OS cursor is the pointer.
+        .cursor_x               = draw_mode_ ? mouse_x_ : -1,
+        .cursor_y               = draw_mode_ ? mouse_y_ : -1,
+        .cursor_type            = draw_mode_ ? 1 : 0,
+        .cursor_color           = chalk_dark_ ? Palette::CHALK_DARK : Palette::CHALK,
         .show_move_numbers      = false,
         .sgf_moves              = nullptr,
         .sgf_colors             = nullptr,
@@ -7207,9 +7226,14 @@ void App::event_loop() {
                 // the mouse just moved.
                 switch (e.type) {
                 case SDL_MOUSEMOTION:
+                    mouse_x_ = e.motion.x;
+                    mouse_y_ = e.motion.y;
+                    // fall through — motion also counts as "the mouse is in use"
                 case SDL_MOUSEBUTTONDOWN:
                 case SDL_MOUSEWHEEL:
-                    if (!cursor_shown_) { SDL_ShowCursor(SDL_ENABLE);  cursor_shown_ = true;  }
+                    // Drawing mode draws its own chalk-tinted crosshair, so the OS
+                    // pointer stays hidden there — two cursors would be one too many.
+                    if (!cursor_shown_ && !draw_mode_) { SDL_ShowCursor(SDL_ENABLE);  cursor_shown_ = true;  }
                     break;
                 case SDL_KEYDOWN:
                 case SDL_CONTROLLERBUTTONDOWN:

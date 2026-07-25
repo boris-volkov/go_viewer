@@ -108,6 +108,10 @@ public:
         int   cursor_x    = -1;
         int   cursor_y    = -1;
         int   cursor_type = 0;  // 0=hidden, 1=crosshair, 2=white stone, 3=black stone
+        // Crosshair tint. Alpha 0 means "unset" — the crosshair keeps its default
+        // accent colour. ogs_client sets it to the armed chalk colour in drawing
+        // mode, so the cursor itself says which colour you're about to draw with.
+        SDL_Color cursor_color = {0, 0, 0, 0};
         bool  show_move_numbers = false;  // overlay move-order numbers on stones
         // Playback: raw SGF arrays (renderer builds grid, independent of captures)
         const char (*sgf_moves)[MOVE_TEXT_LEN] = nullptr;

@@ -3577,16 +3577,11 @@ void Renderer::render_board(const BoardView& view, const Overlay* overlay, const
     // over a scribbled board stays readable.
     if (annot_layer_ && annot_any_)
         SDL_RenderCopy(sdl, annot_layer_, nullptr, nullptr);
-    if (ds.draw_mode) {
-        // In this mode a click draws instead of placing a stone, so say so.
-        // State only, no key hints — just enough to explain why a click isn't
-        // placing a stone. Always in chalk white, whatever colour is armed: a black
-        // label on the dark panels would be the one thing you couldn't read.
-        int scale = (view.screen_w >= 900) ? 3 : 2;
-        draw_text(view.screen_w / 40, view.screen_h / 40, scale,
-                  ds.draw_dark ? "DRAWING (BLACK)" : "DRAWING (WHITE)",
-                  Palette::CHALK);
-    }
+    // Drawing mode used to announce itself with a text label up here, but it shared
+    // the top-left with the status line and the two overlapped. The cursor carries
+    // it instead: in drawing mode it becomes a crosshair tinted with the armed chalk
+    // colour (see cursor_color), which says both "a click draws" and "in this
+    // colour" right where the eye already is, and can't collide with anything.
 
     if (ds.popup_items && ds.popup_count > 0)
         draw_popup_menu(ds.popup_title, ds.popup_items, ds.popup_count, ds.popup_index);
@@ -3664,14 +3659,20 @@ void Renderer::render_software_cursor(const BoardView& view, const DrawState& ds
         if (radius < 2) radius = 2;
         draw_stone_at_px(cx, cy, radius, is_black, 255);
     } else {
-        // Crosshair cursor: yellow with dark shadow, center gap, 3/4-length arms
+        // Crosshair cursor: accent (or the caller's tint) with a contrasting
+        // shadow, centre gap, 3/4-length arms
         int arm = sq * 3 / 8;            // half-arm length from centre
         int gap = std::max(1, sq / 12);  // gap around the hotspot
         SDL_SetRenderDrawBlendMode(sdl, SDL_BLENDMODE_BLEND);
-        // Draw shadow (offset 1,1) then accent colour on top
+        SDL_Color tint = (ds.cursor_color.a == 0) ? Palette::ACCENT : ds.cursor_color;
+        // The shadow exists so the cursor stays visible against whatever it's over.
+        // A dark shadow does nothing for a dark cursor, so flip it to a light halo
+        // when the tint itself is dark (the near-black chalk cursor).
+        bool tint_is_dark = (tint.r * 299 + tint.g * 587 + tint.b * 114) / 1000 < 110;
         const struct { int ox, oy; Uint8 r, g, b, a; } passes[2] = {
-            {1, 1,   0,   0,  0, 140},
-            {0, 0, Palette::ACCENT.r, Palette::ACCENT.g, Palette::ACCENT.b, 255},
+            {1, 1, Uint8(tint_is_dark ? 255 : 0), Uint8(tint_is_dark ? 255 : 0),
+                   Uint8(tint_is_dark ? 255 : 0), Uint8(tint_is_dark ? 170 : 140)},
+            {0, 0, tint.r, tint.g, tint.b, 255},
         };
         for (auto& p : passes) {
             SDL_Color col = {p.r, p.g, p.b, p.a};
