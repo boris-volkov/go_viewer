@@ -319,6 +319,11 @@ std::vector<CorrGameSummary> OgsNet::corr_games_snapshot() {
 
 // ── Challenges (authenticated REST via the session cookie) ────────────────────
 
+// Any 2xx is success. Enumerating individual codes got this wrong once already:
+// accepting a challenge answers 202 (the server queues the game creation), which
+// a 200/201/204 list rejected as a failure even though the game was made.
+static bool http_ok(long code) { return code >= 200 && code < 300; }
+
 void OgsNet::fetch_challenges() {
     NetMsg m;
     m.type = NetMsgType::CHALLENGES_UPDATED;
@@ -393,7 +398,7 @@ void OgsNet::accept_challenge(int challenge_id) {
     net_log(("accept_challenge " + std::to_string(challenge_id) + ": HTTP " +
              std::to_string(code) + " " + resp.substr(0, 200)).c_str());
 
-    if (ok && (code == 200 || code == 201 || code == 204)) {
+    if (ok && http_ok(code)) {
         m.text = "CHALLENGE ACCEPTED";
         // The response usually carries the created game's id.
         try {
@@ -496,7 +501,7 @@ void OgsNet::send_challenge(const ChallengeRequest& req) {
     net_log(("send_challenge -> " + url + " HTTP " + std::to_string(code) + " " +
              resp.substr(0, 300)).c_str());
 
-    m.text = (ok && (code == 200 || code == 201))
+    m.text = (ok && http_ok(code))
                  ? "CHALLENGE SENT"
                  : "CHALLENGE FAILED (" + std::to_string(code) + ")";
     push_msg(std::move(m));
@@ -512,7 +517,7 @@ void OgsNet::decline_challenge(int challenge_id) {
     bool ok = curl_request(url, "", cookiejar_, rest_write_hdr(), resp, code, "DELETE");
     net_log(("decline_challenge " + std::to_string(challenge_id) + ": HTTP " +
              std::to_string(code)).c_str());
-    m.text = (ok && (code == 200 || code == 202 || code == 204))
+    m.text = (ok && http_ok(code))
                  ? "CHALLENGE DECLINED"
                  : "DECLINE FAILED (" + std::to_string(code) + ")";
     push_msg(std::move(m));
