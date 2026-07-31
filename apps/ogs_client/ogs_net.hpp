@@ -41,6 +41,12 @@ public:
     // Poll one inbound message (returns false when queue is empty).
     bool poll_msg(NetMsg& out);
 
+    // Write a line into the session log the socket events go to. The log recorded
+    // only what arrived off the wire, so a move the app received but never put on
+    // the board was indistinguishable from one it applied — which is precisely the
+    // gap that made the 2026-07-27 lost-move hunt so slow. Main thread may call it.
+    void log_line(const std::string& s);
+
     // Download the completed game's SGF from the OGS API and write it to path.
     // Blocks — call from a background thread, not from the SDL event loop.
     void fetch_sgf(int game_id, const std::string& path);

@@ -42,6 +42,10 @@ struct OgsPuzzle {
     std::string initial_black;
     std::string initial_white;
     bool        black_to_play = true;
+    // Which color the human plays. Usually == black_to_play; a drill can decouple
+    // the two (e.g. black moves first per the position, but white is the solver),
+    // in which case pz_start() auto-plays black's opening move before handing over.
+    bool        solver_black  = true;
     bool        opponent_auto = true;   // opponent replies play automatically from the tree
     int         collection_id = 0;
     std::string collection_name;

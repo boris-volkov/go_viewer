@@ -246,6 +246,11 @@ struct LiveGame {
     int         initial_player   = 1;   // who plays move 1: 1=black, 0=white — parity anchor
     int         last_move_number = 0;   // server move_number of the last move applied to the board
     Uint32      resync_req_at    = 0;   // SDL ticks of the last gamedata re-request (debounce)
+    // clock.current_player — the server's own answer to "whose move is it", carried on
+    // every clock event. Cross-checked against my_turn as a last line of defence: if
+    // they disagree for long enough, a live move went missing and the board is dead.
+    int         server_turn_player = 0;
+    Uint32      turn_mismatch_at   = 0; // ticks when they first disagreed (0 = in agreement)
     int         cursor_r    = 9;
     int         cursor_f    = 9;
     GameState   board;
@@ -958,6 +963,13 @@ private:
     // board without creating tree nodes — for laying out a drill's initial
     // shape before recording any lines.
     int         analysis_setup_color_ = -1;
+    // Which color the human will play when this drill is solved, independent of
+    // which side's move-count parity moves first (see "SWITCH SIDE TO MOVE"):
+    // -1 = unset (solver follows whoever moves first, today's behavior), 1/0 =
+    // explicitly pinned to black/white via the "SOLVE AS ..." menu toggle. Reset
+    // to -1 whenever a fresh analysis tree starts; restored from ZS[] when
+    // re-editing a saved drill.
+    int         drill_solver_black_ = -1;
     // Local-list preview: the selected file's setup position, parsed on
     // cursor move and cached (same BOARD_SIZE stride as the catalog thumbs).
     char        drill_thumb_[BOARD_SIZE][BOARD_SIZE] = {};
@@ -988,6 +1000,7 @@ private:
     void pz_start();                           // (re)set the board to pz_'s initial position
     void pz_place(int r, int f);               // player move → tree matching + feedback
     void pz_advance(const PuzzleMoveNode* node, bool opponent_follows);
+    const PuzzleMoveNode* pz_pick_reply(const PuzzleMoveNode* node);  // least-visited-first branch choice
     void pz_fire_pending_reply();               // apply the delayed opponent reply, then keep judging
     void pz_enter_explore();                   // triangle: free sandbox from the current position
     void pz_return_to_solving();               // circle, mid-exploration: back to the judged anchor
@@ -1150,6 +1163,7 @@ private:
     // forced_color: -1 = use current turn (normal), 0/1 = force that color and don't flip turn
     void apply_move(int col, int row, int forced_color = -1);
     void apply_pass();  // flips turn and records a history snapshot, same bookkeeping as apply_move
+    void request_resync();  // debounced game/connect — GAME_CONNECTED rebuilds the position
     void reset_byo_countdowns(bool running_player_too);  // stored secs -> full period (byo players)
     void undo_local_move();  // pop back to your last turn in a local game vs KataGo
     void step_history(int delta);  // delta=-1 back, +1 forward; sets history_pos
@@ -1302,6 +1316,21 @@ void App::apply_pass() {
     }
 }
 
+// Ask OGS to re-send gamedata: GAME_CONNECTED then rebuilds the whole position
+// authoritatively, which is the only reliable cure once the local board and the
+// server disagree. Debounced so a flurry of bad events can't spam game/connect,
+// and self-retrying so a dropped rebuild can't leave us frozen.
+void App::request_resync() {
+    if (game_.game_id == 0 || is_local_game_) return;
+    Uint32 now = SDL_GetTicks();
+    if (now - game_.resync_req_at <= 3000) return;
+    game_.resync_req_at = now;
+    net_.log_line("request_resync: re-sending game/connect for " + std::to_string(game_.game_id));
+    net_.cmd_reconnect_game(game_.game_id);
+    set_status("RESYNCING...");
+    draw();
+}
+
 // Byo-yomi: a period resets the instant a move is played — the player who just
 // moved parks with a full period banked, and the player now to move starts a
 // fresh one. But server move events carry period_time_left as a snapshot of the
@@ -1422,6 +1451,7 @@ void App::build_analysis_tree() {
     // re-sets drill_edit_path_ afterwards.)
     drill_edit_path_.clear();
     analysis_setup_color_ = -1;   // setup-stone mode never carries across sessions
+    drill_solver_black_   = -1;   // solver defaults to whoever moves first, until pinned
 
     analysis_root_ = std::make_unique<AnalysisNode>();
     analysis_root_->board = game_.history.empty() ? game_.board : game_.history[0];
@@ -2627,7 +2657,22 @@ void App::open_popup_menu() {
         if (analysis_cur_ && analysis_cur_->parent && !analysis_cur_->is_main_line)
             add("DELETE THIS BRANCH", [this]() { delete_analysis_branch(); },
                 /*confirm=*/true);
-        if (analysis_cur_ && !analysis_cur_->children.empty())
+        // Which color the human solves as, independent of who moves first (e.g.
+        // black moves first per the position, but white is the one being drilled —
+        // black's opening then plays itself before you take over). Unset (-1)
+        // tracks whoever moves first, matching plain alternating drills. Gated on
+        // the tree's actual root, same as SAVE AS DRILL below — this is a
+        // whole-drill property, not something tied to wherever you're browsing.
+        if (analysis_root_ && !analysis_root_->children.empty()) {
+            bool root_black    = analysis_root_->board.turn_is_black == 1;
+            bool solver_black  = (drill_solver_black_ < 0) ? root_black : (drill_solver_black_ == 1);
+            add(solver_black ? "SOLVE AS BLACK (TAP FOR WHITE)" : "SOLVE AS WHITE (TAP FOR BLACK)",
+                [this, solver_black]() { drill_solver_black_ = solver_black ? 0 : 1; });
+        }
+        // Gated on the root, not analysis_cur_: SAVE always writes the whole tree
+        // from the top (see save_drill()), so its availability shouldn't depend on
+        // wherever you've scrolled to while reviewing.
+        if (analysis_root_ && !analysis_root_->children.empty())
             add(drill_edit_path_.empty() ? "SAVE AS DRILL" : "OVERWRITE DRILL",
                 [this]() { save_drill_from_current(); });
         add("GAME CATALOG",    [this]() { open_game_catalog(); });
@@ -3092,15 +3137,20 @@ static void drill_write(FILE* f, const AnalysisNode* n) {
 }
 
 bool App::save_drill(const std::string& path) {
-    if (!analysis_cur_ || analysis_cur_->children.empty()) {
+    // Always the whole tree from its true root — not wherever the cursor
+    // happens to be sitting while reviewing. Saving from analysis_cur_ used to
+    // silently drop everything above/around it (setup stones included) the
+    // moment you'd navigated deep into the tree before hitting save.
+    if (!analysis_root_ || analysis_root_->children.empty()) {
         flash_       = "NOTHING TO SAVE — PLAY OUT SOME LINES FIRST";
         flash_until_ = SDL_GetTicks() + 2500;
         return false;
     }
-    const GameState& root = analysis_cur_->board;   // reference — GameState is huge
+    AnalysisNode* root_node = analysis_root_.get();
+    const GameState& root = root_node->board;   // reference — GameState is huge
     bool any_correct = false;
     int  first_color = (root.turn_is_black == 1) ? 1 : 0;
-    if (!drill_validate(analysis_cur_, first_color, any_correct, 0)) {
+    if (!drill_validate(root_node, first_color, any_correct, 0)) {
         flash_       = "DRILL MUST ALTERNATE COLORS, NO PASSES";
         flash_until_ = SDL_GetTicks() + 2500;
         return false;
@@ -3132,6 +3182,9 @@ bool App::save_drill(const std::string& path) {
                     fprintf(f, "[%c%c]", char('a' + c), char('a' + r));
     }
     fprintf(f, "PL[%s]", root.turn_is_black ? "B" : "W");
+    bool solver_black_eff = (drill_solver_black_ < 0) ? (root.turn_is_black == 1)
+                                                        : (drill_solver_black_ == 1);
+    fprintf(f, "ZS[%s]", solver_black_eff ? "B" : "W");
     // GN = filename stem, for display in the drill list
     std::string stem = path;
     size_t slash = stem.find_last_of("/\\");
@@ -3143,8 +3196,11 @@ bool App::save_drill(const std::string& path) {
     char date[16];
     strftime(date, sizeof(date), "%Y-%m-%d", localtime(&t));
     fprintf(f, "DT[%s]", date);
-    fprintf(f, "C[%s TO PLAY]", root.turn_is_black ? "BLACK" : "WHITE");
-    drill_write(f, analysis_cur_);
+    // The task statement is about the solver's decision, not board truth — when
+    // the opponent's opening move plays itself, it's still "your" puzzle to solve
+    // as whichever color that is, not the color that happens to move first.
+    fprintf(f, "C[%s TO PLAY]", solver_black_eff ? "BLACK" : "WHITE");
+    drill_write(f, root_node);
     fprintf(f, ")\n");
     fclose(f);
     return true;
@@ -3300,6 +3356,7 @@ static bool load_variation_sgf_core(const std::string& path, OgsPuzzle& pz, std:
     if (*p != ';') { err = "NO ROOT NODE"; return false; }
     p++;
 
+    bool seen_zs = false;   // ZS[] present → explicit solver color, else defaults to PL[]
     // Root node: setup properties
     while (*p) {
         while (*p && isspace((unsigned char)*p)) p++;
@@ -3324,6 +3381,11 @@ static bool load_variation_sgf_core(const std::string& path, OgsPuzzle& pz, std:
                 if (v.size() == 2) dst += v;
         } else if (ident == "PL") {
             pz.black_to_play = !vals[0].empty() && (vals[0][0] == 'B' || vals[0][0] == 'b' || vals[0][0] == '1');
+        } else if (ident == "ZS") {
+            // Solver's color, when it differs from who moves first (PL[]) — a drill
+            // where the opponent's opening move plays itself before you take over.
+            pz.solver_black = !vals[0].empty() && (vals[0][0] == 'B' || vals[0][0] == 'b' || vals[0][0] == '1');
+            seen_zs = true;
         } else if (ident == "GN") {
             pz.name = vals[0];
         } else if (ident == "C") {
@@ -3340,6 +3402,7 @@ static bool load_variation_sgf_core(const std::string& path, OgsPuzzle& pz, std:
         }
         // everything else (GM/FF/CA/DT/PB/PW/KM/...) ignored
     }
+    if (!seen_zs) pz.solver_black = pz.black_to_play;
 
     if (pz.width != pz.height || pz.width < 2 || pz.width > MAX_BOARD_SIZE) {
         err = "BAD BOARD SIZE";
@@ -3377,7 +3440,7 @@ static bool load_drill_sgf(const std::string& path, OgsPuzzle& out_pz, std::stri
     pz.collection_name = "MY DRILLS";
     if (pz.name.empty()) pz.name = filename_stem(path);
     if (pz.description.empty())
-        pz.description = pz.black_to_play ? "BLACK TO PLAY" : "WHITE TO PLAY";
+        pz.description = pz.solver_black ? "BLACK TO PLAY" : "WHITE TO PLAY";
     out_pz = std::move(pz);
     return true;
 }
@@ -3394,7 +3457,7 @@ static bool load_saved_puzzle_sgf(const std::string& path, OgsPuzzle& out_pz, st
     if (pz.collection_name.empty()) pz.collection_name = "SAVED";
     if (pz.name.empty()) pz.name = filename_stem(path);
     if (pz.description.empty())
-        pz.description = pz.black_to_play ? "BLACK TO PLAY" : "WHITE TO PLAY";
+        pz.description = pz.solver_black ? "BLACK TO PLAY" : "WHITE TO PLAY";
     out_pz = std::move(pz);
     return true;
 }
@@ -4666,6 +4729,11 @@ void App::drill_edit_current() {
 
     // Root from the 1-entry history (also clears drill_edit_path_ — reset below)
     build_analysis_tree();
+    // Preserve the file's solver pin across edits — but only an explicit one.
+    // A plain drill (solver == mover) stays "unset" so SWITCH SIDE TO MOVE keeps
+    // dragging the solver along with it, same as before this decoupling existed.
+    drill_solver_black_ = (pz_.solver_black == pz_.black_to_play)
+                               ? -1 : (pz_.solver_black ? 1 : 0);
 
     // Convert the puzzle tree into analysis children. Every node is heap-owned
     // (unique_ptr chain) and boards are copied member-to-member inside those
@@ -5611,6 +5679,8 @@ void App::poll_puzzle_fetch() {
     draw();
 }
 
+static constexpr int PZ_OPPONENT_REPLY_DELAY_MS = 500;
+
 // Set the board to the puzzle's initial position and enter PUZZLE_PLAY.
 // Also serves as "retry" — everything is rebuilt from pz_.
 void App::pz_start() {
@@ -5634,7 +5704,7 @@ void App::pz_start() {
     game_.board.reset();
     game_.board.board_size    = pz_.width;
     game_.board.turn_is_black = pz_.black_to_play ? 1 : 0;
-    game_.my_color   = pz_.black_to_play ? 1 : 0;
+    game_.my_color   = pz_.solver_black ? 1 : 0;
     game_.my_turn    = true;
     game_.black_name = "BLACK";
     game_.white_name = "WHITE";
@@ -5673,7 +5743,18 @@ void App::pz_start() {
     white_label_ = game_.white_name;
     state_ = AppState::PUZZLE_PLAY;
     std::string rank = (pz_.rank > 0) ? "  (" + ogs_rank_str(pz_.rank) + ")" : "";
-    set_status("YOU ARE " + std::string(pz_.black_to_play ? "BLACK" : "WHITE") + rank);
+    set_status("YOU ARE " + std::string(pz_.solver_black ? "BLACK" : "WHITE") + rank);
+    // Solver differs from who moves first: the opponent's opening move isn't a
+    // real decision point for the human, so it plays itself (same delayed,
+    // least-visited-first choice as any other automatic reply) before control
+    // passes over — see pz_fire_pending_reply().
+    if (pz_.solver_black != pz_.black_to_play && !pz_.tree.branches.empty()) {
+        const PuzzleMoveNode* reply = pz_pick_reply(&pz_.tree);
+        if (reply) {
+            pz_pending_reply_ = reply;
+            pz_reply_at_      = SDL_GetTicks() + PZ_OPPONENT_REPLY_DELAY_MS;
+        }
+    }
     draw();
 }
 
@@ -5709,8 +5790,6 @@ void App::pz_build_tree_render() {
     dfs(&pz_.tree, 0, 0, 0, -1);
 }
 
-static constexpr int PZ_OPPONENT_REPLY_DELAY_MS = 500;
-
 // Land on a solution-tree node (just reached by whoever moved), judge it, and
 // let the automatic opponent respond when the line continues.
 // Does this subtree contain a correct ending at all? Wrong lines and judged
@@ -5733,6 +5812,35 @@ bool App::pz_subtree_unexplored(const PuzzleMoveNode* n) const {
     for (const auto& b : n->branches)
         if (pz_subtree_unexplored(&b)) return true;
     return false;
+}
+
+// Opponent resistance choice among `node`'s branches. First preference: a
+// branch whose subtree still contains something never traversed — raw
+// least-visited counts alone can ping-pong between an already-exhausted
+// shallow branch and a deep bushy one, re-treading known lines while unseen
+// ones wait. Only when everything below `node` has been seen does it fall
+// back to least-visited for variety. Ties (usually several branches all at
+// 0 visits) are broken randomly rather than by authored order, so the same
+// drill doesn't show its lines in the same sequence every time. Shared by
+// mid-line automatic replies and, when the solver isn't who moves first, the
+// opponent's opening move too (see pz_start()).
+const PuzzleMoveNode* App::pz_pick_reply(const PuzzleMoveNode* node) {
+    auto pick_least_visited = [&](bool require_unexplored) -> const PuzzleMoveNode* {
+        int fewest = INT_MAX;
+        std::vector<const PuzzleMoveNode*> tied;
+        for (const auto& b : node->branches) {
+            if (require_unexplored && !pz_subtree_unexplored(&b)) continue;
+            auto it = pz_visits_.find(&b);
+            int v = (it == pz_visits_.end()) ? 0 : it->second;
+            if (v < fewest) { fewest = v; tied.clear(); tied.push_back(&b); }
+            else if (v == fewest) tied.push_back(&b);
+        }
+        if (tied.empty()) return nullptr;
+        return tied[(size_t)std::rand() % tied.size()];
+    };
+    const PuzzleMoveNode* reply = pick_least_visited(true);
+    if (!reply) reply = pick_least_visited(false);
+    return reply;
 }
 
 void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
@@ -5782,29 +5890,7 @@ void App::pz_advance(const PuzzleMoveNode* node, bool opponent_follows) {
         return;
     }
     if (opponent_follows && pz_.opponent_auto) {
-        // Opponent resistance choice. First preference: a reply whose subtree
-        // still contains something never traversed — raw least-visited counts
-        // alone can ping-pong between an already-exhausted shallow branch and
-        // a deep bushy one, re-treading known lines while unseen ones wait.
-        // Only when everything below this node has been seen does it fall back
-        // to least-visited for variety. Ties (usually several branches all at
-        // 0 visits) are broken randomly rather than by authored order, so the
-        // same drill doesn't show its lines in the same sequence every time.
-        auto pick_least_visited = [&](bool require_unexplored) -> const PuzzleMoveNode* {
-            int fewest = INT_MAX;
-            std::vector<const PuzzleMoveNode*> tied;
-            for (const auto& b : node->branches) {
-                if (require_unexplored && !pz_subtree_unexplored(&b)) continue;
-                auto it = pz_visits_.find(&b);
-                int v = (it == pz_visits_.end()) ? 0 : it->second;
-                if (v < fewest) { fewest = v; tied.clear(); tied.push_back(&b); }
-                else if (v == fewest) tied.push_back(&b);
-            }
-            if (tied.empty()) return nullptr;
-            return tied[(size_t)std::rand() % tied.size()];
-        };
-        const PuzzleMoveNode* reply = pick_least_visited(true);
-        if (!reply) reply = pick_least_visited(false);
+        const PuzzleMoveNode* reply = pz_pick_reply(node);
 
         // Delay placing it slightly so the player's own move is visible on
         // its own for a beat, instead of both stones landing in the same
@@ -5973,7 +6059,7 @@ void App::pz_return_to_solving() {
         pz_banner_.clear();
         pz_comment_ = (pz_node_ && !pz_node_->text.empty()) ? pz_node_->text : pz_.description;
         std::string rank = (pz_.rank > 0) ? "  (" + ogs_rank_str(pz_.rank) + ")" : "";
-        set_status("YOU ARE " + std::string(pz_.black_to_play ? "BLACK" : "WHITE") + rank);
+        set_status("YOU ARE " + std::string(pz_.solver_black ? "BLACK" : "WHITE") + rank);
     }
     draw();
 }
@@ -6396,6 +6482,28 @@ void App::load_sgf_for_review(const std::string& path) {
 
 // ── Network message handler ───────────────────────────────────────────────────
 
+// Is game_ still holding the live OGS game on this screen? Screens that merely
+// overlay or replace the view (settings, lobby lists, the who-won quiz) leave it
+// alone, so a live move can be applied underneath them; anything that replays a
+// file, puzzle or joseki position does so into game_ itself, and a live move
+// applied there would land on the wrong board. Default false: a screen added
+// later degrades to a resync, never to a silently dropped move.
+static bool state_keeps_live_board(AppState s) {
+    switch (s) {
+    case AppState::PLAYING:
+    case AppState::MATCH_MENU:
+    case AppState::LOBBY:
+    case AppState::SEARCHING:
+    case AppState::CORR_LIST:
+    case AppState::CHALLENGES:
+    case AppState::CHALLENGE_CREATE:
+    case AppState::WHO_WON:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void App::handle_net_msg(const NetMsg& msg) {
     switch (msg.type) {
     case NetMsgType::AUTH_OK:
@@ -6541,9 +6649,11 @@ void App::handle_net_msg(const NetMsg& msg) {
         // how many moves the server has numbered so far, and a cleared resync timer.
         // This runs on every gamedata (including a resync rebuild), so it re-anchors
         // authoritatively each time.
-        game_.initial_player   = msg.initial_player;
-        game_.last_move_number = (int)msg.initial_moves.size();
-        game_.resync_req_at    = 0;
+        game_.initial_player     = msg.initial_player;
+        game_.last_move_number   = (int)msg.initial_moves.size();
+        game_.resync_req_at      = 0;
+        game_.server_turn_player = msg.current_player;  // 0 if the gamedata had no clock
+        game_.turn_mismatch_at   = 0;
 
         // Determine whose turn it is
         bool black_to_play = (game_.board.turn_is_black == 1);
@@ -6573,7 +6683,36 @@ void App::handle_net_msg(const NetMsg& msg) {
     }
 
     case NetMsgType::OPPONENT_MOVE:
-        if (state_ != AppState::PLAYING) break;
+        // Which screen is showing must never decide whether the board tracks the
+        // server. This used to be `if (state_ != PLAYING) break;`, so a move that
+        // arrived while the settings menu / a list screen / the quiz was up was
+        // dropped outright — and nothing recovered it, because the sequence check
+        // below only trips on a *later* move. A handicap game is where that bites:
+        // white opens, so you are waiting at move 0 with an untouched board — the
+        // moment you are most likely to be off the game screen — and the move lost
+        // is the only one coming. The board then sits on "WAITING..." until you
+        // lose on time (G0GOGO, 2026-07-27).
+        // Trace every decision this handler makes: the log used to show only what
+        // came off the wire, so a move that arrived and was then quietly discarded
+        // looked exactly like one that landed on the board.
+        net_.log_line("OPPONENT_MOVE mn=" + std::to_string(msg.move_number) +
+                      " (" + std::to_string(msg.col) + "," + std::to_string(msg.row) + ")" +
+                      " gid=" + std::to_string(msg.game_id) +
+                      " state=" + std::to_string((int)state_) +
+                      " last=" + std::to_string(game_.last_move_number) +
+                      " pending=" + std::to_string(game_.pending_col));
+        if (is_local_game_ || msg.game_id != game_.game_id) break;
+        if (!state_keeps_live_board(state_)) {
+            // Scoring, or this game's own post-game screen (review_path_ empty means
+            // the review is the live game, not a file loaded over it): a move event
+            // here is stale, not a gap. Otherwise game_ has been handed to a catalog
+            // file while the game is genuinely still live — the move can't be applied
+            // here, so pull the position back instead and let GAME_CONNECTED rebuild.
+            bool post_game = (state_ == AppState::STONE_REMOVAL ||
+                              (state_ == AppState::GAME_OVER && review_path_.empty()));
+            if (!post_game) request_resync();
+            break;
+        }
         {
             // Update clocks regardless of whose move it was
             if (msg.black_secs >= 0) {
@@ -6610,8 +6749,10 @@ void App::handle_net_msg(const NetMsg& msg) {
                               msg.col == game_.pending_col && msg.row == game_.pending_row;
 
             // Duplicate / stale re-send of a move we already applied — ignore it.
-            if (msg.move_number > 0 && msg.move_number <= game_.last_move_number)
+            if (msg.move_number > 0 && msg.move_number <= game_.last_move_number) {
+                net_.log_line("  -> ignored as duplicate");
                 break;
+            }
 
             // Anything that isn't the exact next move — a gap (a move we never got)
             // or our optimistic move the server never echoed (rejected/superseded, so
@@ -6623,13 +6764,7 @@ void App::handle_net_msg(const NetMsg& msg) {
                                  (msg.move_number == game_.last_move_number + 1);
             bool stale_pending = (game_.pending_col != -2) && !is_my_echo;
             if (!sequential || stale_pending) {
-                Uint32 now = SDL_GetTicks();
-                if (now - game_.resync_req_at > 3000) {
-                    game_.resync_req_at = now;
-                    net_.cmd_reconnect_game(game_.game_id);
-                    set_status("RESYNCING...");
-                }
-                draw();
+                request_resync();
                 break;
             }
 
@@ -6661,6 +6796,7 @@ void App::handle_net_msg(const NetMsg& msg) {
                 game_.my_turn = (next_is_black == (game_.my_color == 1));
             }
             pass_confirm_ = false;
+            game_.turn_mismatch_at = 0;   // board and server just agreed again
             set_status(game_.my_turn ? "YOUR TURN" : "WAITING...");
             // A move was just played: both byo-yomi countdowns start a fresh
             // period, whatever leftover the event's clock snapshot carried.
@@ -6683,6 +6819,9 @@ void App::handle_net_msg(const NetMsg& msg) {
             game_.white_period_secs = msg.white_period_secs;
             game_.white_in_byo      = msg.white_in_byo;
         }
+        // Whose move the server thinks it is — the watchdog in the event loop
+        // compares this against my_turn to notice a live move we never got.
+        if (msg.current_player > 0) game_.server_turn_player = msg.current_player;
         // No move here — trust the running player's countdown (it's genuinely
         // in progress), but the parked player's value is stale leftover.
         reset_byo_countdowns(/*running_player_too=*/false);
@@ -7308,9 +7447,10 @@ void App::event_loop() {
                     quit = true;
 
                 } else if (e.type == g_net_event_type) {
-                    NetMsg msg;
-                    while (net_.poll_msg(msg))
-                        handle_net_msg(msg);
+                    // Inbound OGS messages are NOT drained here — see the unconditional
+                    // drain below, which runs every pass whether or not this wake event
+                    // ever showed up. This branch only carries the pollers whose worker
+                    // threads use the same wake.
                     // OGS puzzle fetch results (worker threads wake us with this event)
                     poll_puzzle_fetch();
                     // OJE joseki node fetches, same worker/wake pattern
@@ -7919,6 +8059,40 @@ void App::event_loop() {
                 }
             } else {
                 load_demo_game();  // finished — pick a new random game
+            }
+        }
+
+        // Drain everything the network thread has queued. Deliberately unconditional
+        // and not inside the `e.type == g_net_event_type` branch above: that made
+        // delivery depend on an SDL wake event surviving the trip from the network
+        // thread, and a single lost one stranded the message indefinitely — nothing
+        // else drains the queue, and a game waiting on the opponent produces no
+        // further events to wake us (only latency/pong, which queue nothing). The
+        // loop already wakes at least once a second to tick the clock, so this costs
+        // an uncontended mutex and an empty check, and no latency: an SDL wake still
+        // breaks the wait, and this runs in that same pass.
+        {
+            NetMsg msg;
+            while (net_.poll_msg(msg))
+                handle_net_msg(msg);
+        }
+
+        // Live play: every clock event carries the server's own answer to "whose move
+        // is it". Once that has disagreed with our board for ten seconds, something in
+        // the move stream went missing — a move of theirs we never applied, or one of
+        // ours the server never took — and the board is dead: nothing further will
+        // arrive to notice it, because each side is waiting on the other. Pull the
+        // position back rather than sit there losing on time (which is exactly how the
+        // G0GOGO handicap game was lost, 2026-07-27). Ten seconds is far longer than a
+        // move round-trip, so a move genuinely in flight can't trip it.
+        if (state_ == AppState::PLAYING && !is_local_game_ && game_.game_id != 0 &&
+            game_.server_turn_player > 0) {
+            bool server_says_mine = (game_.server_turn_player == game_.my_player_id);
+            if (server_says_mine != game_.my_turn) {
+                if (game_.turn_mismatch_at == 0)               game_.turn_mismatch_at = now;
+                else if (now - game_.turn_mismatch_at > 10000) request_resync();
+            } else {
+                game_.turn_mismatch_at = 0;
             }
         }
 

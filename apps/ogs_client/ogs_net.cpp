@@ -694,6 +694,10 @@ void OgsNet::cmd_reject_undo(int game_id, int move_number) {
     enqueue_event("game/undo/cancel", dump);
 }
 
+void OgsNet::log_line(const std::string& s) {
+    net_log(s.c_str());
+}
+
 bool OgsNet::poll_msg(NetMsg& out) {
     std::lock_guard<std::mutex> lock(inbound_mu_);
     if (inbound_.empty()) return false;
@@ -825,11 +829,15 @@ void OgsNet::push_msg(NetMsg msg) {
         std::lock_guard<std::mutex> lock(inbound_mu_);
         inbound_.push(std::move(msg));
     }
-    // Wake the SDL main thread
+    // Wake the SDL main thread. Best-effort only — the main loop drains the queue
+    // every pass regardless, so a rejected/dropped wake costs latency (up to the
+    // loop's 1s clock tick), never the message. Log it: a silent failure here was
+    // the leading suspect for a live move that never reached the board.
     SDL_Event ev;
     SDL_memset(&ev, 0, sizeof(ev));
     ev.type = g_net_event_type;
-    SDL_PushEvent(&ev);
+    if (SDL_PushEvent(&ev) != 1)
+        net_log((std::string("push_msg: SDL_PushEvent failed: ") + SDL_GetError()).c_str());
 }
 
 // ── WebSocket callbacks ───────────────────────────────────────────────────────
@@ -1149,6 +1157,7 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
             // until the first standalone clock event happened to correct it.
             if (d.contains("clock") && d["clock"].is_object()) {
                 auto& clk = d["clock"];
+                m.current_player = clk.value("current_player", 0);
                 if (clk.contains("black_time")) {
                     auto c = extract_clock(clk["black_time"]);
                     m.black_secs = c.secs; m.black_periods = c.periods;
@@ -1258,6 +1267,7 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
             NetMsg m;
             m.type    = NetMsgType::CLOCK_UPDATE;
             m.game_id = active_game_id_;
+            m.current_player = d.value("current_player", 0);
             if (d.contains("black_time")) {
                 auto c = extract_clock(d["black_time"]);
                 m.black_secs = c.secs; m.black_periods = c.periods;

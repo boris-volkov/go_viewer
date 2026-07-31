@@ -143,6 +143,7 @@ bool ogs_fetch_puzzle(int puzzle_id, OgsPuzzle& out) {
             out.initial_white = p["initial_state"].value("white", std::string());
         }
         out.black_to_play = p.value("initial_player", std::string("black")) == "black";
+        out.solver_black  = out.black_to_play;   // real OGS puzzles: solver always moves first
         out.opponent_auto = p.value("puzzle_opponent_move_mode", std::string("automatic"))
                             == "automatic";
         if (j.contains("collection") && j["collection"].is_object()) {

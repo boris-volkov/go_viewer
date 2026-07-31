@@ -101,6 +101,10 @@ struct NetMsg {
     // the display values alone can't distinguish byo-yomi from low main time.
     bool black_in_byo     = false;
     bool white_in_byo     = false;
+    // clock.current_player — the OGS player id whose clock is running. The server's
+    // own answer to "whose move is it", used to detect a live move that never
+    // arrived. 0 = the event carried no clock.
+    int  current_player   = 0;
 
     // UNDO_REQUESTED: move number the opponent wants to undo
     int undo_move_number = 0;
