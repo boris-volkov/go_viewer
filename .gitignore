@@ -64,6 +64,7 @@ dkms.conf
 build/
 build2/
 build_cpp/
+build_linux/
 
 # Compiled executables (no extension = Linux/macOS binary)
 /go_viewer

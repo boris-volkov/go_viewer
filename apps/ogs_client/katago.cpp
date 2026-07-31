@@ -79,7 +79,10 @@ static inline int kata_idx(int r, int c, int bs) {
 bool KatagoProc::start(const std::string& exe, const std::string& model, const std::string& cfg) {
     if (running_.load()) return true;
 
-#ifdef _WIN32
+#ifndef _WIN32
+    kata_log("KataGo subprocess support is not implemented on this platform — skipping");
+    return false;
+#else
     SECURITY_ATTRIBUTES sa{};
     sa.nLength        = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -539,9 +542,13 @@ static bool parse_gtp_move(const std::string& tok, int board_size, int& row, int
 }
 
 std::string KataGoGtp::make_temp_cfg(const std::string& profile) {
+#ifdef _WIN32
     char tmp_dir[MAX_PATH];
     GetTempPathA(MAX_PATH, tmp_dir);
     std::string path = std::string(tmp_dir) + "kata_gtp.cfg";
+#else
+    std::string path = "/tmp/kata_gtp.cfg";
+#endif
 
     FILE* fp = fopen(path.c_str(), "w");
     if (!fp) return "";
@@ -615,7 +622,10 @@ bool KataGoGtp::start(const std::string& exe, const std::string& model,
     temp_cfg_ = make_temp_cfg(profile);
     if (temp_cfg_.empty()) { gtp_log("failed to write temp config"); return false; }
 
-#ifdef _WIN32
+#ifndef _WIN32
+    gtp_log("KataGo subprocess support is not implemented on this platform — skipping");
+    return false;
+#else
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;

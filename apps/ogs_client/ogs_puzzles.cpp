@@ -7,6 +7,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 using json = nlohmann::json;
@@ -22,6 +24,15 @@ static std::string puzzles_ca_bundle() {
     if (last_sep) {
         strcpy(last_sep + 1, "ca-bundle.crt");
         return exe;
+    }
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        std::string path(buf, n);
+        auto slash = path.find_last_of('/');
+        if (slash != std::string::npos)
+            return path.substr(0, slash + 1) + "ca-bundle.crt";
     }
 #endif
     return "ca-bundle.crt";

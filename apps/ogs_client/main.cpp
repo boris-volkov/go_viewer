@@ -33,6 +33,12 @@
 #include <memory>
 #include <algorithm>
 #include <thread>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <strings.h>
+#endif
 
 // Registered once in main(); OgsNet reads this to push SDL events.
 Uint32 g_net_event_type = 0;
@@ -48,8 +54,67 @@ static std::string exe_dir() {
         auto slash = path.find_last_of("\\/");
         if (slash != std::string::npos) return path.substr(0, slash + 1);
     }
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        std::string path(buf, n);
+        auto slash = path.find_last_of('/');
+        if (slash != std::string::npos) return path.substr(0, slash + 1);
+    }
 #endif
     return "";
+}
+
+// Cross-platform replacements for the small set of Win32 file-system calls this
+// app needs (directory existence check, directory creation). Paths are UTF-8
+// throughout; on Windows that means routing through the wide APIs the same way
+// Catalog::fopen_utf8 does, since plain GetFileAttributesA/CreateDirectoryA go
+// through the ANSI codepage and mangle non-Latin paths.
+static bool is_dir(const std::string& p) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+static void make_dir(const std::string& p) {
+#ifdef _WIN32
+    CreateDirectoryW(Catalog::utf8_to_wide(p).c_str(), nullptr);
+#else
+    mkdir(p.c_str(), 0755);
+#endif
+}
+static bool path_exists(const std::string& p) {
+#ifdef _WIN32
+    return GetFileAttributesW(Catalog::utf8_to_wide(p).c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return stat(p.c_str(), &st) == 0;
+#endif
+}
+static bool remove_path(const std::string& p) {
+#ifdef _WIN32
+    return _wremove(Catalog::utf8_to_wide(p).c_str()) == 0;
+#else
+    return remove(p.c_str()) == 0;
+#endif
+}
+static bool rename_path(const std::string& from, const std::string& to) {
+#ifdef _WIN32
+    return _wrename(Catalog::utf8_to_wide(from).c_str(), Catalog::utf8_to_wide(to).c_str()) == 0;
+#else
+    return rename(from.c_str(), to.c_str()) == 0;
+#endif
+}
+static int str_icmp(const std::string& a, const std::string& b) {
+#ifdef _WIN32
+    return _stricmp(a.c_str(), b.c_str());
+#else
+    return strcasecmp(a.c_str(), b.c_str());
+#endif
 }
 
 // True for "C:\..." or a leading "\"/"/" (including UNC "\\server\...") — anything
@@ -2607,8 +2672,7 @@ void App::open_popup_menu() {
         if (pz_.id > 0) {
             std::string fav_path = Catalog::join_path(favorite_puzzles_dir(false),
                                                        "puzzle-" + std::to_string(pz_.id) + ".sgf");
-            bool is_fav = GetFileAttributesW(Catalog::utf8_to_wide(fav_path).c_str())
-                          != INVALID_FILE_ATTRIBUTES;
+            bool is_fav = path_exists(fav_path);
             add(is_fav ? "REMOVE FROM FAVORITES" : "ADD TO FAVORITES",
                 [this]() { toggle_favorite_puzzle(); });
         }
@@ -2748,18 +2812,14 @@ void App::save_live_game() {
     // Locate my_games/ directory — personal games, kept separate from the pro
     // library in games/ (same two-path probe as everywhere else)
     std::string games_dir = exe_dir() + "my_games";
-    auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-    };
     if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
 
     std::string my_name  = (game_.my_color == 1) ? game_.black_name : game_.white_name;
     std::string opp_name = (game_.my_color == 1) ? game_.white_name : game_.black_name;
     std::string player_dir = Catalog::join_path(games_dir, my_name);
-    CreateDirectoryW(Catalog::utf8_to_wide(games_dir).c_str(), nullptr);
-    CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
+    make_dir(games_dir);
+    make_dir(player_dir);
 
     // Local games (vs KataGo) have game_id 0 — there is nothing to fetch from OGS
     // (the old code tried anyway, got HTTP 404, and silently saved no SGF at all,
@@ -2773,7 +2833,7 @@ void App::save_live_game() {
     std::string save_dir = player_dir;
     if (local) {
         save_dir = Catalog::join_path(player_dir, "katago");
-        CreateDirectoryW(Catalog::utf8_to_wide(save_dir).c_str(), nullptr);
+        make_dir(save_dir);
     }
 
     time_t t = time(nullptr);
@@ -2863,10 +2923,6 @@ void App::save_local_sgf(const std::string& path) {
 
 std::string App::marked_position_path(int depth) const {
     std::string games_dir = exe_dir() + "my_games";
-    auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-    };
     if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
 
@@ -2895,9 +2951,9 @@ void App::save_marked_position(int depth) {
     std::string marked_dir = path.substr(0, path.find_last_of("/\\"));
     std::string player_dir = marked_dir.substr(0, marked_dir.find_last_of("/\\"));
     std::string games_dir  = player_dir.substr(0, player_dir.find_last_of("/\\"));
-    CreateDirectoryW(Catalog::utf8_to_wide(games_dir).c_str(), nullptr);
-    CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
-    CreateDirectoryW(Catalog::utf8_to_wide(marked_dir).c_str(), nullptr);
+    make_dir(games_dir);
+    make_dir(player_dir);
+    make_dir(marked_dir);
 
     FILE* f = Catalog::fopen_utf8(path, "w");
     if (!f) return;
@@ -2961,18 +3017,14 @@ static std::string sgf_escape_text(const std::string& s) {
 // puzzles, favorites) — same my_games/<user>/<name>/ layout for each.
 static std::string local_puzzle_subdir(const std::string& my_username, const char* name, bool create) {
     std::string games_dir = exe_dir() + "my_games";
-    auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-    };
     if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
     std::string player_dir = Catalog::join_path(games_dir, my_username.empty() ? "You" : my_username);
     std::string dir        = Catalog::join_path(player_dir, name);
     if (create) {
-        CreateDirectoryW(Catalog::utf8_to_wide(games_dir).c_str(), nullptr);
-        CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
-        CreateDirectoryW(Catalog::utf8_to_wide(dir).c_str(), nullptr);
+        make_dir(games_dir);
+        make_dir(player_dir);
+        make_dir(dir);
     }
     return dir;
 }
@@ -3504,16 +3556,12 @@ void App::save_puzzle_position(int depth) {
     const GameState* gs = &game_.history[depth];
 
     std::string games_dir = exe_dir() + "my_games";
-    auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-    };
     if (!is_dir(games_dir)) games_dir = exe_dir() + "../../my_games";
     if (!is_dir(games_dir)) games_dir = exe_dir();
     std::string player_dir = Catalog::join_path(games_dir, my_username_.empty() ? "You" : my_username_);
     std::string puzzle_dir = Catalog::join_path(player_dir, "puzzles");
-    CreateDirectoryW(Catalog::utf8_to_wide(player_dir).c_str(), nullptr);
-    CreateDirectoryW(Catalog::utf8_to_wide(puzzle_dir).c_str(), nullptr);
+    make_dir(player_dir);
+    make_dir(puzzle_dir);
 
     std::string opp_name = (game_.my_color == 1) ? game_.white_name : game_.black_name;
     time_t t = time(nullptr);
@@ -4052,10 +4100,6 @@ void App::open_game_catalog() {
     // Locate my_games/<username>/ — personal games, separate from the games/ pro
     // library (same two-path probe as demo loader)
     std::string gdir = exe_dir() + "my_games";
-    auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-    };
     if (!is_dir(gdir)) gdir = exe_dir() + "../../my_games";
 
     std::string my_dir = Catalog::join_path(gdir, my_username_);
@@ -4130,10 +4174,6 @@ void App::open_pro_catalog() {
 
     // Locate games/ — same two-path probe as open_game_catalog()/demo loader
     std::string gdir = exe_dir() + "games";
-    auto is_dir = [](const std::string& p) {
-        DWORD a = GetFileAttributesW(Catalog::utf8_to_wide(p).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-    };
     if (!is_dir(gdir)) gdir = exe_dir() + "../../games";
 
     // The pro database never changes mid-session, so unlike open_game_catalog()
@@ -4158,7 +4198,7 @@ void App::open_pro_catalog() {
 
 void App::delete_catalog_game(const std::string& sgf_path) {
     if (sgf_path.empty()) return;
-    if (_wremove(Catalog::utf8_to_wide(sgf_path).c_str()) != 0) {
+    if (!remove_path(sgf_path)) {
         flash_       = "DELETE FAILED";
         flash_until_ = SDL_GetTicks() + 2000;
         return;
@@ -4167,7 +4207,7 @@ void App::delete_catalog_game(const std::string& sgf_path) {
     size_t dot = sgf_path.rfind('.');
     if (dot != std::string::npos) {
         std::string companion = sgf_path.substr(0, dot) + ".katago";
-        _wremove(Catalog::utf8_to_wide(companion).c_str());
+        remove_path(companion);
         // If the deleted game is the one currently loaded behind the catalog,
         // forget its companion path so exiting review can't resurrect the file.
         if (companion == companion_path_) companion_path_.clear();
@@ -4380,7 +4420,7 @@ void App::pz_rebuild_display() {
     }
     std::sort(pinned.begin(), pinned.end(),
               [](const OgsPuzzleCollection* a, const OgsPuzzleCollection* b) {
-                  return _stricmp(a->name.c_str(), b->name.c_str()) < 0;
+                  return str_icmp(a->name, b->name) < 0;
               });
     std::set<int> pinned_ids;
     for (const OgsPuzzleCollection* p : pinned) {
@@ -4446,7 +4486,7 @@ void App::open_local_pz_list(LocalPzKind kind) {
     }
     std::sort(files.begin(), files.end(),
               [](const std::string& a, const std::string& b) {
-                  return _stricmp(a.c_str(), b.c_str()) < 0;
+                  return str_icmp(a, b) < 0;
               });
     drill_paths_.clear();
     pz_list_.clear();
@@ -4509,14 +4549,13 @@ void App::drill_commit_rename() {
     std::string old_path = drill_paths_[pz_index_];
     std::string new_path = Catalog::join_path(current_local_pz_dir(false), name + ".sgf");
     if (new_path == old_path) { draw(); return; }
-    if (GetFileAttributesW(Catalog::utf8_to_wide(new_path).c_str()) != INVALID_FILE_ATTRIBUTES) {
+    if (path_exists(new_path)) {
         flash_       = "NAME ALREADY TAKEN";
         flash_until_ = SDL_GetTicks() + 2000;
         draw();
         return;
     }
-    if (_wrename(Catalog::utf8_to_wide(old_path).c_str(),
-                 Catalog::utf8_to_wide(new_path).c_str()) != 0) {
+    if (!rename_path(old_path, new_path)) {
         flash_       = "RENAME FAILED";
         flash_until_ = SDL_GetTicks() + 2000;
         draw();
@@ -4536,7 +4575,7 @@ void App::drill_commit_rename() {
 void App::drill_delete_selected() {
     if (pz_index_ < 0 || pz_index_ >= (int)drill_paths_.size()) return;
     std::string path = drill_paths_[pz_index_];
-    if (_wremove(Catalog::utf8_to_wide(path).c_str()) != 0) {
+    if (!remove_path(path)) {
         flash_       = "DELETE FAILED";
         flash_until_ = SDL_GetTicks() + 2000;
         draw();
@@ -4675,7 +4714,7 @@ bool App::save_missed_puzzle() {
     if (pz_.id <= 0) return false;
     std::string path = Catalog::join_path(missed_puzzles_dir(true),
                                            "puzzle-" + std::to_string(pz_.id) + ".sgf");
-    if (GetFileAttributesW(Catalog::utf8_to_wide(path).c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (path_exists(path))
         return false;   // already saved from an earlier miss
     return write_puzzle_copy_sgf(path, pz_);
 }
@@ -4685,9 +4724,9 @@ void App::toggle_favorite_puzzle() {
     if (pz_.id <= 0) return;
     std::string path = Catalog::join_path(favorite_puzzles_dir(true),
                                            "puzzle-" + std::to_string(pz_.id) + ".sgf");
-    bool exists = GetFileAttributesW(Catalog::utf8_to_wide(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+    bool exists = path_exists(path);
     if (exists) {
-        _wremove(Catalog::utf8_to_wide(path).c_str());
+        remove_path(path);
         flash_ = "REMOVED FROM FAVORITES";
     } else if (write_puzzle_copy_sgf(path, pz_)) {
         flash_ = "ADDED TO FAVORITES";
@@ -6202,6 +6241,7 @@ std::string App::next_review_sibling(int dir, int* out_index, int* out_total) co
     std::string cur_name = review_path_.substr(sep + 1);
 
     std::vector<std::string> files;
+#ifdef _WIN32
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(
         Catalog::utf8_to_wide(Catalog::join_path(dir_path, "*")).c_str(), &fd);
@@ -6215,10 +6255,27 @@ std::string App::next_review_sibling(int dir, int* out_index, int* out_total) co
         if (ext == ".sgf") files.push_back(name);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+#else
+    DIR* d = opendir(dir_path.c_str());
+    if (!d) return "";
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string name = ent->d_name;
+        if (name.size() < 4) continue;
+        std::string ext = name.substr(name.size() - 4);
+        for (char& c : ext) c = (char)tolower((unsigned char)c);
+        if (ext != ".sgf") continue;
+        struct stat st;
+        std::string full = Catalog::join_path(dir_path, name);
+        if (stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) continue;
+        files.push_back(name);
+    }
+    closedir(d);
+#endif
 
     if (files.size() < 2) return "";
     std::sort(files.begin(), files.end(), [](const std::string& a, const std::string& b) {
-        return _stricmp(a.c_str(), b.c_str()) < 0;
+        return str_icmp(a, b) < 0;
     });
     int idx = 0;
     for (int i = 0; i < (int)files.size(); i++)
