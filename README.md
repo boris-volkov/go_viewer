@@ -45,7 +45,25 @@ two apps built on it (`apps/`).
 needs libcurl and libwebsockets, and a `config.ini` (see [Setup](#setup)
 above).
 
-### go_viewer — Linux (Arch / Debian / Fedora)
+### Linux — direct g++, no CMake (recommended)
+
+```bash
+# Arch
+sudo pacman -S sdl2 curl libwebsockets
+# Debian/Ubuntu
+sudo apt install libsdl2-dev libcurl4-openssl-dev libwebsockets-dev
+# Fedora
+sudo dnf install SDL2-devel libcurl-devel libwebsockets-devel
+
+chmod +x build_linux.sh   # first time only
+./build_linux.sh
+```
+Builds both apps in one pass: `apps/go_viewer/go_viewer` and
+`apps/ogs_client/ogs_client`. Plain g++ invocations, same idea as the CMake
+sections below but without CMake in the loop. `apps/ogs_client/build.sh`
+builds just that one app the same way, if that's all you need.
+
+### go_viewer — Linux, via CMake (Arch / Debian / Fedora)
 
 **Arch Linux**
 ```bash
