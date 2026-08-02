@@ -1337,6 +1337,19 @@ void App::request_resync() {
     Uint32 now = SDL_GetTicks();
     if (now - game_.resync_req_at <= 3000) return;
     game_.resync_req_at = now;
+    // A resync is a round trip: it can only be answered while the socket is up.
+    // Sending it into a dead connection and putting "RESYNCING..." on screen
+    // described a recovery that was not happening — that message sat there for the
+    // nine seconds before the 2026-07-31 drop was even reported. The network thread
+    // reconnects on its own and re-sends game/connect when it does, so there is
+    // nothing to do here but say so. (Still behind the debounce above, so this
+    // can't redraw on every pass of the main loop.)
+    if (!net_.connected()) {
+        net_.log_line("request_resync: socket down — waiting on the reconnect");
+        set_status("RECONNECTING...");
+        draw();
+        return;
+    }
     net_.log_line("request_resync: re-sending game/connect for " + std::to_string(game_.game_id));
     net_.cmd_reconnect_game(game_.game_id);
     set_status("RESYNCING...");
@@ -6995,7 +7008,33 @@ void App::handle_net_msg(const NetMsg& msg) {
         mark_confirm_ = false;
         find_match_confirm_ = false;
         state_ = AppState::CONNECTING;
-        set_status("DISCONNECTED: " + msg.text);
+        // The network thread is already retrying with backoff, so say what is
+        // actually happening. "DISCONNECTED" was a dead end: nothing reconnected,
+        // and no key on this screen could.
+        flash_       = msg.text;
+        flash_until_ = SDL_GetTicks() + 4000;
+        set_status("RECONNECTING...");
+        draw();
+        break;
+
+    case NetMsgType::RECONNECTED:
+        // Back up. A live game rebuilds itself: the network thread re-sent
+        // game/connect on this same socket, so GAME_CONNECTED is on its way and
+        // will restore the board, clocks, move number and PLAYING state
+        // authoritatively — including anything that happened during the outage.
+        // Don't touch state_ unless the disconnect parked us in CONNECTING, and
+        // don't route through AUTH_OK's lobby entry, which would evict a live game.
+        flash_       = "RECONNECTED";
+        flash_until_ = SDL_GetTicks() + 3000;
+        if (state_ == AppState::CONNECTING) {
+            if (msg.game_id != 0) {
+                set_status("RESYNCING...");   // GAME_CONNECTED lands us back in PLAYING
+            } else {
+                state_ = AppState::LOBBY;
+                set_status("");
+                load_demo_game();
+            }
+        }
         draw();
         break;
     }

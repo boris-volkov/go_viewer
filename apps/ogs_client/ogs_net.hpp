@@ -73,6 +73,12 @@ public:
     void fetch_friends();
     void send_challenge(const ChallengeRequest& req);
 
+    // Is the Socket.IO session up right now? Anything that queues a message the
+    // server has to answer — a resync above all — is otherwise promising a recovery
+    // that cannot be happening, which is exactly what the 2026-07-31 drop showed on
+    // screen for nine seconds while the socket was already dead.
+    bool connected() const { return socket_live_.load(std::memory_order_relaxed); }
+
     // Read-only after AUTH_OK — safe to read from main thread without lock.
     std::string my_username;
     int         my_player_id = 0;
@@ -91,13 +97,20 @@ private:
     std::string cookiejar_;   // path to the Netscape cookie file (empty = no session)
     std::string csrf_;        // csrftoken cookie value, for X-CSRFToken on writes
 
-    // libwebsockets context and connection
+    // libwebsockets context and connection. ctx_ is created and destroyed once per
+    // connection attempt now rather than once per process, so the main thread's
+    // reads of it (enqueue_raw, stop) are guarded — otherwise they can land on a
+    // pointer the network thread is in the middle of replacing.
     lws_context* ctx_ = nullptr;
     lws*         wsi_ = nullptr;
+    std::mutex   ctx_mu_;
 
     // Network thread
     std::thread       thread_;
     std::atomic<bool> stop_flag_{ false };
+
+    // Set on the network thread, read from the main thread via connected().
+    std::atomic<bool> socket_live_{ false };
 
     // Inbound queue (net → main)
     std::queue<NetMsg> inbound_;
@@ -110,11 +123,22 @@ private:
     // Socket.IO / EIO3 state (only touched on network thread)
     bool  sio_connected_   = false;
     bool  authenticated_   = false;
+    // AUTH_OK is a once-per-session event the app answers by entering the lobby;
+    // every later success is a RECONNECTED, which must not evict a live game.
+    bool  first_auth_done_ = false;
+    // Did the current connection attempt get as far as the Socket.IO connect ack?
+    // Drives both the backoff reset and whether a re-login is worth trying.
+    bool  attempt_authed_  = false;
     int   ping_interval_ms_= 25000;
     std::string recv_buf_; // accumulates WebSocket fragments
 
     // Active game
     int         active_game_id_   = 0;
+    // active_game_id_ outlives the game itself — only leave_corr_game clears it — so
+    // a reconnect must not blindly re-join it: pulling gamedata for a finished game
+    // fires GAME_CONNECTED, which would drag the user out of the post-game review
+    // and back into PLAYING. Set when the game ends, cleared when one starts.
+    bool        active_game_over_ = false;
     std::string removed_stones_;   // dead-stone list from server's stone removal event
     std::string game_result_;      // outcome string from last gamedata (e.g. "W+Resign")
 
@@ -129,6 +153,10 @@ private:
     // ── Internal (called on network thread) ──────────────────────────────
 
     void net_loop();
+
+    // One connect → service → teardown cycle. Returns when the socket closes or
+    // stop() is called; net_loop() owns the decision to try again.
+    void run_one_connection();
 
     // Returns false if login or config fetch failed.
     bool do_auth();

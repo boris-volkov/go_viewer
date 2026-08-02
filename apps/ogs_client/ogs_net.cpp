@@ -562,7 +562,13 @@ bool OgsNet::start(const std::string& username, const std::string& password) {
 
 void OgsNet::stop() {
     stop_flag_ = true;
-    if (ctx_) lws_cancel_service(ctx_);
+    {
+        std::lock_guard<std::mutex> lock(ctx_mu_);
+        if (ctx_) lws_cancel_service(ctx_);
+    }
+    // The thread also checks stop_flag_ every 50ms of service and every 100ms of
+    // reconnect backoff, so the join lands promptly even between connections when
+    // there is no context to cancel.
     if (thread_.joinable()) thread_.join();
 }
 
@@ -622,14 +628,23 @@ static std::string encode_move(int col, int row) {
     return std::string(s, 2);
 }
 
+// Log what we send, not just what arrives. Every inbound OPPONENT_MOVE decision is
+// traced, but our own moves were invisible — so when the 2026-07-31 socket died the
+// pivotal event, the move played into the dead connection, appeared nowhere in the
+// log and had to be inferred from the resync watchdog firing ten seconds later.
 void OgsNet::cmd_send_move(int game_id, int col, int row) {
     json payload = {{"game_id", game_id}, {"player_id", my_player_id},
                     {"move", encode_move(col, row)}};
+    net_log(("SEND_MOVE (" + std::to_string(col) + "," + std::to_string(row) + ")" +
+             " gid=" + std::to_string(game_id) +
+             " socket=" + (connected() ? "up" : "DOWN")).c_str());
     enqueue_event("game/move", payload.dump());
 }
 
 void OgsNet::cmd_send_pass(int game_id) {
     json payload = {{"game_id", game_id}, {"player_id", my_player_id}, {"move", ".."}};
+    net_log(("SEND_PASS gid=" + std::to_string(game_id) +
+             " socket=" + (connected() ? "up" : "DOWN")).c_str());
     enqueue_event("game/move", payload.dump());
 }
 
@@ -646,7 +661,8 @@ void OgsNet::cmd_reconnect_game(int game_id) {
 // does that in its automatch/start handler) so move/clock/phase events for this game
 // are recognised. Clear any stale removed-stones from a previously-open game.
 void OgsNet::cmd_open_game(int game_id) {
-    active_game_id_ = game_id;
+    active_game_id_   = game_id;
+    active_game_over_ = false;
     removed_stones_.clear();
     json conn = {{"game_id", game_id}, {"player_id", my_player_id}, {"chat", false}};
     net_log(("cmd_open_game: connecting to " + std::to_string(game_id)).c_str());
@@ -815,6 +831,9 @@ void OgsNet::enqueue_raw(const std::string& raw) {
     }
     // lws_cancel_service is the only thread-safe way to wake the service loop
     // from outside the LWS thread. lws_callback_on_writable is NOT safe here.
+    // Under ctx_mu_: between connection attempts the network thread is destroying
+    // and recreating this context, so an unguarded read can be a dangling pointer.
+    std::lock_guard<std::mutex> lock(ctx_mu_);
     if (ctx_) lws_cancel_service(ctx_);
 }
 
@@ -867,6 +886,7 @@ void OgsNet::on_ws_close() {
     net_log("WebSocket closed");
     sio_connected_ = false;
     authenticated_ = false;
+    socket_live_.store(false, std::memory_order_relaxed);
     wsi_ = nullptr;
 
     if (!stop_flag_) {
@@ -936,6 +956,8 @@ void OgsNet::dispatch_sio(const std::string& msg) {
     // Receiving this means auth was accepted.
     if (sio == '0') {
         sio_connected_ = true;
+        socket_live_.store(true, std::memory_order_relaxed);
+        attempt_authed_ = true;
         if (!authenticated_) {
             authenticated_ = true;
             // Send OGS-level authenticate event (required even with EIO=4 JWT auth
@@ -953,9 +975,32 @@ void OgsNet::dispatch_sio(const std::string& msg) {
             } else {
                 net_log("WARNING: no chat_auth, skipping authenticate event");
             }
+            // Rejoin the live game's stream. The server has no memory of the old
+            // socket's subscription, so without this the connection is back up but
+            // the board never hears another move; the gamedata it sends in reply is
+            // also what re-anchors a position that drifted during the outage.
+            bool rejoin = (active_game_id_ != 0 && !active_game_over_);
+
+            // Only the first success is an AUTH_OK — the app answers that one by
+            // entering the lobby, which would throw the player out of a live game
+            // every time a blip healed. game_id carries whether a rebuild is
+            // actually coming, so the main thread never waits on one that isn't.
             NetMsg m;
-            m.type = NetMsgType::AUTH_OK;
+            m.type    = first_auth_done_ ? NetMsgType::RECONNECTED : NetMsgType::AUTH_OK;
+            m.game_id = rejoin ? active_game_id_ : 0;
+            first_auth_done_ = true;
             push_msg(std::move(m));
+
+            if (rejoin) {
+                net_log(("reconnect: re-joining game " +
+                         std::to_string(active_game_id_)).c_str());
+                json conn = {{"game_id", active_game_id_},
+                             {"player_id", my_player_id}, {"chat", false}};
+                enqueue_event("game/connect", conn.dump());
+            } else if (active_game_id_ != 0) {
+                net_log(("reconnect: not re-joining finished game " +
+                         std::to_string(active_game_id_)).c_str());
+            }
         }
         return;
     }
@@ -1041,7 +1086,8 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
         try {
             auto d = json::parse(payload_json);
             int gid = d.at("game_id").get<int>();
-            active_game_id_ = gid;
+            active_game_id_   = gid;
+            active_game_over_ = false;
             match_uuid_.clear();
             removed_stones_.clear();
             // Connect to the game immediately
@@ -1187,6 +1233,7 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
 
             // If the game is already finished (e.g. we reconnected after it ended)
             if (phase == "finished") {
+                active_game_over_ = true;
                 net_log("gamedata: phase=finished → firing GAME_OVER");
                 NetMsg gover;
                 gover.type    = NetMsgType::GAME_OVER;
@@ -1319,6 +1366,7 @@ void OgsNet::on_event(const std::string& name, const std::string& payload_json) 
             std::string phase = d.is_string() ? d.get<std::string>() : d.value("phase", "");
             net_log(("/phase event: " + (phase.empty() ? "(empty)" : phase)).c_str());
             if (phase == "finished") {
+                active_game_over_ = true;
                 net_log("/phase=finished → firing GAME_OVER");
                 NetMsg m;
                 m.type    = NetMsgType::GAME_OVER;
@@ -1424,9 +1472,86 @@ void OgsNet::net_loop() {
         return;
     }
 
-    // --- Phase 2: Open WebSocket ---
+    // --- Phase 2: Open WebSocket, and keep it open ---
     // Redirect LWS internal logs into our timestamped log file
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE, lws_log_to_file);
+
+    // A dropped socket used to end this thread outright: the service loop broke on
+    // wsi_ == nullptr, the context was destroyed, net_loop returned, and nothing
+    // ever called start() again — only launch and the credential prompt do. The app
+    // parked on "DISCONNECTED: Connection lost" for good, so a 20-second network
+    // blip four moves from the end meant finishing the game in a browser (game
+    // 89306048, 2026-07-31). Keep trying instead, backing off so a genuinely
+    // offline machine isn't reconnecting in a tight loop.
+    static const Uint32 kBackoffMs[] = { 1000, 2000, 4000, 8000, 15000 };
+    static const int    kBackoffN    = (int)(sizeof(kBackoffMs) / sizeof(kBackoffMs[0]));
+    int attempt = 0;
+
+    while (!stop_flag_) {
+        Uint32 t0 = SDL_GetTicks();
+        run_one_connection();
+        if (stop_flag_) break;
+
+        // A connection that authenticated and then lasted is evidence the network
+        // is fundamentally fine; the next drop deserves a fast first retry rather
+        // than the tail of the previous ramp.
+        if (attempt_authed_ && SDL_GetTicks() - t0 > 30000) attempt = 0;
+
+        Uint32 wait_ms = kBackoffMs[attempt < kBackoffN ? attempt : kBackoffN - 1];
+        if (attempt < kBackoffN - 1) attempt++;
+        net_log(("reconnecting in " + std::to_string(wait_ms / 1000) + "s").c_str());
+
+        // Slice the wait so quitting doesn't sit through the whole backoff.
+        for (Uint32 slept = 0; slept < wait_ms && !stop_flag_; slept += 100)
+            SDL_Delay(100);
+        if (stop_flag_) break;
+
+        // The JWT outlives an ordinary drop, so don't re-login on every blip — OGS
+        // rate-limits logins, and a rate-limited client is one that never comes
+        // back. Only a connection that never reached the Socket.IO connect ack
+        // points at a stale token.
+        if (!attempt_authed_ && !do_auth())
+            net_log("re-auth failed; retrying with the existing token");
+    }
+
+    curl_global_cleanup();
+
+    } catch (const std::exception& ex) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "net thread exception: %s", ex.what());
+        net_log(buf);
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = ex.what();
+        push_msg(std::move(m));
+    } catch (...) {
+        net_log("net thread unknown exception");
+        NetMsg m;
+        m.type = NetMsgType::DISCONNECTED;
+        m.text = "Unknown error in network thread";
+        push_msg(std::move(m));
+    }
+}
+
+// One connect → service → teardown cycle. Everything that fails in here is
+// recoverable by trying again, so failures log and return instead of ending the
+// network thread.
+void OgsNet::run_one_connection() {
+    attempt_authed_ = false;
+
+    // Anything still queued belongs to the socket that just died. A game/move
+    // composed against the pre-drop board must not be replayed onto a position the
+    // server has since moved past — the reconnect's gamedata rebuild is what shows
+    // the user where the game actually stands, and they play on from there.
+    {
+        std::lock_guard<std::mutex> lock(outbound_mu_);
+        if (!outbound_.empty()) {
+            net_log(("dropping " + std::to_string(outbound_.size()) +
+                     " queued message(s) from the closed socket").c_str());
+            std::queue<std::string> empty;
+            outbound_.swap(empty);
+        }
+    }
 
     static const struct lws_protocols protocols[] = {
         {
@@ -1439,21 +1564,42 @@ void OgsNet::net_loop() {
         LWS_PROTOCOL_LIST_TERM
     };
 
+    // Backstop for a socket that dies without anyone saying so. Deliberately slack:
+    // the reconnect loop is what actually fixes the 2026-07-31 failure, and on that
+    // evidence a tight timer would have bought about two seconds (TCP surfaced the
+    // close at 22:07:28 on its own). What it does buy is a bound on the case TCP
+    // never resolves at all. The numbers stay clear of Engine.IO's own 25s server
+    // ping, so even if OGS ignored WebSocket-level PINGs entirely, that ping alone
+    // is inbound traffic often enough to keep the hangup timer from ever firing —
+    // false hangups here would mean a reconnect every minute, far worse than a slow
+    // detection. conceal_count 0: LWS reports the close and the retry stays ours.
+    static const lws_retry_bo_t idle_policy = {
+        nullptr,  // retry_ms_table          — unused, net_loop owns reconnection
+        0,        // retry_ms_table_count
+        0,        // conceal_count           — never hide a close from us
+        20,       // secs_since_valid_ping   — WS PING after 20s without inbound traffic
+        60,       // secs_since_valid_hangup — 60s of true silence → hang up and retry
+        0         // jitter_percent
+    };
+
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof(info));
     info.port      = CONTEXT_PORT_NO_LISTEN;
     info.protocols = protocols;
     info.options   = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
     info.user      = this;
+    info.retry_and_idle_policy = &idle_policy;
 
-    ctx_ = lws_create_context(&info);
+    {
+        std::lock_guard<std::mutex> lock(ctx_mu_);
+        ctx_ = lws_create_context(&info);
+    }
     if (!ctx_) {
         net_log("lws_create_context failed");
         NetMsg m;
         m.type = NetMsgType::DISCONNECTED;
         m.text = "Failed to create WebSocket context";
         push_msg(std::move(m));
-        curl_global_cleanup();
         return;
     }
     struct lws_client_connect_info conn;
@@ -1470,8 +1616,11 @@ void OgsNet::net_loop() {
     wsi_ = lws_client_connect_via_info(&conn);
     if (!wsi_) {
         net_log("lws_client_connect_via_info failed");
-        lws_context_destroy(ctx_);
-        ctx_ = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(ctx_mu_);
+            lws_context_destroy(ctx_);
+            ctx_ = nullptr;
+        }
         NetMsg m;
         m.type = NetMsgType::DISCONNECTED;
         m.text = "Failed to initiate WebSocket connection";
@@ -1504,27 +1653,17 @@ void OgsNet::net_loop() {
             }
         }
     }
-    lws_context_destroy(ctx_);
-    ctx_ = nullptr;
-    wsi_ = nullptr;
 
-    curl_global_cleanup();
-
-    } catch (const std::exception& ex) {
-        char buf[512];
-        snprintf(buf, sizeof(buf), "net thread exception: %s", ex.what());
-        net_log(buf);
-        NetMsg m;
-        m.type = NetMsgType::DISCONNECTED;
-        m.text = ex.what();
-        push_msg(std::move(m));
-    } catch (...) {
-        net_log("net thread unknown exception");
-        NetMsg m;
-        m.type = NetMsgType::DISCONNECTED;
-        m.text = "Unknown error in network thread";
-        push_msg(std::move(m));
+    // Teardown under ctx_mu_: with reconnects this pointer now goes null and live
+    // again repeatedly instead of once at shutdown, and the main thread reads it
+    // from enqueue_raw() and stop().
+    {
+        std::lock_guard<std::mutex> lock(ctx_mu_);
+        lws_context_destroy(ctx_);
+        ctx_ = nullptr;
+        wsi_ = nullptr;
     }
+    socket_live_.store(false, std::memory_order_relaxed);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
