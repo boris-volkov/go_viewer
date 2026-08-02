@@ -594,8 +594,9 @@ private:
     // mode. The single authority on which controls exist — pad navigation and mouse
     // hit-testing both validate against this, so neither can invent a row.
     void match_menu_cols(int out_sizes[3], int& col_count) const {
-        const int DISPLAY_ROWS = 6;  // SHOW COORDINATES, ENGINE ANALYSIS, CHAIN LINKS,
-                                     // SQUARE STONES, SQUARE GRID, SHOW TERRITORY
+        const int DISPLAY_ROWS = 9;  // SHOW COORDINATES, ENGINE ANALYSIS, CHAIN LINKS,
+                                     // SQUARE STONES, SQUARE GRID, SHOW TERRITORY,
+                                     // BOARD HUE, BOARD SAT, BOARD VAL
         out_sizes[0] = out_sizes[1] = out_sizes[2] = 0;
         if (match_menu_.ingame) {
             col_count    = 1;
@@ -623,6 +624,15 @@ private:
         if (c >= col_count || r >= sizes[c]) return false;
         col = c; row = r;
         return true;
+    }
+
+    // Shared by L1/R1 (and their keyboard mirrors), the [-]/[+] buttons, and the
+    // plain-click-raises fallback — the one place that knows which DISPLAY row
+    // maps to which Palette setter, so those three input paths can't drift apart.
+    void adjust_board_hsv(int row, int delta) {
+        if      (row == 6) Palette::set_board_hue(Palette::BOARD_HUE + delta);
+        else if (row == 7) Palette::set_board_sat(Palette::BOARD_SAT + delta);
+        else if (row == 8) Palette::set_board_val(Palette::BOARD_VAL + delta);
     }
 
     // Move the catalog selection, keep it scrolled into view, and refresh the
@@ -686,10 +696,12 @@ private:
 
     // Persisted across sessions to settings.txt: match_prefs_ (board size/speed/
     // KataGo mode/strength) plus the DISPLAY column toggles (show_coords_,
-    // kata_analysis_enabled_, chain_mode_, square_stones_, square_grid_). Loaded
-    // once at startup; saved whenever the settings menu closes, since that's
-    // already the single commit point match_prefs_ itself uses (save_prefs()) —
-    // by then any DISPLAY toggles pressed during this visit are live too.
+    // kata_analysis_enabled_, chain_mode_, square_stones_, square_grid_) and the
+    // board HUE/SAT/VAL (Palette::BOARD_HUE/SAT/VAL — global engine state, not an
+    // App member, so it needs no mirror field here). Loaded once at startup; saved
+    // whenever the settings menu closes, since that's already the single commit
+    // point match_prefs_ itself uses (save_prefs()) — by then any DISPLAY toggles
+    // pressed during this visit are live too.
     void load_settings();
     void save_settings();
 
@@ -2131,7 +2143,16 @@ void App::handle_controller_button(Uint8 btn) {
         // L1/R1 used to flip OGS <-> KataGo mode here. That toggle row sat outside
         // the column grid (unclickable with a mouse) and was a memorized hotkey with
         // no on-screen affordance; the two settings sets are separate screens off
-        // the popup menu now, so there is nothing left to toggle.
+        // the popup menu now, so it was free to repurpose as raise/lower for the
+        // BOARD HUE/SAT/VAL rows below — a no-op anywhere else in the menu.
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: {
+            if (match_menu_.focus_col != display_col || match_menu_.focus_row < 6) break;
+            int delta = (btn == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 5 : -5;
+            adjust_board_hsv(match_menu_.focus_row, delta);
+            renderer_->draw_match_menu(match_menu_);
+            break;
+        }
         case SDL_CONTROLLER_BUTTON_A: {
             int r = match_menu_.focus_row;
             if (match_menu_.focus_col == display_col) {
@@ -2163,7 +2184,7 @@ void App::handle_controller_button(Uint8 btn) {
                 } else if (r == 4) {
                     match_menu_.square_grid_sel = !match_menu_.square_grid_sel;
                     square_grid_                = match_menu_.square_grid_sel;
-                } else {
+                } else if (r == 5) {
                     // Same "can't offer a control that can't work" pattern as ENGINE ANALYSIS
                     if (!match_menu_.territory_available) { /* no-op */ }
                     else {
@@ -2176,6 +2197,8 @@ void App::handle_controller_button(Uint8 btn) {
                             live_own_query_after_ = 0;
                         }
                     }
+                } else {
+                    adjust_board_hsv(r, 5);   // rows 6-8; the [-]/[+] buttons handle their own click before reaching here
                 }
             } else if (match_menu_.focus_col == 0) {
                 if (match_menu_.katago_mode) {
@@ -4057,6 +4080,9 @@ void App::load_settings() {
         else if (k == "square_stones") square_stones_          = val != 0;
         else if (k == "square_grid")   square_grid_            = val != 0;
         else if (k == "show_territory") show_live_ownership_   = val != 0;
+        else if (k == "board_hue")     Palette::set_board_hue(val);
+        else if (k == "board_sat")     Palette::set_board_sat(val);
+        else if (k == "board_val")     Palette::set_board_val(val);
     }
     fclose(f);
 }
@@ -4078,6 +4104,9 @@ void App::save_settings() {
     fprintf(f, "square_stones %d\n", square_stones_           ? 1 : 0);
     fprintf(f, "square_grid %d\n",   square_grid_             ? 1 : 0);
     fprintf(f, "show_territory %d\n", show_live_ownership_    ? 1 : 0);
+    fprintf(f, "board_hue %d\n",     Palette::BOARD_HUE);
+    fprintf(f, "board_sat %d\n",     Palette::BOARD_SAT);
+    fprintf(f, "board_val %d\n",     Palette::BOARD_VAL);
     fclose(f);
 }
 
@@ -7720,9 +7749,13 @@ void App::event_loop() {
                         case SDLK_DOWN:       mapped = SDL_CONTROLLER_BUTTON_DPAD_DOWN;     break;
                         case SDLK_LEFT:       mapped = SDL_CONTROLLER_BUTTON_DPAD_LEFT;     break;
                         case SDLK_RIGHT:      mapped = SDL_CONTROLLER_BUTTON_DPAD_RIGHT;    break;
-                        case SDLK_TAB: case SDLK_LEFTBRACKET:
+                        // MINUS/EQUALS duplicate TAB/bracket on purpose — the more
+                        // familiar +/- pairing for "adjust a number" (BOARD HUE/SAT/VAL
+                        // in the DISPLAY settings), so it's discoverable without
+                        // knowing L1/R1 live on these keys at all.
+                        case SDLK_TAB: case SDLK_LEFTBRACKET: case SDLK_MINUS: case SDLK_KP_MINUS:
                                               mapped = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;  break;
-                        case SDLK_RIGHTBRACKET:
+                        case SDLK_RIGHTBRACKET: case SDLK_EQUALS: case SDLK_KP_PLUS:
                                               mapped = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER; break;
                         case SDLK_COMMA:      mapped = 0xFD; break;  // LT — step back
                         case SDLK_PERIOD:     mapped = 0xFE; break;  // RT — step forward
@@ -7882,12 +7915,22 @@ void App::event_loop() {
                         } else if (state_ == AppState::MATCH_MENU) {
                             // Clicking a control focuses it and activates it in one
                             // go — toggles are cheap and instantly reversible, so
-                            // there's nothing here worth a two-step confirm.
+                            // there's nothing here worth a two-step confirm. BOARD
+                            // HUE/SAT/VAL additionally have their own [-]/[+] hit
+                            // targets, checked first since they sit inside the same
+                            // row match_menu_hit already resolves the click to.
                             int c, r;
                             if (match_menu_hit(e.button.x, e.button.y, c, r)) {
                                 match_menu_.focus_col = c;
                                 match_menu_.focus_row = r;
-                                handle_controller_button(SDL_CONTROLLER_BUTTON_A);
+                                int dcol = match_menu_.ingame ? 0 : (match_menu_.katago_mode ? -1 : 2);
+                                int zone = (c == dcol && r >= 6)
+                                               ? renderer_->match_menu_stepper_zone(
+                                                     match_menu_, r, e.button.x, e.button.y)
+                                               : -1;
+                                if (zone == 0)      { adjust_board_hsv(r, -5); renderer_->draw_match_menu(match_menu_); }
+                                else if (zone == 1) { adjust_board_hsv(r, 5);  renderer_->draw_match_menu(match_menu_); }
+                                else                 handle_controller_button(SDL_CONTROLLER_BUTTON_A);
                             }
                         } else if (state_ == AppState::PUZZLE_BROWSE) {
                             // Click commits the selection; clicking the row that's

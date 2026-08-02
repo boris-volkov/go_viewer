@@ -1,5 +1,7 @@
 #pragma once
 #include <SDL2/SDL.h>
+#include <algorithm>
+#include <cmath>
 
 // Central colour palette for go_viewer.
 // All hard-coded colours in the renderer should be pulled from here so that
@@ -11,9 +13,70 @@ namespace Palette {
 // Screen / board surfaces
 
 constexpr SDL_Color BACKGROUND      = {52,  60,  72,  255};  // letterbox area behind the board
-constexpr SDL_Color BOARD           = {95,  115, 150, 255};  // board surface (normal playback)
-constexpr SDL_Color BOARD_ANALYSIS  = {110, 115, 150, 255};  // board surface in analysis/game mode
 constexpr SDL_Color GRID            = {45,  55,  70,  255};  // grid lines (dark blue-gray)
+
+// Board surface colour — the one entry in this file that's runtime-adjustable
+// (DISPLAY settings screen, HUE/SAT/VAL rows), so it's a plain mutable `inline`
+// variable rather than `constexpr` like everything else here. Never assign to
+// BOARD / BOARD_ANALYSIS or BOARD_HUE/SAT/VAL directly — go through
+// set_board_hue/sat/val below, or they'll drift out of sync with each other
+// (and with settings.txt).
+//
+// 220/35/60 is (the nearest multiple of 5 to) the HSV equivalent of the
+// original hard-coded board colour (95,115,150), so a fresh install renders
+// close to identical to before this control existed.
+inline int BOARD_HUE = 220;   // 0-359, wraps, always a multiple of 5 (see round5)
+inline int BOARD_SAT = 35;    // 0-100, clamped, always a multiple of 5
+inline int BOARD_VAL = 60;    // 0-100, clamped, always a multiple of 5
+
+inline SDL_Color hsv_to_rgb(int h, int s, int v) {
+    float H = (float)(((h % 360) + 360) % 360);
+    float S = (float)std::max(0, std::min(100, s)) / 100.0f;
+    float V = (float)std::max(0, std::min(100, v)) / 100.0f;
+    float C = V * S;
+    float X = C * (1.0f - std::fabs(std::fmod(H / 60.0f, 2.0f) - 1.0f));
+    float m = V - C;
+    float r = 0, g = 0, b = 0;
+    if      (H <  60) { r = C; g = X; b = 0; }
+    else if (H < 120) { r = X; g = C; b = 0; }
+    else if (H < 180) { r = 0; g = C; b = X; }
+    else if (H < 240) { r = 0; g = X; b = C; }
+    else if (H < 300) { r = X; g = 0; b = C; }
+    else              { r = C; g = 0; b = X; }
+    return SDL_Color{
+        (Uint8)std::lround((r + m) * 255.0f),
+        (Uint8)std::lround((g + m) * 255.0f),
+        (Uint8)std::lround((b + m) * 255.0f),
+        255
+    };
+}
+
+// BOARD_ANALYSIS keeps the same hue and saturation as BOARD, just brighter —
+// the same "clearly related, but distinguishable" relationship the original
+// hard-coded pair had. Computed straight from the HSV defaults above, so
+// there's no separate RGB literal to keep in sync by hand.
+inline SDL_Color BOARD           = hsv_to_rgb(BOARD_HUE, BOARD_SAT, BOARD_VAL);
+inline SDL_Color BOARD_ANALYSIS  = hsv_to_rgb(BOARD_HUE, BOARD_SAT, std::min(100, BOARD_VAL + 10));
+
+inline void apply_board_hsv() {
+    BOARD          = hsv_to_rgb(BOARD_HUE, BOARD_SAT, BOARD_VAL);
+    BOARD_ANALYSIS = hsv_to_rgb(BOARD_HUE, BOARD_SAT, std::min(100, BOARD_VAL + 10));
+}
+
+// Nearest multiple of 5, for v >= 0 (both callers below clamp/wrap to a
+// non-negative range first).
+inline int round5(int v) { return ((v + 2) / 5) * 5; }
+
+// Locked to multiples of 5 — the DISPLAY settings rows step by 5, and snapping
+// here (rather than just relying on 5-at-a-time stepping from a multiple-of-5
+// default) also catches a hand-edited settings.txt landing off the grid.
+inline void set_board_hue(int h) {
+    h = ((h % 360) + 360) % 360;
+    BOARD_HUE = round5(h) % 360;   // round5(359) rolls over to 360 -> wrap to 0
+    apply_board_hsv();
+}
+inline void set_board_sat(int s) { BOARD_SAT = round5(std::max(0, std::min(100, s))); apply_board_hsv(); }
+inline void set_board_val(int v) { BOARD_VAL = round5(std::max(0, std::min(100, v))); apply_board_hsv(); }
 
 // ---------------------------------------------------------------------------
 // Stones

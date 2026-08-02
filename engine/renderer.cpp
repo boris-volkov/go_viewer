@@ -1273,6 +1273,28 @@ bool Renderer::match_menu_cell_at(const MatchMenu& menu, int mx, int my,
     return true;
 }
 
+int Renderer::match_menu_stepper_zone(const MatchMenu& menu, int row, int mx, int my) const {
+    MatchMenuLayout L = match_menu_layout(menu);
+    if (L.display_col < 0) return -1;
+    int scale = L.scale;
+    int x  = L.hpad + L.display_col * L.col_w;
+    int y  = L.col_ty[L.display_col] + row * L.line_h;
+    int cx = x + (scale >= 3 ? 14 : 10);
+    int lx = cx + text_width_px("[999]", scale) + scale * 3;
+    int bx = lx + text_width_px("BOARD HUE", scale) + scale * 6;
+    int bw = text_width_px("[-]", scale);
+    int px = bx + bw + scale * 3;
+    int pw = text_width_px("[+]", scale);
+
+    // Full row height, not just the glyph height — same "no dead gaps" rule
+    // match_menu_cell_at uses.
+    int top = y - L.line_gap / 2;
+    if (my < top || my >= top + L.line_h) return -1;
+    if (mx >= bx && mx < bx + bw) return 0;   // [-]
+    if (mx >= px && mx < px + pw) return 1;   // [+]
+    return -1;
+}
+
 void Renderer::draw_match_menu(const MatchMenu& menu) {
     int sw, sh;
     SDL_GetRendererOutputSize(sdl, &sw, &sh);
@@ -1302,11 +1324,11 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
     // L1 mode toggle is gone: OGS and KataGo settings are separate screens off the
     // popup menu now, so there is no hidden hotkey to advertise.
     if (menu.ingame)
-        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   " GLYPH_PS_CIRCLE "=CLOSE", Palette::TEXT_DIM);
+        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   L1/R1=ADJUST   DPAD=NAVIGATE   " GLYPH_PS_CIRCLE "=CLOSE", Palette::TEXT_DIM);
     else if (menu.katago_mode)
         draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=SELECT   DPAD=NAVIGATE   OPT=CLOSE", Palette::TEXT_DIM);
     else
-        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   DPAD=NAVIGATE   OPT=CLOSE", Palette::TEXT_DIM);
+        draw_text(hpad, ty, scale, GLYPH_PS_CROSS "=TOGGLE   L1/R1=ADJUST   DPAD=NAVIGATE   OPT=CLOSE", Palette::TEXT_DIM);
     ty += th + line_gap * 4;
 
     int col_ty[3] = {L.col_ty[0], L.col_ty[1], L.col_ty[2]};
@@ -1394,6 +1416,41 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
         draw_check(display_col, 3, display_labels[3], menu.square_sel);
         draw_check(display_col, 4, display_labels[4], menu.square_grid_sel);
         draw_check(display_col, 5, display_labels[5], menu.territory_sel, !menu.territory_available);
+
+        // Board colour: HUE/SAT/VAL as a bracketed number in the same slot draw_check
+        // uses for [X]/[ ], followed by dedicated [-]/[+] buttons — a mouse-clickable
+        // pair, since L1/R1 (and their keyboard mirrors) aren't discoverable from the
+        // screen alone and right-click is already "close menu" on this screen. One
+        // shared swatch to the right shows the colour those three values actually
+        // produce — a swatch per row was redundant since all three control the same
+        // single colour.
+        int stepper_bx = 0;   // x of [-] on the last row drawn; same for all three
+        auto draw_stepper = [&](int row, const char* label, int value) {
+            int x = hpad + display_col * col_w;
+            int y = col_ty[display_col] + row * line_h;
+            bool focused = (menu.focus_col == display_col && menu.focus_row == row);
+            draw_text(x, y, scale, focused ? "*" : " ", focused ? Palette::ACCENT : Palette::TEXT_DIM);
+            int cx = x + (scale >= 3 ? 14 : 10);
+            char buf[8];
+            snprintf(buf, sizeof(buf), "[%d]", value);
+            draw_text(cx, y, scale, buf, focused ? Palette::ACCENT : Palette::TEXT_WHITE);
+            int lx = cx + text_width_px("[999]", scale) + scale * 3;
+            draw_text(lx, y, scale, label, focused ? Palette::ACCENT : Palette::TEXT_DIM);
+            int bx = lx + text_width_px("BOARD HUE", scale) + scale * 6;
+            draw_text(bx, y, scale, "[-]", focused ? Palette::ACCENT : Palette::TEXT_WHITE);
+            int px = bx + text_width_px("[-]", scale) + scale * 3;
+            draw_text(px, y, scale, "[+]", focused ? Palette::ACCENT : Palette::TEXT_WHITE);
+            stepper_bx = bx;
+        };
+        draw_stepper(6, "BOARD HUE", Palette::BOARD_HUE);
+        draw_stepper(7, "BOARD SAT", Palette::BOARD_SAT);
+        draw_stepper(8, "BOARD VAL", Palette::BOARD_VAL);
+
+        int stepper_px = stepper_bx + text_width_px("[-]", scale) + scale * 3;   // [+] start, same formula as draw_stepper
+        int swatch_x    = stepper_px + text_width_px("[+]", scale) + scale * 6;
+        int swatch_top  = col_ty[display_col] + 6 * line_h;
+        int swatch_size = 2 * line_h + th;   // spans row 6's top to row 8's text bottom
+        draw_color_swatch(swatch_x, swatch_top, swatch_size, Palette::BOARD, Palette::TEXT_DIM);
     }
 
     // ── Controls reference — fills the otherwise-unused bottom of the menu ──────
@@ -1440,9 +1497,11 @@ void Renderer::draw_match_menu(const MatchMenu& menu) {
         int block_h  = (max_rows + 1) * line_h + line_gap * 2;  // +1 for column headers
         int cy_top   = sh - block_h - hpad / 2;
 
-        // Longest option column above is STRENGTH (header + 8 radio rows); skip the
-        // reference entirely rather than draw over it when the window is too short.
-        int options_bottom = ty + (line_h + line_gap) + 8 * line_h + line_gap * 2;
+        // Longest option column above is DISPLAY (header + 9 rows, since the board
+        // HUE/SAT/VAL steppers were added) — must track DISPLAY_ROWS in main.cpp's
+        // match_menu_cols(). Skip the reference entirely rather than draw over it
+        // when the window is too short.
+        int options_bottom = ty + (line_h + line_gap) + 9 * line_h + line_gap * 2;
         if (cy_top < options_bottom) { SDL_RenderPresent(sdl); return; }
 
         SDL_Color col_header = {160, 160, 160, 255};

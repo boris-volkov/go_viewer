@@ -277,6 +277,15 @@ public:
     bool match_menu_cell_at(const MatchMenu& menu, int mx, int my,
                             int& col, int& row) const;
 
+    // Which part of a BOARD HUE/SAT/VAL row (DISPLAY column, rows 6-8) a screen
+    // point falls in: -1 = not on either button, 0 = [-], 1 = [+]. `row` must
+    // already be known to be one of those three (see match_menu_hit) — this
+    // only computes button geometry, it doesn't validate the row itself.
+    // Recomputes the same x-offsets draw_match_menu's draw_stepper uses; the
+    // two must stay in sync by hand, same as match_menu_cell_at already is
+    // with the row/column layout it hit-tests.
+    int match_menu_stepper_zone(const MatchMenu& menu, int row, int mx, int my) const;
+
     // START popup action menu: dims the current backbuffer contents and draws a
     // centered command list on top. Draw-only (no present) — draw_board layers it
     // via the DrawState popup fields; list screens call it directly and present.
